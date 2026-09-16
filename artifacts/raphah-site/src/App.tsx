@@ -6,6 +6,8 @@ import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
+import Observability from '@/Observability';
+import { startTelemetry, track } from '@/lib/telemetry';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 
 const queryClient = new QueryClient();
@@ -255,10 +257,12 @@ function Conversation() {
   const consultationMutation = useCreateConsultation({
     mutation: {
       onSuccess: () => {
+        void track('consultation_success');
         setServerError('');
         setSubmitted(true);
       },
       onError: () => {
+        void track('consultation_error');
         setServerError('We could not send that just now. Please try again in a moment.');
       },
     },
@@ -274,6 +278,7 @@ function Conversation() {
     setErrors(next);
     setServerError('');
     if (Object.keys(next).length === 0) {
+      void track('consultation_submit', { timing: form.timing });
       consultationMutation.mutate({
         data: {
           fullName: form.name.trim(),
@@ -312,8 +317,14 @@ function Home() {
   return <div className="site-shell noise"><Header /><main><Hero /><Friction /><Approach /><Focus /><Principles /><Conversation /></main><Footer /></div>;
 }
 
+function ObservabilityRoute() {
+  const [, navigate] = useLocation();
+  return <Observability onBack={() => navigate('/')} />;
+}
+
 function Router() {
-  return <RoutedErrorBoundary><Switch><Route path="/" component={Home} /><Route component={NotFound} /></Switch></RoutedErrorBoundary>;
+  useEffect(() => startTelemetry(), []);
+  return <RoutedErrorBoundary><Switch><Route path="/" component={Home} /><Route path="/admin/observability" component={ObservabilityRoute} /><Route component={NotFound} /></Switch></RoutedErrorBoundary>;
 }
 
 function RoutedErrorBoundary({ children }: { children: ReactNode }) {
