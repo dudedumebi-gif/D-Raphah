@@ -2,26 +2,42 @@ import { supabase } from './supabase';
 
 const sessionKey = 'raphah-observability-session';
 const sessionId = (() => {
-  const existing = sessionStorage.getItem(sessionKey);
-  if (existing) return existing;
-  const next = crypto.randomUUID();
-  sessionStorage.setItem(sessionKey, next);
-  return next;
+  try {
+    const existing = sessionStorage.getItem(sessionKey);
+    if (existing) return existing;
+    const next = crypto.randomUUID();
+    sessionStorage.setItem(sessionKey, next);
+    return next;
+  } catch {
+    return crypto.randomUUID();
+  }
 })();
+const queued: Array<Record<string, unknown>> = [];
+let flushTimer: number | undefined;
+
+async function flush() {
+  if (!queued.length) return;
+  const batch = queued.splice(0, 20);
+  const { error } = await supabase.from('telemetry_events').insert(batch);
+  if (error && batch.length && queued.length < 100) queued.unshift(...batch);
+}
 
 export async function track(eventName: string, eventData: Record<string, unknown> = {}) {
+  if (!/^[a-z][a-z0-9_]{0,79}$/.test(eventName)) return;
+  const safeData = Object.fromEntries(Object.entries(eventData).filter(([key, value]) => key.length <= 50 && ['string', 'number', 'boolean'].includes(typeof value)).slice(0, 20));
   const payload = {
     session_id: sessionId,
     event_name: eventName,
     route: window.location.pathname,
-    event_data: eventData,
+    event_data: safeData,
     viewport_width: window.innerWidth,
     viewport_height: window.innerHeight,
     user_agent: navigator.userAgent.slice(0, 500),
     referrer: document.referrer.slice(0, 500),
   };
-  const { error } = await supabase.from('telemetry_events').insert(payload);
-  if (error && import.meta.env.DEV) console.warn('[v0] telemetry insert failed', error.message);
+  queued.push(payload);
+  if (!flushTimer) flushTimer = window.setTimeout(() => { flushTimer = undefined; void flush(); }, 250);
+  if (queued.length >= 20) void flush();
 }
 
 export function startTelemetry() {
@@ -43,5 +59,12 @@ export function startTelemetry() {
       observer.observe({ type, buffered: true } as PerformanceObserverInit);
     } catch { /* Browser may not support this observer. */ }
   }
+  try {
+    const paintObserver = new PerformanceObserver((list) => {
+      const entry = list.getEntries().find((item) => item.name === 'first-contentful-paint');
+      if (entry && !seen.has('fcp')) { seen.add('fcp'); void track('fcp', { value: entry.startTime }); }
+    });
+    paintObserver.observe({ type: 'paint', buffered: true });
+  } catch { /* Browser may not support paint timing. */ }
   return () => undefined;
 }

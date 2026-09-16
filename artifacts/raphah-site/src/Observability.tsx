@@ -3,10 +3,8 @@ import { Activity, ArrowLeft, Gauge, LogOut, RefreshCw, ShieldCheck, Users, Zap 
 import { supabase } from '@/lib/supabase';
 
 type EventRow = { id: string; created_at: string; event_name: string; route: string; event_data: Record<string, unknown> };
-const cards = [
-  ['LCP', '1.84s', 'Good', 'text-emerald-600'], ['INP', '128ms', 'Good', 'text-emerald-600'], ['CLS', '0.04', 'Good', 'text-emerald-600'], ['TTFB', '242ms', 'Needs attention', 'text-amber-600'],
-  ['Page views', '—', 'Awaiting traffic', 'text-muted-foreground'], ['Error rate', '—', 'Awaiting traffic', 'text-muted-foreground'],
-];
+type Summary = { page_views: number; errors: number; consultation_starts: number; consultation_submits: number; consultation_successes: number; consultation_errors: number; lcp: number; inp: number; cls: number; ttfb: number; fcp: number };
+const emptySummary: Summary = { page_views: 0, errors: 0, consultation_starts: 0, consultation_submits: 0, consultation_successes: 0, consultation_errors: 0, lcp: 0, inp: 0, cls: 0, ttfb: 0, fcp: 0 };
 
 export default function Observability({ onBack }: { onBack: () => void }) {
   const [email, setEmail] = useState('');
@@ -14,6 +12,7 @@ export default function Observability({ onBack }: { onBack: () => void }) {
   const [user, setUser] = useState<{ email?: string } | null>(null);
   const [authorized, setAuthorized] = useState(false);
   const [events, setEvents] = useState<EventRow[]>([]);
+  const [summary, setSummary] = useState<Summary>(emptySummary);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const load = async () => {
@@ -24,12 +23,26 @@ export default function Observability({ onBack }: { onBack: () => void }) {
     const { data: admin } = await supabase.rpc('is_observability_admin');
     if (!admin) { setError('This account is not authorized for observability.'); setLoading(false); return; }
     setAuthorized(true);
-    const { data } = await supabase.from('telemetry_events').select('id,created_at,event_name,route,event_data').order('created_at', { ascending: false }).limit(100);
-    setEvents((data ?? []) as EventRow[]);
+    const [{ data: eventData, error: eventsError }, { data: summaryData, error: summaryError }] = await Promise.all([
+      supabase.from('telemetry_events').select('id,created_at,event_name,route,event_data').order('created_at', { ascending: false }).limit(100),
+      supabase.rpc('observability_summary'),
+    ]);
+    if (eventsError || summaryError) { setError('Observability data is temporarily unavailable.'); setLoading(false); return; }
+    setEvents((eventData ?? []) as EventRow[]);
+    setSummary({ ...emptySummary, ...(summaryData as Partial<Summary> | null) });
     setLoading(false);
   };
   useEffect(() => { void load(); }, []);
   const counts = useMemo(() => events.reduce<Record<string, number>>((acc, event) => ({ ...acc, [event.event_name]: (acc[event.event_name] ?? 0) + 1 }), {}), [events]);
+  const cards = [
+    ['LCP', summary.lcp ? `${(summary.lcp / 1000).toFixed(2)}s` : '—', summary.lcp && summary.lcp <= 2500 ? 'Good' : 'Awaiting traffic', summary.lcp && summary.lcp <= 2500 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['INP', summary.inp ? `${Math.round(summary.inp)}ms` : '—', summary.inp && summary.inp <= 200 ? 'Good' : 'Awaiting traffic', summary.inp && summary.inp <= 200 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['CLS', summary.cls ? summary.cls.toFixed(3) : '—', summary.cls && summary.cls <= 0.1 ? 'Good' : 'Awaiting traffic', summary.cls && summary.cls <= 0.1 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['TTFB', summary.ttfb ? `${Math.round(summary.ttfb)}ms` : '—', summary.ttfb && summary.ttfb <= 800 ? 'Good' : 'Awaiting traffic', summary.ttfb && summary.ttfb <= 800 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['FCP', summary.fcp ? `${(summary.fcp / 1000).toFixed(2)}s` : '—', summary.fcp && summary.fcp <= 1800 ? 'Good' : 'Awaiting traffic', summary.fcp && summary.fcp <= 1800 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['Page views', summary.page_views.toLocaleString(), 'Last 30 days', 'text-muted-foreground'],
+    ['Error rate', summary.page_views ? `${((summary.errors / summary.page_views) * 100).toFixed(2)}%` : '—', summary.page_views ? `${summary.errors} errors · Last 30 days` : 'Awaiting traffic', 'text-muted-foreground'],
+  ];
   const signIn = async (event: FormEvent) => { event.preventDefault(); setError(''); const result = await supabase.auth.signInWithPassword({ email, password }); if (result.error) setError('Invalid email or password.'); else await load(); };
   const signOut = async () => { await supabase.auth.signOut(); setUser(null); setAuthorized(false); };
   if (loading) return <main className="min-h-screen bg-[#f6f7f5] p-8 text-muted-foreground">Loading observability…</main>;
