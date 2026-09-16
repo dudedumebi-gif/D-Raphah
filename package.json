@@ -1,0 +1,9 @@
+{
+  "name": "d-raphah-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --filter lead-engine build && pnpm --filter delivery-tool build",
+    "test": "pnpm --filter lead-engine test && pnpm --filter delivery-tool test"
+  }
+}
