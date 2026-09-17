@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Raphah.io"
+description = "A client-facing advisory website for Raphah.io, helping owner-led businesses uncover practical AI and business systems opportunities and request a consultation."
+version = "1.0.0"
+id = "artifacts/raphah-site"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20334
+
+[services.development]
+run = "pnpm --filter @workspace/raphah-site run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/raphah-site", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/raphah-site/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20334"
+BASE_PATH = "/"
