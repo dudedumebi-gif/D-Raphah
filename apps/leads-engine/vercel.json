@@ -1,7 +1,7 @@
 {
   "framework": null,
-  "installCommand": "npm install --no-audit --no-fund",
-  "buildCommand": "npm exec --yes --package=vite@7.3.2 --package=@vitejs/plugin-react@5.0.4 vite build",
+  "installCommand": "npm install react@19.1.0 react-dom@19.1.0 vite@7.3.2 @vitejs/plugin-react@5.0.4 typescript@5.9.3 --no-audit --no-fund",
+  "buildCommand": "npx vite build",
   "outputDirectory": "dist",
   "cleanUrls": true
 }
