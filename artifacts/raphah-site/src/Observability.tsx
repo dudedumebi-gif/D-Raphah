@@ -1,0 +1,51 @@
+import { type FormEvent, useEffect, useMemo, useState } from 'react';
+import { Activity, ArrowLeft, Gauge, LogOut, RefreshCw, ShieldCheck, Users, Zap } from 'lucide-react';
+import { supabase } from '@/lib/supabase';
+
+type EventRow = { id: string; created_at: string; event_name: string; route: string; event_data: Record<string, unknown> };
+type Summary = { page_views: number; errors: number; consultation_starts: number; consultation_submits: number; consultation_successes: number; consultation_errors: number; lcp: number; inp: number; cls: number; ttfb: number; fcp: number };
+const emptySummary: Summary = { page_views: 0, errors: 0, consultation_starts: 0, consultation_submits: 0, consultation_successes: 0, consultation_errors: 0, lcp: 0, inp: 0, cls: 0, ttfb: 0, fcp: 0 };
+
+export default function Observability({ onBack }: { onBack: () => void }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [user, setUser] = useState<{ email?: string } | null>(null);
+  const [authorized, setAuthorized] = useState(false);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [summary, setSummary] = useState<Summary>(emptySummary);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const load = async () => {
+    setLoading(true);
+    const { data: session } = await supabase.auth.getSession();
+    if (!session.session?.user) { setLoading(false); return; }
+    setUser(session.session.user);
+    const { data: admin } = await supabase.rpc('is_observability_admin');
+    if (!admin) { setError('This account is not authorized for observability.'); setLoading(false); return; }
+    setAuthorized(true);
+    const [{ data: eventData, error: eventsError }, { data: summaryData, error: summaryError }] = await Promise.all([
+      supabase.from('telemetry_events').select('id,created_at,event_name,route,event_data').order('created_at', { ascending: false }).limit(100),
+      supabase.rpc('observability_summary'),
+    ]);
+    if (eventsError || summaryError) { setError('Observability data is temporarily unavailable.'); setLoading(false); return; }
+    setEvents((eventData ?? []) as EventRow[]);
+    setSummary({ ...emptySummary, ...(summaryData as Partial<Summary> | null) });
+    setLoading(false);
+  };
+  useEffect(() => { void load(); }, []);
+  const counts = useMemo(() => events.reduce<Record<string, number>>((acc, event) => ({ ...acc, [event.event_name]: (acc[event.event_name] ?? 0) + 1 }), {}), [events]);
+  const cards = [
+    ['LCP', summary.lcp ? `${(summary.lcp / 1000).toFixed(2)}s` : '—', summary.lcp && summary.lcp <= 2500 ? 'Good' : 'Awaiting traffic', summary.lcp && summary.lcp <= 2500 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['INP', summary.inp ? `${Math.round(summary.inp)}ms` : '—', summary.inp && summary.inp <= 200 ? 'Good' : 'Awaiting traffic', summary.inp && summary.inp <= 200 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['CLS', summary.cls ? summary.cls.toFixed(3) : '—', summary.cls && summary.cls <= 0.1 ? 'Good' : 'Awaiting traffic', summary.cls && summary.cls <= 0.1 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['TTFB', summary.ttfb ? `${Math.round(summary.ttfb)}ms` : '—', summary.ttfb && summary.ttfb <= 800 ? 'Good' : 'Awaiting traffic', summary.ttfb && summary.ttfb <= 800 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['FCP', summary.fcp ? `${(summary.fcp / 1000).toFixed(2)}s` : '—', summary.fcp && summary.fcp <= 1800 ? 'Good' : 'Awaiting traffic', summary.fcp && summary.fcp <= 1800 ? 'text-emerald-600' : 'text-muted-foreground'],
+    ['Page views', summary.page_views.toLocaleString(), 'Last 30 days', 'text-muted-foreground'],
+    ['Error rate', summary.page_views ? `${((summary.errors / summary.page_views) * 100).toFixed(2)}%` : '—', summary.page_views ? `${summary.errors} errors · Last 30 days` : 'Awaiting traffic', 'text-muted-foreground'],
+  ];
+  const signIn = async (event: FormEvent) => { event.preventDefault(); setError(''); const result = await supabase.auth.signInWithPassword({ email, password }); if (result.error) setError('Invalid email or password.'); else await load(); };
+  const signOut = async () => { await supabase.auth.signOut(); setUser(null); setAuthorized(false); };
+  if (loading) return <main className="min-h-screen bg-[#f6f7f5] p-8 text-muted-foreground">Loading observability…</main>;
+  if (!user || !authorized) return <main className="min-h-screen bg-[#f6f7f5] px-6 py-12"><div className="mx-auto max-w-md rounded-2xl border bg-white p-8 shadow-sm"><button onClick={onBack} className="mb-10 flex items-center gap-2 text-sm text-muted-foreground"><ArrowLeft size={16}/> Back to raphah.io</button><div className="mb-8"><ShieldCheck className="mb-5 text-primary"/><p className="eyebrow">Private workspace</p><h1 className="mt-3 font-display text-4xl">Observability login</h1><p className="mt-3 text-muted-foreground">Sign in with an allowlisted admin account.</p></div><form onSubmit={signIn} className="space-y-4"><label className="block text-sm font-medium">Email<input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="mt-2 w-full rounded-lg border px-3 py-3" /></label><label className="block text-sm font-medium">Password<input required type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-2 w-full rounded-lg border px-3 py-3" /></label>{error && <p role="alert" className="text-sm text-red-600">{error}</p>}<button className="w-full rounded-lg bg-primary px-4 py-3 font-semibold text-primary-foreground">Sign in</button></form></div></main>;
+  return <main className="min-h-screen bg-[#f6f7f5]"><header className="border-b bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5"><div><p className="eyebrow">Raphah / observability</p><h1 className="font-display text-3xl">Experience health</h1></div><div className="flex items-center gap-3"><button onClick={() => void load()} className="rounded-lg border p-2" aria-label="Refresh"><RefreshCw size={17}/></button><button onClick={signOut} className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><LogOut size={16}/> Sign out</button></div></div></header><div className="mx-auto max-w-7xl space-y-8 px-6 py-8"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-emerald-100 px-3 py-1 text-sm text-emerald-800">Live collection</span><span className="text-sm text-muted-foreground">Last 100 events · {user.email}</span></div><section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{cards.map(([label, value, status, color]) => <article key={label} className="rounded-2xl border bg-white p-5 shadow-sm"><div className="mb-8 flex items-center justify-between"><span className="text-sm text-muted-foreground">{label}</span><Gauge size={17} className="text-muted-foreground"/></div><p className="font-display text-3xl">{value}</p><p className={`mt-2 text-sm ${color}`}>{status}</p></article>)}</section><section className="grid gap-6 lg:grid-cols-[1.5fr_1fr]"><article className="rounded-2xl border bg-white p-6 shadow-sm"><div className="mb-6 flex items-center justify-between"><div><p className="eyebrow">Signal inventory</p><h2 className="mt-2 font-display text-2xl">Collected events</h2></div><Activity className="text-primary"/></div><div className="space-y-3">{Object.entries(counts).slice(0, 8).map(([name, count]) => <div key={name} className="flex items-center justify-between rounded-lg bg-[#f6f7f5] px-4 py-3"><span className="text-sm">{name}</span><strong>{count}</strong></div>)}{!events.length && <p className="text-sm text-muted-foreground">No events yet. Browse the public site to start collecting signals.</p>}</div></article><article className="rounded-2xl border bg-[#17231f] p-6 text-white shadow-sm"><Users className="mb-8 text-[#bde8d0]"/><p className="eyebrow text-[#bde8d0]">Next signal</p><h2 className="mt-3 font-display text-3xl">Form funnel</h2><p className="mt-3 text-sm leading-6 text-white/65">Consultation starts, field drop-off, validation errors, and successful submissions will appear here as traffic arrives.</p><div className="mt-8 flex items-center gap-2 text-sm text-[#bde8d0]"><Zap size={16}/> Instrumentation active</div></article></section><section className="rounded-2xl border bg-white p-6 shadow-sm"><h2 className="mb-5 font-display text-2xl">Recent telemetry</h2><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b text-muted-foreground"><th className="pb-3">Event</th><th className="pb-3">Route</th><th className="pb-3">Received</th></tr></thead><tbody>{events.slice(0, 12).map((event) => <tr key={event.id} className="border-b last:border-0"><td className="py-3 font-medium">{event.event_name}</td><td className="py-3 text-muted-foreground">{event.route}</td><td className="py-3 text-muted-foreground">{new Date(event.created_at).toLocaleString()}</td></tr>)}</tbody></table></div></section></div></main>;
+}
