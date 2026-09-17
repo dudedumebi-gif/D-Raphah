@@ -39,6 +39,7 @@ packages:
   - delivery-tool
   - website
   - artifacts/*
+  - packages/*
   - lib/*
   - lib/integrations/*
   - scripts

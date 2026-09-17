@@ -1,6 +1,16 @@
-export type SourceLifecycle = 'draft' | 'pending_approval' | 'active' | 'paused' | 'disabled';
+export type SourceLifecycle =
+  "draft" | "pending_approval" | "active" | "paused" | "disabled";
 
-export type CollectionMethod = 'api' | 'rss' | 'sitemap' | 'static_html' | 'rendered_html' | 'pdf' | 'csv' | 'email' | 'manual';
+export type CollectionMethod =
+  | "api"
+  | "rss"
+  | "sitemap"
+  | "static_html"
+  | "rendered_html"
+  | "pdf"
+  | "csv"
+  | "email"
+  | "manual";
 
 export interface SourcePolicy {
   businessPurpose: string;
@@ -36,7 +46,7 @@ export interface CrawlRun {
   id: string;
   sourceId: string;
   workspaceId: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped';
+  status: "pending" | "running" | "completed" | "failed" | "stopped";
   itemCount: number;
   bytesDownloaded: number;
   stopReason?: string;
@@ -59,24 +69,25 @@ export interface EvidenceArtifact {
 }
 
 export type OpportunityStage =
-  | 'detected'
-  | 'qualified'
-  | 'engaged'
-  | 'discovery'
-  | 'requirements_defined'
-  | 'proposal'
-  | 'won'
-  | 'lost'
-  | 'handed_off';
+  | "detected"
+  | "qualified"
+  | "engaged"
+  | "discovery"
+  | "requirements_defined"
+  | "proposal"
+  | "won"
+  | "lost"
+  | "handed_off";
 
-export type OpportunityType = 'public_signal' | 'inbound' | 'referral' | 'manual_capture';
+export type OpportunityType =
+  "public_signal" | "inbound" | "referral" | "manual_capture";
 
 export interface ScoreComponents {
-  problemFit: number;         // weight 25
-  offerFit: number;           // weight 20
-  urgencyTiming: number;      // weight 15
+  problemFit: number; // weight 25
+  offerFit: number; // weight 20
+  urgencyTiming: number; // weight 15
   organizationAuthority: number; // weight 15
-  budgetSignal: number;       // weight 10
+  budgetSignal: number; // weight 10
   relationshipProximity: number; // weight 10
   technicalAlignment: number; // weight 5
 }
@@ -99,7 +110,8 @@ export interface OpportunityScore {
   evaluatedAt: string;
 }
 
-export type OpportunityRouting = 'priority_review' | 'standard_review' | 'archived';
+export type OpportunityRouting =
+  "priority_review" | "standard_review" | "archived";
 
 export interface Opportunity {
   id: string;
@@ -126,19 +138,19 @@ export interface Stakeholder {
   organization: string;
   email?: string;
   phone?: string;
-  influence?: 'low' | 'medium' | 'high';
-  authority?: 'decision_maker' | 'influencer' | 'end_user';
+  influence?: "low" | "medium" | "high";
+  authority?: "decision_maker" | "influencer" | "end_user";
   attendance?: boolean;
 }
 
 export type OutreachDraftType =
-  | 'contextual_connection'
-  | 'referral_intro'
-  | 'explicit_request_response'
-  | 'website_contact'
-  | 'permission_email'
-  | 'discovery_call_agenda'
-  | 'audit_proposal_reminder';
+  | "contextual_connection"
+  | "referral_intro"
+  | "explicit_request_response"
+  | "website_contact"
+  | "permission_email"
+  | "discovery_call_agenda"
+  | "audit_proposal_reminder";
 
 export interface OutreachDraft {
   id: string;
@@ -148,7 +160,7 @@ export interface OutreachDraft {
   recipientContact: string;
   subject: string;
   body: string;
-  status: 'drafted' | 'approved' | 'sent' | 'rejected';
+  status: "drafted" | "approved" | "sent" | "rejected";
   approvedBy?: string;
   approvedAt?: string;
   suppressionChecked: boolean;
@@ -162,7 +174,8 @@ export interface SuppressionRecord {
   createdAt: string;
 }
 
-export type DiscoverySessionStatus = 'scheduled' | 'in_progress' | 'completed' | 'approved';
+export type DiscoverySessionStatus =
+  "scheduled" | "in_progress" | "completed" | "approved";
 
 export interface ProcessItem {
   id: string;
@@ -177,10 +190,10 @@ export interface ProcessItem {
 
 export interface AISuggestion {
   id: string;
-  type: 'requirement' | 'feature' | 'open_question' | 'contradiction';
+  type: "requirement" | "feature" | "open_question" | "contradiction";
   content: string;
   sourceExcerpt?: string;
-  validationStatus: 'pending' | 'accepted' | 'edited' | 'rejected';
+  validationStatus: "pending" | "accepted" | "edited" | "rejected";
   validatedBy?: string;
   validatedAt?: string;
 }
@@ -198,7 +211,12 @@ export interface DiscoverySession {
   painPoints: string[];
   constraints: string[];
   decisions: string[];
-  actions: Array<{ id: string; description: string; owner: string; dueDate: string }>;
+  actions: Array<{
+    id: string;
+    description: string;
+    owner: string;
+    dueDate: string;
+  }>;
   aiSuggestions: AISuggestion[];
   status: DiscoverySessionStatus;
   approvedBy?: string;
@@ -207,9 +225,10 @@ export interface DiscoverySession {
   updatedAt: string;
 }
 
-export type RequirementPriority = 'must' | 'should' | 'could' | 'wont';
+export type RequirementPriority = "must" | "should" | "could" | "wont";
 
-export type RequirementStatus = 'draft' | 'needs_clarification' | 'proposed' | 'validated' | 'rejected';
+export type RequirementStatus =
+  "draft" | "needs_clarification" | "proposed" | "validated" | "rejected";
 
 export interface Requirement {
   id: string;
@@ -244,7 +263,12 @@ export interface RequirementBaseline {
   requirements: Requirement[];
   features: FeatureCandidate[];
   constraints: Array<{ id: string; description: string; category: string }>;
-  risksAndAssumptions: Array<{ id: string; description: string; type: 'risk' | 'assumption'; impact: string }>;
+  risksAndAssumptions: Array<{
+    id: string;
+    description: string;
+    type: "risk" | "assumption";
+    impact: string;
+  }>;
   successMeasures: Array<{ id: string; metric: string; target: string }>;
   isFrozen: boolean;
   frozenBy?: string;
@@ -284,7 +308,7 @@ export interface ConstraintSnapshot {
 
 export interface RiskAssumptionSnapshot {
   description: string;
-  type: 'risk' | 'assumption';
+  type: "risk" | "assumption";
   impact: string;
 }
 
@@ -312,26 +336,7 @@ export interface OpenItemSnapshot {
   dueDate?: string;
 }
 
-export interface LeadEngineHandoffPackage {
-  schemaVersion: string;
-  packageId: string;
-  packageVersion: number;
-  opportunityId: string;
-  organization: OrganizationSnapshot;
-  stakeholders: StakeholderSnapshot[];
-  problemStatement: string;
-  currentState: CurrentStateSnapshot[];
-  requirementBaseline: RequirementBaselineSnapshot;
-  constraints: ConstraintSnapshot[];
-  risksAndAssumptions: RiskAssumptionSnapshot[];
-  successMeasures: SuccessMeasureSnapshot[];
-  commercialScope: CommercialSnapshot;
-  supportingArtifacts: ArtifactManifestItem[];
-  openItems: OpenItemSnapshot[];
-  approvedBy: string;
-  approvedAt: string;
-  manifestChecksum: string;
-}
+export type { LeadEngineHandoffPackage } from "@raphah/handoff-contract/handoff/v1";
 
 export interface CommandEnvelope<T = any> {
   commandId: string;
