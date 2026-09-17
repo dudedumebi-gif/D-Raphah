@@ -1,7 +1,8 @@
 {
   "framework": null,
   "buildCommand": "pnpm build",
-  "installCommand": "npm install --no-audit --no-fund",
+  "installCommand": "npm install --include=dev --no-audit --no-fund",
+  "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "cleanUrls": true
 }
