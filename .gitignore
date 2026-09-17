@@ -47,3 +47,11 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Build & Dependency outputs
+**/node_modules/
+**/dist/
+.cache/
+coverage/
+*.log
+.DS_Store

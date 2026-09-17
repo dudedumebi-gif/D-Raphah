@@ -53,4 +53,3 @@ export interface ConsultationRequest {
 export interface Error {
   error: string;
 }
-

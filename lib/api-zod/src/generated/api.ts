@@ -49,5 +49,3 @@ export const CreateConsultationResponse = zod.object({
   "timing": zod.string(),
   "createdAt": zod.coerce.date()
 })
-
-

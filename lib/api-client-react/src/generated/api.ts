@@ -219,4 +219,3 @@ export const useCreateConsultation = <TError = ErrorType<Error>,
       > => {
       return useMutation(getCreateConsultationMutationOptions(options));
     }
-
