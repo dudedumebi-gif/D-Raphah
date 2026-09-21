@@ -9,6 +9,7 @@ import NotFound from '@/pages/not-found';
 import Observability from '@/Observability';
 import { startTelemetry, track } from '@/lib/telemetry';
 import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
+import { Analytics } from '@vercel/analytics/react';
 
 const queryClient = new QueryClient();
 
@@ -333,7 +334,7 @@ function RoutedErrorBoundary({ children }: { children: ReactNode }) {
 }
 
 function App() {
-  return <QueryClientProvider client={queryClient}><TooltipProvider><WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}><Router /></WouterRouter><Toaster /></TooltipProvider></QueryClientProvider>;
+  return <QueryClientProvider client={queryClient}><TooltipProvider><WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}><Router /></WouterRouter><Toaster /></TooltipProvider><Analytics /></QueryClientProvider>;
 }
 
 export default App;
