@@ -13,6 +13,11 @@ COPY packages/handoff-contract ./packages/handoff-contract
 COPY apps/leads-engine/package.json ./apps/leads-engine/package.json
 RUN pnpm install --frozen-lockfile --filter @raphah/leads-engine-app...
 
+# The api/ handlers import @raphah/handoff-contract from its built dist/
+# (gitignored, so absent from a fresh checkout). Build it before typecheck,
+# which resolves the contract's dist types.
+RUN pnpm --filter @raphah/handoff-contract build
+
 COPY apps/leads-engine ./apps/leads-engine
 RUN pnpm --filter @raphah/leads-engine-app typecheck
 
@@ -29,6 +34,9 @@ RUN pnpm install --frozen-lockfile --prod --filter @raphah/leads-engine-app...
 
 COPY --from=build /repo/apps/leads-engine/api ./api
 COPY --from=build /repo/apps/leads-engine/server ./server
+# dist/ is gitignored, so the context copy of the contract above has no
+# built output — ship it from the build stage.
+COPY --from=build /repo/packages/handoff-contract/dist ./packages/handoff-contract/dist
 
 # Required at runtime (same names as the Vercel project):
 #   DATABASE_URL, HANDOFF_PRIVATE_KEY_PEM, FEEDBACK_* key material,
