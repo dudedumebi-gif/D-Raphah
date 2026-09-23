@@ -103,6 +103,10 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Workspace tests resolve @raphah/handoff-contract from its dist
+      # output; install alone does not build it.
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
       - run: pnpm --filter @raphah/leads-engine-app test
       - run: pnpm --filter @raphah/leads-engine-app typecheck
 
@@ -121,6 +125,10 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Workspace tests resolve @raphah/handoff-contract from its dist
+      # output; install alone does not build it.
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
       - run: pnpm --filter @raphah/delivery-factory-app test
       - run: pnpm --filter @raphah/delivery-factory-app typecheck
       - run: pnpm --filter @raphah/delivery-factory-app build
@@ -168,6 +176,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Contract package tests (schema fixtures)
         run: pnpm --filter @raphah/handoff-contract test
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
       - name: Lead Engine handoff emission tests
         run: pnpm --filter @raphah/leads-engine-app test tests/handoff.test.ts
       - name: Delivery Factory intake tests
@@ -188,5 +198,9 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Legacy lead-engine resolves @raphah/handoff-contract subpaths from
+      # its dist output; install alone does not build it.
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
       - run: pnpm --filter lead-engine test
       - run: pnpm --filter delivery-tool test
