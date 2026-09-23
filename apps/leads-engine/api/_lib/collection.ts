@@ -4,7 +4,7 @@ import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import { Readable } from "node:stream";
-import { canonicalizeUrl, contentHash, normalizeText } from "./domain";
+import { canonicalizeUrl, contentHash, normalizeText } from "./domain.js";
 
 export interface CollectionPolicy {
   allowedDomains: string[];

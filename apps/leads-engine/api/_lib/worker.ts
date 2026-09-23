@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { collectUrl, type CollectionPolicy } from "./collection";
+import { collectUrl, type CollectionPolicy } from "./collection.js";
 import {
   CriteriaSchema,
   detectSignals,
   evaluateGeography,
   retryDelaySeconds,
   scoreSignals,
-} from "./domain";
+} from "./domain.js";
 import { truncateToByteLength } from "@raphah/handoff-contract";
-import { createAdminClient } from "./neon";
-import { dispatchDueHandoffs, type SqlClient } from "./handoff";
-import { log, reportError } from "./telemetry";
+import { createAdminClient } from "./neon.js";
+import { dispatchDueHandoffs, type SqlClient } from "./handoff.js";
+import { log, reportError } from "./telemetry.js";
 
 type DatabaseClient = ReturnType<typeof createAdminClient>;
 

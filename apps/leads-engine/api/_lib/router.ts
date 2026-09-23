@@ -5,7 +5,7 @@ import {
   evaluateCanarySoak,
   percentile95,
   suggestCriteriaAdjustment,
-} from "./domain";
+} from "./domain.js";
 import {
   assertDatabaseReady,
   configurationStatus,
@@ -13,15 +13,15 @@ import {
   requireScheduler,
   requireRole,
   requireUserContext,
-} from "./neon";
-import { log, reportError, requestContext } from "./telemetry";
+} from "./neon.js";
+import { log, reportError, requestContext } from "./telemetry.js";
 import {
   buildHandoffPackage,
   enqueueHandoffOutbox,
   type SqlClient,
-} from "./handoff";
-import { ingestDeliveryFeedback } from "./feedback";
-import { enqueueCanary, runWorkerTick } from "./worker";
+} from "./handoff.js";
+import { ingestDeliveryFeedback } from "./feedback.js";
+import { enqueueCanary, runWorkerTick } from "./worker.js";
 
 const SourceInputSchema = z.object({
   name: z.string().min(2).max(160),
