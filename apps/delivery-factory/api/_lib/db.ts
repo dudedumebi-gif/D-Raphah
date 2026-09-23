@@ -130,6 +130,26 @@ export interface DeliveryDb {
     projectId: string | null;
     event: Record<string, unknown>;
   }): Promise<void>;
+  getMonitoringSnapshot(): Promise<MonitoringSnapshot>;
+}
+
+export interface MonitoringHandoff {
+  id: string;
+  idempotencyKey: string;
+  packageId: string;
+  packageVersion: number;
+  opportunityId: string;
+  organizationName: string;
+  status: string;
+  receivedAt: string;
+  projectId: string | null;
+  projectStage: string | null;
+}
+
+export interface MonitoringSnapshot {
+  recentHandoffs: MonitoringHandoff[];
+  feedbackOutbox: { pending: number; dispatching: number; failed: number; sent: number };
+  activeNonces: number;
 }
 
 const SEED_MILESTONES = [
@@ -357,6 +377,67 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
         insert into public.feedback_outbox(project_id, event)
         values (${input.projectId}::uuid, ${JSON.stringify(input.event)}::jsonb)
       `;
+    },
+
+    async getMonitoringSnapshot(): Promise<MonitoringSnapshot> {
+      const handoffs = (await client`
+        select i.id, i.idempotency_key,
+               (i.package->>'packageId') as package_id,
+               (i.package->>'packageVersion')::int as package_version,
+               (i.package->>'opportunityId') as opportunity_id,
+               (i.package->'organization'->>'name') as organization_name,
+               i.status, i.received_at,
+               p.id as project_id, p.current_stage as project_stage
+        from public.handoff_inbox i
+        left join public.delivery_projects p on p.inbox_id = i.id
+        order by i.received_at desc
+        limit 10
+      `) as unknown as Array<{
+        id: string;
+        idempotency_key: string;
+        package_id: string | null;
+        package_version: number | null;
+        opportunity_id: string | null;
+        organization_name: string | null;
+        status: string;
+        received_at: string | Date;
+        project_id: string | null;
+        project_stage: string | null;
+      }>;
+      const counts = (await client`
+        select status, count(*)::int as n
+        from public.feedback_outbox
+        group by status
+      `) as unknown as Array<{ status: string; n: number }>;
+      const byStatus: Record<string, number> = {};
+      for (const row of counts) byStatus[row.status] = row.n;
+      const nonceRows = (await client`
+        select count(*)::int as n from public.used_nonces where expires_at > now()
+      `) as unknown as Array<{ n: number }>;
+      return {
+        recentHandoffs: handoffs.map((h) => ({
+          id: h.id,
+          idempotencyKey: h.idempotency_key,
+          packageId: h.package_id ?? "",
+          packageVersion: h.package_version ?? 0,
+          opportunityId: h.opportunity_id ?? "",
+          organizationName: h.organization_name ?? "",
+          status: h.status,
+          receivedAt:
+            h.received_at instanceof Date
+              ? h.received_at.toISOString()
+              : String(h.received_at),
+          projectId: h.project_id,
+          projectStage: h.project_stage,
+        })),
+        feedbackOutbox: {
+          pending: byStatus.pending ?? 0,
+          dispatching: byStatus.dispatching ?? 0,
+          failed: byStatus.failed ?? 0,
+          sent: byStatus.sent ?? 0,
+        },
+        activeNonces: nonceRows[0]?.n ?? 0,
+      };
     },
   };
 }

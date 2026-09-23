@@ -8,6 +8,10 @@ import React, {
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import "./functionality.css";
+import "./workflows.css";
+import "./monitoring.css";
+import { WorkflowsSection } from "./workflows";
+import { MonitoringSection } from "./monitoring";
 
 type View =
   | "portfolio"
@@ -16,6 +20,8 @@ type View =
   | "gates"
   | "evidence"
   | "clients"
+  | "workflows"
+  | "monitoring"
   | "audit"
   | "operations";
 type ProjectStage =
@@ -111,6 +117,8 @@ const navItems: Array<{ id: View; label: string }> = [
   { id: "gates", label: "Delivery gates" },
   { id: "evidence", label: "Evidence library" },
   { id: "clients", label: "Client views" },
+  { id: "workflows", label: "⚙️ Automations" },
+  { id: "monitoring", label: "📡 Monitoring" },
 ];
 
 const viewTitles: Record<View, string> = {
@@ -120,6 +128,8 @@ const viewTitles: Record<View, string> = {
   gates: "Delivery gates",
   evidence: "Evidence library",
   clients: "Client views",
+  workflows: "Automation workflows",
+  monitoring: "Service monitoring",
   audit: "Audit explorer",
   operations: "Operations",
 };
@@ -387,6 +397,10 @@ function App() {
             onAdvance={advanceProject}
             onApproveGate={approveGate}
           />
+        ) : view === "workflows" ? (
+          <WorkflowsSection />
+        ) : view === "monitoring" ? (
+          <MonitoringSection />
         ) : (
           <WorkspaceView
             view={view}

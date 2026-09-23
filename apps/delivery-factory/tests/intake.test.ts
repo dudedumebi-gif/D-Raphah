@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 import { canonicalJsonStringify } from "@raphah/handoff-contract";
-import { handleIntake } from "../api/_lib/verify.js";
+import { handleIntake, readIntakeEnv } from "../api/_lib/verify.js";
 import { FakeDeliveryDb } from "./fake-db.js";
 import {
   intakeRequest,
   otherKeys,
   packageBase,
+  senderKeys,
   signTestPackage,
   testEnv,
   validRequirement,
@@ -337,5 +338,35 @@ describe("POST /api/intake", () => {
     request.method = "GET";
     const result = await handleIntake(request, db, testEnv());
     expect(result.status).toBe(405);
+  });
+});
+
+describe("readIntakeEnv", () => {
+  const OLD_ENV = { ...process.env };
+  afterEach(() => {
+    process.env = { ...OLD_ENV };
+  });
+
+  it("converts literal \\n sequences in the PEM to real newlines", () => {
+    // Vercel stores PEM blocks with literal backslash-n sequences.
+    const escaped = senderKeys.publicKeyPem.replace(/\n/g, "\\n");
+    expect(escaped).not.toContain("\n");
+    process.env.LEAD_ENGINE_PUBLIC_KEY_PEM = escaped;
+    const env = readIntakeEnv();
+    expect(env.publicKeyPem).toBe(senderKeys.publicKeyPem);
+    expect(env.publicKeyPem).toContain("\n");
+  });
+
+  it("leaves PEMs that already contain real newlines untouched", () => {
+    process.env.LEAD_ENGINE_PUBLIC_KEY_PEM = senderKeys.publicKeyPem;
+    const env = readIntakeEnv();
+    expect(env.publicKeyPem).toBe(senderKeys.publicKeyPem);
+  });
+
+  it("throws when the public key is missing", () => {
+    delete process.env.LEAD_ENGINE_PUBLIC_KEY_PEM;
+    expect(() => readIntakeEnv()).toThrow(
+      "Missing LEAD_ENGINE_PUBLIC_KEY_PEM environment variable",
+    );
   });
 });

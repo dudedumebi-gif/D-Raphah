@@ -5,6 +5,7 @@ import type {
   FeedbackEventRow,
   InboxRow,
   MilestoneRow,
+  MonitoringSnapshot,
   ProjectRow,
 } from "../api/_lib/db.js";
 import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
@@ -211,5 +212,35 @@ export class FakeDeliveryDb implements DeliveryDb {
     event: Record<string, unknown>;
   }): Promise<void> {
     this.events.push({ projectId: input.projectId, event: input.event });
+  }
+
+  async getMonitoringSnapshot(): Promise<MonitoringSnapshot> {
+    const recentHandoffs = [...this.inboxes.values()]
+      .sort((a, b) => b.received_at.localeCompare(a.received_at))
+      .slice(0, 10)
+      .map((inbox) => {
+        const project = [...this.projects.values()].find(
+          (p) => p.inbox_id === inbox.id,
+        );
+        const pkg = inbox.package as LeadEngineHandoffPackage;
+        return {
+          id: inbox.id,
+          idempotencyKey: inbox.idempotency_key,
+          packageId: pkg.packageId,
+          packageVersion: pkg.packageVersion,
+          opportunityId: pkg.opportunityId,
+          organizationName: pkg.organization.name,
+          status: inbox.status,
+          receivedAt: inbox.received_at,
+          projectId: project?.id ?? null,
+          projectStage: project?.current_stage ?? null,
+        };
+      });
+    const pending = this.events.length;
+    return {
+      recentHandoffs,
+      feedbackOutbox: { pending, dispatching: 0, failed: 0, sent: 0 },
+      activeNonces: this.nonces.size,
+    };
   }
 }
