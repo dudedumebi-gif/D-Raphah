@@ -56,7 +56,11 @@ export interface IntakeResult {
 }
 
 export function readIntakeEnv(): IntakeEnv {
-  const publicKeyPem = process.env.LEAD_ENGINE_PUBLIC_KEY_PEM;
+  const rawPublicKeyPem = process.env.LEAD_ENGINE_PUBLIC_KEY_PEM;
+  // Vercel stores PEM blocks with literal "\n" sequences; convert to real
+  // newlines so node:crypto can parse the key. Without this, every intake
+  // signature verification throws and all handoffs are rejected with 401.
+  const publicKeyPem = rawPublicKeyPem?.replace(/\\n/g, "\n");
   if (!publicKeyPem)
     throw new Error("Missing LEAD_ENGINE_PUBLIC_KEY_PEM environment variable");
   const allowedOrigins = (process.env.DELIVERY_ALLOWED_ORIGINS ?? "")

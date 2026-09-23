@@ -361,7 +361,7 @@ export async function dispatchDueHandoffs(
         update public.handoff_outbox
         set status = ${exhausted ? "failed" : "pending"},
             attempts = ${attempts},
-            next_attempt_at = now() + make_interval(mins => ${backoffMinutes}),
+            next_attempt_at = now() + (${backoffMinutes}::double precision * interval '1 minute'),
             last_error = ${message.slice(0, 2000)},
             updated_at = now()
         where id = ${row.id}::uuid

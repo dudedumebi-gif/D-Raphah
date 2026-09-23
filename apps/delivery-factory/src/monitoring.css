@@ -1,0 +1,259 @@
+/* ── Monitoring view (dark, matches workflows theme) ─────────────────────── */
+
+.mon-section {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 8px 4px 24px;
+  color: #e8eaf2;
+}
+
+.mon-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.mon-head h2 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  color: #e8eaf2;
+}
+
+.mon-head p {
+  margin: 0;
+  color: #9aa0b8;
+  font-size: 13px;
+  max-width: 560px;
+}
+
+.mon-head-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.mon-poll {
+  font: 500 11px "DM Mono", monospace;
+  color: #9aa0b8;
+}
+
+.mon-refresh {
+  background: #232839;
+  border: 1px solid #313a55;
+  color: #e8eaf2;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mon-refresh:hover {
+  border-color: #4a5578;
+}
+
+.mon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.mon-card {
+  background: #141824;
+  border: 1px solid #262c3f;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mon-card-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mon-card-top strong {
+  font-size: 14px;
+  color: #e8eaf2;
+}
+
+.mon-state {
+  margin-left: auto;
+  font: 600 10px "DM Mono", monospace;
+  letter-spacing: 0.08em;
+  color: #9aa0b8;
+}
+
+.mon-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.mon-dot.up { background: #34d399; box-shadow: 0 0 8px #34d39966; }
+.mon-dot.degraded { background: #fbbf24; box-shadow: 0 0 8px #fbbf2466; }
+.mon-dot.down { background: #f87171; box-shadow: 0 0 8px #f8717166; }
+.mon-dot.unknown,
+.mon-dot.loading { background: #6b7280; }
+
+.mon-detail {
+  font-size: 13px;
+  color: #c3c9dd;
+}
+
+.mon-meta {
+  display: flex;
+  gap: 14px;
+  font: 500 11px "DM Mono", monospace;
+  color: #9aa0b8;
+}
+
+.mon-url {
+  font: 400 11px "DM Mono", monospace;
+  color: #6b7194;
+  word-break: break-all;
+}
+
+.mon-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.mon-checks li.ok { color: #a7e8c9; }
+.mon-checks li.bad { color: #f3b8b8; }
+.mon-checks li.note { color: #9aa0b8; font-size: 12px; }
+.mon-checks li small { color: #9aa0b8; }
+
+.mon-queue {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.mon-queue div {
+  background: #1a2030;
+  border: 1px solid #262c3f;
+  border-radius: 8px;
+  padding: 10px 8px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mon-queue b {
+  font-size: 18px;
+  color: #e8eaf2;
+}
+
+.mon-queue span {
+  font-size: 10.5px;
+  color: #9aa0b8;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mon-queue div.bad b { color: #f87171; }
+
+.mon-panel {
+  background: #141824;
+  border: 1px solid #262c3f;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.mon-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.mon-panel-head h3 {
+  margin: 0;
+  font-size: 15px;
+  color: #e8eaf2;
+}
+
+.mon-empty {
+  color: #9aa0b8;
+  font-size: 13px;
+  padding: 18px 4px;
+}
+
+.mon-empty code {
+  font-family: "DM Mono", monospace;
+  color: #c3c9dd;
+}
+
+.mon-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.mon-table th {
+  text-align: left;
+  font: 600 10.5px "DM Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9aa0b8;
+  padding: 8px 10px;
+  border-bottom: 1px solid #262c3f;
+}
+
+.mon-table td {
+  padding: 10px;
+  border-bottom: 1px solid #1d2334;
+  color: #d4d9ea;
+  vertical-align: top;
+}
+
+.mon-table tr:last-child td {
+  border-bottom: none;
+}
+
+.mon-table code {
+  font-family: "DM Mono", monospace;
+  font-size: 12px;
+  color: #aeb6d4;
+}
+
+.mon-table small {
+  color: #9aa0b8;
+}
+
+.mon-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font: 600 11px "DM Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mon-pill.processed {
+  background: #134e3a;
+  color: #6ee7b7;
+}
+
+.mon-pill.received {
+  background: #3b2f63;
+  color: #c4b5fd;
+}
+
+.mon-pill.failed {
+  background: #5b2323;
+  color: #fca5a5;
+}
