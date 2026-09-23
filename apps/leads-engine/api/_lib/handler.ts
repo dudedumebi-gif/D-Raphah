@@ -2,7 +2,6 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleApiRequest } from "./router.js";
 
 export const functionConfig = {
-  maxDuration: 300,
 };
 
 type VercelRequest = IncomingMessage & { body?: unknown };
