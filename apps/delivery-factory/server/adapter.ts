@@ -8,8 +8,12 @@
  *
  * Routing mirrors Vercel file-system routing:
  *   api/health.ts              -> GET /api/health
- *   api/workflows/[id].ts      -> /api/workflows/:id
- *   api/workflows/[id]/runs.ts -> /api/workflows/:id/runs
+ *   api/workflows/[...path].ts -> /api/workflows/* (catch-all dispatcher;
+ *                                 req.query.path is the segment array)
+ *
+ * Underscore-prefixed directories (api/_lib, api/_workflows, api/_projects)
+ * are not routes — they hold shared code and per-path handlers invoked by
+ * the catch-all dispatchers.
  *
  * Vercel normally provides `req.query`; the adapter populates it from the
  * URL search params merged over the route params.
@@ -33,6 +37,7 @@ type Handler = (
 interface Route {
   pattern: RegExp;
   paramNames: string[];
+  catchAllNames: string[];
   file: string;
   specificity: number;
 }
@@ -47,7 +52,7 @@ function discover(dir: string): Route[] {
     for (const entry of readdirSync(current)) {
       const full = join(current, entry);
       if (statSync(full).isDirectory()) {
-        if (entry === "_lib") continue;
+        if (entry.startsWith("_")) continue;
         walk(full);
         continue;
       }
@@ -55,9 +60,16 @@ function discover(dir: string): Route[] {
       const rel = relative(dir, full).replace(/\.ts$/, "").split(sep).join("/");
       const parts = rel.split("/");
       const paramNames: string[] = [];
+      const catchAllNames: string[] = [];
       const regexParts: string[] = [];
       for (const part of parts) {
         if (part === "index") continue;
+        const catchAll = part.match(/^\[\.\.\.(.+)\]$/);
+        if (catchAll) {
+          catchAllNames.push(catchAll[1]);
+          regexParts.push("(.*)");
+          continue;
+        }
         const m = part.match(/^\[(.+)\]$/);
         if (m) {
           paramNames.push(m[1]);
@@ -69,6 +81,7 @@ function discover(dir: string): Route[] {
       routes.push({
         pattern: new RegExp(`^/api/${regexParts.join("/")}/?$`),
         paramNames,
+        catchAllNames,
         file: full,
         specificity: regexParts.join("/").length - paramNames.length * 10,
       });
@@ -129,9 +142,15 @@ async function main(): Promise<void> {
         const mod = (await import(pathToFileURL(route.file).href)) as {
           default: Handler;
         };
-        const params: Record<string, string> = {};
+        const params: Record<string, string | string[]> = {};
         route.paramNames.forEach((name, i) => {
           params[name] = decodeURIComponent(match[i + 1]);
+        });
+        route.catchAllNames.forEach((name, i) => {
+          params[name] = match[route.paramNames.length + i + 1]
+            .split("/")
+            .filter(Boolean)
+            .map(decodeURIComponent);
         });
         const query: Record<string, string | string[] | undefined> = {};
         url.searchParams.forEach((value, key) => {
