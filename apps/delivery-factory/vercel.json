@@ -1,7 +1,7 @@
 {
-  "framework": null,
-  "installCommand": "npm install react@19.1.0 react-dom@19.1.0 vite@7.3.2 @vitejs/plugin-react@5.0.4 typescript@5.9.3 --no-audit --no-fund",
-  "buildCommand": "npx vite build",
-  "outputDirectory": "dist",
-  "cleanUrls": true
+  "buildCommand": "pnpm --filter @raphah/handoff-contract build && vite build",
+  "cleanUrls": true,
+  "framework": "vite",
+  "installCommand": "pnpm install",
+  "outputDirectory": "dist"
 }

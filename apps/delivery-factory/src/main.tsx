@@ -513,8 +513,8 @@ function Portfolio({
           <p className="eyebrow">Integration health</p>
           <h3>Lead Engine handoff stream</h3>
           <p className="muted">
-            Awaiting configured authenticated endpoint. Product data remains
-            isolated.
+            Signed Lead Engine handoffs arrive at POST /api/intake (Ed25519 +
+            SHA-256 manifest). Product data remains isolated.
           </p>
         </div>
         <div className="stream">
