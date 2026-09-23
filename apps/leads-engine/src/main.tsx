@@ -20,6 +20,7 @@ import {
   type Session,
 } from "./api";
 import { Settings } from "./CriteriaSettings";
+import { JobLiveWindow } from "./JobLiveWindow";
 import "./styles.css";
 import "./functionality.css";
 
@@ -347,7 +348,13 @@ function Workspace({ session }: { session: Session }) {
             detail="Fetching sources, jobs, leads, and telemetry."
           />
         ) : (
-          <DashboardView view={view} data={data} mutate={mutate} />
+          <DashboardView
+            view={view}
+            data={data}
+            mutate={mutate}
+            session={session}
+            workspaceId={workspaceId}
+          />
         )}
       </main>
     </div>
@@ -358,13 +365,20 @@ function DashboardView({
   view,
   data,
   mutate,
+  session,
+  workspaceId,
 }: {
   view: View;
   data: BootstrapData;
   mutate: Mutate;
+  session: Session;
+  workspaceId: string;
 }) {
   if (view === "sources") return <Sources data={data} mutate={mutate} />;
-  if (view === "jobs") return <Jobs data={data} mutate={mutate} />;
+  if (view === "jobs")
+    return (
+      <Jobs data={data} mutate={mutate} session={session} workspaceId={workspaceId} />
+    );
   if (view === "leads") return <Leads data={data} mutate={mutate} />;
   if (view === "operations") return <Operations data={data} />;
   if (view === "audit") return <Audit data={data} />;
@@ -557,14 +571,25 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
   );
 }
 
-function Jobs({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
+function Jobs({
+  data,
+  mutate,
+  session,
+  workspaceId,
+}: {
+  data: BootstrapData;
+  mutate: Mutate;
+  session: Session;
+  workspaceId: string;
+}) {
   const activeSources = data.sources.filter(
     (source) => source.status === "active",
   );
+  const [liveJob, setLiveJob] = useState<JobRecord | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    await mutate(
+    const created = await mutate<{ data: JobRecord }>(
       "/api/v1/scrape-jobs",
       {
         method: "POST",
@@ -579,6 +604,7 @@ function Jobs({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
       },
       "Persistent scrape job queued.",
     );
+    if (created?.data?.id) setLiveJob(created.data);
   }
   return (
     <div className="content">
@@ -645,6 +671,13 @@ function Jobs({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
               </span>
               <span className="stage-action">
                 <time>{new Date(job.scheduled_for).toLocaleString()}</time>
+                <button
+                  className="row-action"
+                  onClick={() => setLiveJob(job)}
+                  title="Watch live scrape progress"
+                >
+                  Live
+                </button>
                 {["failed", "dead_letter", "cancelled"].includes(job.status) ? (
                   <button
                     className="row-action"
@@ -666,6 +699,14 @@ function Jobs({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
           ))}
         </div>
       </section>
+      {liveJob ? (
+        <JobLiveWindow
+          job={liveJob}
+          session={session}
+          workspaceId={workspaceId}
+          onClose={() => setLiveJob(null)}
+        />
+      ) : null}
     </div>
   );
 }

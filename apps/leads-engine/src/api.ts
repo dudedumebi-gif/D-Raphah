@@ -42,6 +42,40 @@ export async function apiRequest<T>(
   return payload as T;
 }
 
+export async function apiRequestText(
+  session: Session,
+  workspaceId: string,
+  path: string,
+): Promise<string> {
+  const headers = new Headers();
+  headers.set("authorization", `Bearer ${session.access_token}`);
+  headers.set("x-workspace-id", workspaceId);
+  headers.set("x-correlation-id", crypto.randomUUID());
+  headers.set("accept", "text/event-stream");
+  const response = await fetch(path, { headers });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message =
+      (payload as { error?: { message?: string } }).error?.message ??
+      `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+  return response.text();
+}
+
+/** Pollable SSE timeline for one scrape job (one-shot text/event-stream). */
+export function fetchJobEventsText(
+  session: Session,
+  workspaceId: string,
+  jobId: string,
+): Promise<string> {
+  return apiRequestText(
+    session,
+    workspaceId,
+    `/api/v1/scrape-jobs/${jobId}/events`,
+  );
+}
+
 export function cachedBootstrap(
   workspaceId: string,
   actorId: string,
