@@ -158,7 +158,7 @@ function App() {
   );
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [notice, setNotice] = useState(
-    "Workspace data is saved in this browser.",
+    "Portfolio data is sample data saved in this browser. Workflows & Monitoring reflect the live backend.",
   );
   const [projects, setProjects] = useStoredState(
     "raphah.delivery.projects.v1",
@@ -214,6 +214,21 @@ function App() {
         ...current,
       ].slice(0, 50),
     );
+  }
+
+  function resetDemoWorkspace() {
+    for (const key of [
+      "raphah.delivery.projects.v1",
+      "raphah.delivery.gates.v1",
+      "raphah.delivery.audit.v1",
+    ]) {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // Reload restores the seed data even if removal fails.
+      }
+    }
+    window.location.reload();
   }
 
   function changeView(nextView: View) {
@@ -385,7 +400,16 @@ function App() {
         </header>
         <div className="status-bar" role="status">
           <span className="status-dot" />
-          {notice}
+          <span className="pilot-badge">Pilot demo</span>
+          <span>{notice}</span>
+          <button
+            type="button"
+            className="status-action"
+            onClick={resetDemoWorkspace}
+            title="Clear the sample portfolio data from this browser and restore the seed data"
+          >
+            Reset demo workspace
+          </button>
         </div>
         {view === "portfolio" ? (
           <Portfolio
