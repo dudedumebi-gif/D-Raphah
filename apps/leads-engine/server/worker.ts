@@ -8,6 +8,7 @@ import {
   retryDelaySeconds,
   scoreSignals,
 } from "./domain";
+import { truncateToByteLength } from "@raphah/handoff-contract";
 import { createAdminClient } from "./neon";
 import { dispatchDueHandoffs, type SqlClient } from "./handoff";
 import { log, reportError } from "./telemetry";
@@ -145,10 +146,10 @@ async function persistEvidenceAndLead(
     byte_length: collected.bytesDownloaded,
     storage_bucket: "neon-postgres",
     storage_path: `${job.workspace_id}/${source.id}/${collected.contentHash}`,
-    raw_content: collected.rawContent.slice(0, 250_000),
+    raw_content: truncateToByteLength(collected.rawContent, 250_000),
     extracted_title: collected.extractedTitle,
     extracted_organization: collected.extractedOrganization,
-    extracted_text: collected.extractedText.slice(0, 100_000),
+    extracted_text: truncateToByteLength(collected.extractedText, 100_000),
     fetched_at: collected.fetchedAt,
     parser_version: "html-text-1.0.0",
     policy_version_id: policy.id,

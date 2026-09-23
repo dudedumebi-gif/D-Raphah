@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalizeUrl,
+  CriteriaSchema,
   detectSignals,
   evaluateCanarySoak,
   percentile95,
@@ -44,6 +45,35 @@ describe("collection policy", () => {
     expect(
       canonicalizeUrl("HTTPS://Example.com/process/?utm_source=x&b=2#top"),
     ).toBe("https://example.com/process?b=2");
+  });
+
+  it("sorts query parameters so equivalent URLs canonicalize identically", () => {
+    expect(canonicalizeUrl("https://example.com/p?b=2&a=1")).toBe(
+      canonicalizeUrl("https://example.com/p?a=1&b=2"),
+    );
+    expect(canonicalizeUrl("https://example.com/p?b=2&a=1")).toBe(
+      "https://example.com/p?a=1&b=2",
+    );
+  });
+});
+
+describe("criteria validation", () => {
+  it("rejects an employee minimum above the maximum", () => {
+    const result = CriteriaSchema.safeParse({
+      employeeMinimum: 100,
+      employeeMaximum: 50,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts the defaults and a coherent range", () => {
+    expect(CriteriaSchema.safeParse({}).success).toBe(true);
+    const parsed = CriteriaSchema.parse({
+      employeeMinimum: 10,
+      employeeMaximum: 10,
+    });
+    expect(parsed.employeeMinimum).toBe(10);
+    expect(parsed.employeeMaximum).toBe(10);
   });
 });
 

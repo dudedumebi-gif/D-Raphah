@@ -1,5 +1,9 @@
 import { lookup } from "node:dns/promises";
+import type { LookupAddress, LookupOptions } from "node:dns";
+import { Agent as HttpAgent, request as httpRequest } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { Readable } from "node:stream";
 import { canonicalizeUrl, contentHash, normalizeText } from "./domain";
 
 export interface CollectionPolicy {
@@ -108,11 +112,33 @@ function isPrivateAddress(address: string): boolean {
 }
 
 export async function assertPublicHost(hostname: string): Promise<void> {
+  await resolvePublicHost(hostname);
+}
+
+/** A DNS-resolved address that passed the public-host policy check. */
+export interface PinnedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+/**
+ * Resolves a hostname and enforces the public-host policy, returning the
+ * verified addresses. This is the single choke point for DNS: every outbound
+ * collection request pins to one of these addresses (see pinnedFetch), so a
+ * hostile DNS change between check and connect (DNS rebinding / TOCTOU)
+ * cannot redirect the connection to a private target.
+ */
+export async function resolvePublicHost(
+  hostname: string,
+): Promise<PinnedAddress[]> {
   if (
     ["localhost", "metadata.google.internal"].includes(hostname.toLowerCase())
   )
     throw new Error("Private destinations are prohibited");
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const addresses = (await lookup(hostname, {
+    all: true,
+    verbatim: true,
+  })) as PinnedAddress[];
   if (
     addresses.length === 0 ||
     addresses.some(({ address }) => isPrivateAddress(address))
@@ -121,7 +147,132 @@ export async function assertPublicHost(hostname: string): Promise<void> {
       "Destination resolves to a private, loopback, link-local, or reserved address",
     );
   }
+  return addresses;
 }
+
+/** Builds a node:http(s) `lookup` override that pins to one verified address. */
+function pinnedLookup(pinned: PinnedAddress) {
+  return (
+    _hostname: string,
+    options: LookupOptions,
+    callback: (
+      err: NodeJS.ErrnoException | null,
+      address: string | LookupAddress[],
+      family: number,
+    ) => void,
+  ): void => {
+    // Node's happy-eyeballs path (autoSelectFamily) calls lookup with
+    // { all: true } and expects an address array back.
+    if (options.all) {
+      callback(
+        null,
+        [{ address: pinned.address, family: pinned.family }],
+        pinned.family,
+      );
+    } else {
+      callback(null, pinned.address, pinned.family);
+    }
+  };
+}
+
+// Explicit agents: the pinned `lookup` override must reach net.connect, which
+// is not guaranteed through a replaced global agent (egress proxies, sandboxes).
+const pinnedHttpAgent = new HttpAgent({ keepAlive: false });
+const pinnedHttpsAgent = new HttpsAgent({ keepAlive: false });
+
+function toFetchHeaders(
+  raw: NodeJS.Dict<string | string[]>,
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (value === undefined) continue;
+    headers[name] = Array.isArray(value) ? value.join(", ") : value;
+  }
+  return headers;
+}
+
+/**
+ * Creates a fetch-compatible function whose connections are DNS-pinned:
+ * the hostname is resolved and policy-checked once per request, and the
+ * socket is forced to the verified address via a `lookup` override. The
+ * original hostname stays in the request (Host header and TLS SNI), so
+ * certificate verification is unaffected. Redirects are never followed
+ * automatically — the caller handles them (each hop re-resolves and
+ * re-validates).
+ */
+export function createPinnedFetcher(
+  resolver: (hostname: string) => Promise<PinnedAddress[]> = resolvePublicHost,
+): typeof fetch {
+  return (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url = new URL(
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+    );
+    if (!["http:", "https:"].includes(url.protocol))
+      throw new Error("Only HTTP(S) URLs are permitted");
+    const [pinned] = await resolver(url.hostname);
+    if (!pinned) throw new Error(`No verified address for ${url.hostname}`);
+
+    const headers: Record<string, string> = {};
+    const initHeaders = init?.headers;
+    if (initHeaders) {
+      if (initHeaders instanceof Headers) {
+        initHeaders.forEach((value, name) => {
+          headers[name] = value;
+        });
+      } else if (Array.isArray(initHeaders)) {
+        for (const [name, value] of initHeaders) headers[name] = value;
+      } else {
+        Object.assign(headers, initHeaders);
+      }
+    }
+    // Preserve the original host (virtual hosting, TLS SNI) while the
+    // connection itself goes to the pinned address via `lookup` below.
+    headers.host = url.host;
+
+    const requestFn = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const incoming = await new Promise<import("node:http").IncomingMessage>(
+      (resolve, reject) => {
+        const req = requestFn(
+          {
+            protocol: url.protocol,
+            hostname: url.hostname,
+            port: url.port ? Number(url.port) : undefined,
+            path: `${url.pathname}${url.search}`,
+            method: init?.method ?? "GET",
+            headers,
+            // Explicit agent so the pinned lookup override below reliably
+            // reaches the socket layer (a replaced global agent could bypass it).
+            agent: url.protocol === "https:" ? pinnedHttpsAgent : pinnedHttpAgent,
+            lookup: pinnedLookup(pinned),
+            signal: init?.signal as unknown as AbortSignal | undefined,
+          },
+          resolve,
+        );
+        req.on("error", reject);
+        req.end();
+      },
+    );
+    const status = incoming.statusCode ?? 500;
+    const body =
+      status === 204 || status === 304
+        ? null
+        : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>);
+    return new Response(body, {
+      status,
+      statusText: incoming.statusMessage ?? "",
+      headers: toFetchHeaders(incoming.headers),
+    });
+  }) as typeof fetch;
+}
+
+/**
+ * Default fetcher for collection: DNS-pinned (see createPinnedFetcher).
+ * Tests inject mocks through the `fetcher` parameter instead.
+ */
+export const pinnedFetch: typeof fetch = createPinnedFetcher();
 
 function domainAllowed(hostname: string, allowedDomains: string[]): boolean {
   const host = hostname.toLowerCase();
@@ -285,7 +436,7 @@ async function readBoundedBody(
 export async function collectUrl(
   rawUrl: string,
   policy: CollectionPolicy,
-  fetcher: typeof fetch = fetch,
+  fetcher: typeof fetch = pinnedFetch,
 ): Promise<CollectionResult> {
   if (
     !["static_html", "api", "rss", "sitemap"].includes(policy.collectionMethod)

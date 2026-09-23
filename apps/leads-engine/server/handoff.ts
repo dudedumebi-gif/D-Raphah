@@ -5,6 +5,7 @@ import {
   canonicalJsonStringify,
   loadKeysFromEnv,
   signPackage,
+  truncateToByteLength,
   type LeadEngineHandoffPackage,
 } from "@raphah/handoff-contract";
 
@@ -92,11 +93,14 @@ function isUuid(value: unknown): value is string {
 }
 
 function explanationSummary(explanation: unknown): string {
-  if (typeof explanation === "string") return explanation.slice(0, 600);
+  // Byte caps (not character caps): multibyte text is cut at a UTF-8
+  // boundary so stored evidence never exceeds the budget in bytes.
+  if (typeof explanation === "string")
+    return truncateToByteLength(explanation, 600);
   if (explanation && typeof explanation === "object") {
     const record = explanation as Record<string, unknown>;
     const summary = record.summary ?? record.explanation;
-    if (typeof summary === "string") return summary.slice(0, 600);
+    if (typeof summary === "string") return truncateToByteLength(summary, 600);
   }
   return "";
 }
@@ -192,7 +196,7 @@ export async function buildHandoffPackage(
       .map((signal) => ({
         processName: signal.code,
         owner: undefined,
-        painPoint: signal.excerpt.slice(0, 500),
+        painPoint: truncateToByteLength(signal.excerpt, 500),
       })),
     requirementBaseline: { version: 1, requirements: [], features: [] },
     constraints: [],
@@ -280,7 +284,8 @@ interface OutboxRow {
 /**
  * Drains due handoff_outbox rows and POSTs each signed package to the
  * Delivery Factory intake. Never throws: per-row failures are retried with
- * exponential backoff (2^attempts minutes, capped at 6h) and the row is marked
+ * exponential backoff (2^attempts minutes, capped at 6h, plus equal jitter)
+ * and the row is marked
  * failed after 10 attempts. When DELIVERY_INTAKE_URL is unset the rows are
  * left pending silently.
  */
@@ -344,10 +349,12 @@ export async function dispatchDueHandoffs(
     } catch (error) {
       const attempts = row.attempts + 1;
       const exhausted = attempts >= MAX_DISPATCH_ATTEMPTS;
-      const backoffMinutes = Math.min(
-        2 ** attempts,
-        MAX_BACKOFF_MINUTES,
-      );
+      const cappedBackoffMinutes = Math.min(2 ** attempts, MAX_BACKOFF_MINUTES);
+      // Equal jitter: half the capped backoff plus a uniform random half, so
+      // rows that fail together spread their retries instead of stampeding.
+      const backoffMinutes =
+        cappedBackoffMinutes / 2 +
+        Math.random() * (cappedBackoffMinutes / 2);
       const message =
         error instanceof Error ? error.message : String(error);
       await client`

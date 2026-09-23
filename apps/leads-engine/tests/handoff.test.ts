@@ -321,12 +321,13 @@ describe("dispatchDueHandoffs", () => {
         query.includes("next_attempt_at"),
     );
     expect(retryUpdate).toBeTruthy();
-    // status, attempts, backoff minutes, error message, id are bind params:
-    // attempts 0 -> 1, backoff 2^1 = 2 minutes, row stays pending.
+    // status, attempts, jittered backoff minutes, error message, id are bind params:
+    // attempts 0 -> 1, base backoff 2^1 = 2 minutes, equal jitter keeps it in [1, 2].
     const values = JSON.parse(retryUpdate!.split(" :: ")[1]) as unknown[];
     expect(values[0]).toBe("pending");
     expect(values[1]).toBe(1);
-    expect(values[2]).toBe(2);
+    expect(values[2]).toBeGreaterThanOrEqual(1);
+    expect(values[2]).toBeLessThanOrEqual(2);
     expect(
       captured.some((query) => query.includes("status = 'sent'")),
     ).toBe(false);
@@ -362,11 +363,13 @@ describe("dispatchDueHandoffs", () => {
         query.includes("next_attempt_at"),
     );
     expect(terminalUpdate).toBeTruthy();
-    // attempts 9 -> 10 (exhausted), backoff 2^10 capped at 360 minutes.
+    // attempts 9 -> 10 (exhausted), base backoff 2^10 capped at 360 minutes,
+    // equal jitter keeps it in [180, 360].
     const values = JSON.parse(terminalUpdate!.split(" :: ")[1]) as unknown[];
     expect(values[0]).toBe("failed");
     expect(values[1]).toBe(10);
-    expect(values[2]).toBe(360);
+    expect(values[2]).toBeGreaterThanOrEqual(180);
+    expect(values[2]).toBeLessThanOrEqual(360);
   });
 
   it("leaves rows pending silently when no intake URL is configured", async () => {

@@ -20,6 +20,14 @@ export const CriteriaSchema = z.object({
       centreLongitude: z.number().min(-180).max(180).nullable().default(null),
     })
     .default({}),
+}).superRefine((criteria, ctx) => {
+  if (criteria.employeeMinimum > criteria.employeeMaximum) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["employeeMinimum"],
+      message: "employeeMinimum must not exceed employeeMaximum",
+    });
+  }
 });
 
 export type LeadCriteria = z.infer<typeof CriteriaSchema>;
@@ -569,6 +577,9 @@ export function canonicalizeUrl(rawUrl: string): string {
   if (parsed.pathname.endsWith("/") && parsed.pathname.length > 1)
     parsed.pathname = parsed.pathname.slice(0, -1);
   parsed.hostname = parsed.hostname.toLowerCase();
+  // Sort query parameters so equivalent URLs canonicalize identically
+  // regardless of parameter order (stable for dedup and content hashing).
+  parsed.searchParams.sort();
   return parsed.toString();
 }
 
