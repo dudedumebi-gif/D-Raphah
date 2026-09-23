@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { collectUrl, type CollectionPolicy } from "./collection";
 import {
   CriteriaSchema,
@@ -263,9 +264,19 @@ export async function processScrapeJob(
   }
 }
 
+export function resolveWorkerId(): string {
+  return (
+    process.env.WORKER_ID ||
+    process.env.VERCEL_DEPLOYMENT_ID ||
+    process.env.VERCEL_GIT_COMMIT_SHA ||
+    hostname() ||
+    `local-${randomUUID()}`
+  );
+}
+
 export async function runWorkerTick(
   client = createAdminClient(),
-  workerId = `vercel-${randomUUID()}`,
+  workerId = resolveWorkerId(),
 ): Promise<WorkerTickResult> {
   const result: WorkerTickResult = {
     workerId,
@@ -296,6 +307,13 @@ export async function runWorkerTick(
       capabilities = excluded.capabilities,
       deployment_id = excluded.deployment_id,
       last_heartbeat_at = excluded.last_heartbeat_at
+  `;
+  // Retention: prune stale worker registrations so the table does not grow
+  // unboundedly across ticks. Never delete the current worker's own row.
+  await client`
+    delete from public.worker_nodes
+    where id != ${workerId}
+      and last_heartbeat_at < now() - interval '24 hours'
   `;
   const enqueueRows = (await client`
     select public.enqueue_due_scrape_jobs(${now}::timestamptz) as count

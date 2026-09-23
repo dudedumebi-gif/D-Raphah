@@ -173,7 +173,7 @@ const SIGNAL_RULES: Array<{
     category: "digital_foundation",
     polarity: "automated",
     strength: 15,
-    pattern: /salesforce|hubspot|dynamics 365|netsuite|sap|workday|servicenow/i,
+    pattern: /salesforce|hubspot|dynamics 365|netsuite|\bsap\b|workday|servicenow/i,
   },
   {
     code: "integration",
@@ -221,7 +221,7 @@ const SIGNAL_RULES: Array<{
     polarity: "commercial",
     strength: 14,
     pattern:
-      /new location|expansion|rapid growth|acquisition|scaling operations/i,
+      /new location|expansion|rapid growth|acquired|acquires|acquiring|merger|takeover|scaling operations/i,
   },
 ];
 
@@ -255,13 +255,13 @@ export function detectSignals(text: string): DetectedSignal[] {
 
 const REGION_ALIASES: Record<string, string[]> = {
   ontario: ["ontario"],
-  quebec: ["quebec", "québec", "qc"],
-  alberta: ["alberta", "ab"],
-  "british columbia": ["british columbia", "bc"],
-  manitoba: ["manitoba", "mb"],
-  saskatchewan: ["saskatchewan", "sk"],
-  "new brunswick": ["new brunswick", "nb"],
-  "nova scotia": ["nova scotia", "ns"],
+  quebec: ["quebec", "québec"],
+  alberta: ["alberta"],
+  "british columbia": ["british columbia"],
+  manitoba: ["manitoba"],
+  saskatchewan: ["saskatchewan"],
+  "new brunswick": ["new brunswick"],
+  "nova scotia": ["nova scotia"],
 };
 
 function locationMatch(text: string, term: string): boolean {

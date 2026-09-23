@@ -141,6 +141,21 @@ describe("geographic qualification", () => {
       ),
     ).toBeUndefined();
   });
+  it("does not mistake two-letter tokens for Canadian province codes", () => {
+    expect(
+      evaluateGeography(
+        "We love AB testing our funnels. Plans include 50 MB of storage.",
+        { geography: { cities: [], regions: ["Alberta", "Manitoba"] } },
+      ).eligible,
+    ).toBe(false);
+  });
+  it("still matches full Canadian province names", () => {
+    expect(
+      evaluateGeography("Our Calgary, Alberta office is hiring.", {
+        geography: { cities: [], regions: ["Alberta"] },
+      }).eligible,
+    ).toBe(true);
+  });
 });
 
 describe("bounded criteria recommendations", () => {

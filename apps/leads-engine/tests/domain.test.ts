@@ -79,6 +79,34 @@ describe("maturity scoring", () => {
   });
 });
 
+describe("signal pattern regressions", () => {
+  it("does not treat 'disappear' as SAP usage", () => {
+    const signals = detectSignals(
+      "Watch your admin headaches disappear with our proven process.",
+    );
+    expect(signals.some((signal) => signal.code === "crm_erp")).toBe(false);
+  });
+
+  it("still detects genuine SAP mentions", () => {
+    const signals = detectSignals("We run SAP S/4HANA across finance.");
+    expect(signals.some((signal) => signal.code === "crm_erp")).toBe(true);
+  });
+
+  it("does not treat customer-acquisition marketing copy as expansion", () => {
+    const signals = detectSignals(
+      "We help with customer acquisition and retention through email marketing.",
+    );
+    expect(signals.some((signal) => signal.code === "expansion")).toBe(false);
+  });
+
+  it("still detects genuine M&A expansion signals", () => {
+    const signals = detectSignals(
+      "The company acquired a competitor and announced a merger last year.",
+    );
+    expect(signals.some((signal) => signal.code === "expansion")).toBe(true);
+  });
+});
+
 describe("durable scheduling", () => {
   it("uses deterministic schedule idempotency keys", () => {
     const scheduled = new Date("2026-09-22T10:00:00.000Z");
