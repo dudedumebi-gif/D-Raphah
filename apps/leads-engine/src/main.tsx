@@ -1,240 +1,275 @@
-import React, {
+import {
   FormEvent,
   StrictMode,
+  useCallback,
   useEffect,
-  useMemo,
   useState,
+  type ReactNode,
 } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  apiRequest,
+  cacheBootstrap,
+  cachedBootstrap,
+  isNeonConfigured,
+  neonClient,
+  type BootstrapData,
+  type JobRecord,
+  type LeadRecord,
+  type Membership,
+  type Session,
+} from "./api";
+import { Settings } from "./CriteriaSettings";
 import "./styles.css";
 import "./functionality.css";
 
 type View =
   | "overview"
-  | "opportunities"
-  | "organizations"
-  | "discovery"
-  | "requirements"
-  | "handoffs"
+  | "sources"
+  | "jobs"
+  | "leads"
+  | "operations"
   | "audit"
   | "settings";
-type Stage = "New" | "Discovery" | "Qualified" | "Handoff ready";
-
-type Opportunity = {
-  id: string;
-  name: string;
-  signal: string;
-  source: string;
-  score: number;
-  stage: Stage;
-  value: number;
-};
-
-type AuditEvent = { id: string; action: string; subject: string; at: string };
-type Handoff = {
-  id: string;
-  opportunity: string;
-  version: string;
-  status: "Draft" | "Ready";
-  createdAt: string;
-};
-
-const seedOpportunities: Opportunity[] = [
-  {
-    id: "opp-northstar",
-    name: "Northstar Health",
-    signal: "New digital intake programme",
-    score: 92,
-    stage: "Qualified",
-    source: "Public tender",
-    value: 86000,
-  },
-  {
-    id: "opp-field-form",
-    name: "Field & Form",
-    signal: "Hiring for operations transformation",
-    score: 84,
-    stage: "Discovery",
-    source: "Referral",
-    value: 58000,
-  },
-  {
-    id: "opp-atlas",
-    name: "Atlas Civic Lab",
-    signal: "Service redesign grant awarded",
-    score: 77,
-    stage: "New",
-    source: "Approved feed",
-    value: 42000,
-  },
-];
-
-const navItems: Array<{ id: View; label: string }> = [
+type Mutate = <T>(
+  path: string,
+  init: RequestInit,
+  success: string,
+) => Promise<T | null>;
+const views: Array<{ id: View; label: string }> = [
   { id: "overview", label: "Overview" },
-  { id: "opportunities", label: "Opportunities" },
-  { id: "organizations", label: "Organizations" },
-  { id: "discovery", label: "Discovery sessions" },
-  { id: "requirements", label: "Requirements" },
-  { id: "handoffs", label: "Handoffs" },
+  { id: "sources", label: "Sources & policies" },
+  { id: "jobs", label: "Scrape jobs" },
+  { id: "leads", label: "Qualified leads" },
+  { id: "operations", label: "Operations" },
+  { id: "audit", label: "Audit log" },
+  { id: "settings", label: "Criteria & schedule" },
 ];
 
-const viewTitles: Record<View, string> = {
-  overview: "Opportunity command center",
-  opportunities: "Opportunity pipeline",
-  organizations: "Organizations",
-  discovery: "Discovery sessions",
-  requirements: "Requirements",
-  handoffs: "Handoff packages",
-  audit: "Audit & evidence",
-  settings: "Workspace settings",
-};
-
-function useStoredState<T>(key: string, initialValue: T) {
-  const [value, setValue] = useState<T>(() => {
-    try {
-      const stored = localStorage.getItem(key);
-      return stored ? (JSON.parse(stored) as T) : initialValue;
-    } catch {
-      return initialValue;
-    }
-  });
-
-  useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(value));
-  }, [key, value]);
-
-  return [value, setValue] as const;
+function workspaceName(membership: Membership): string {
+  const value = membership.workspaces;
+  return (
+    (Array.isArray(value) ? value[0]?.name : value?.name) ?? "Lead workspace"
+  );
 }
 
 function App() {
-  const [view, setView] = useState<View>("overview");
-  const [range, setRange] = useState<"30 days" | "90 days" | "All time">(
-    "30 days",
-  );
-  const [showOpportunityForm, setShowOpportunityForm] = useState(false);
-  const [notice, setNotice] = useState(
-    "Workspace data is saved in this browser.",
-  );
-  const [opportunities, setOpportunities] = useStoredState(
-    "raphah.lead.opportunities.v1",
-    seedOpportunities,
-  );
-  const [handoffs, setHandoffs] = useStoredState<Handoff[]>(
-    "raphah.lead.handoffs.v1",
-    [],
-  );
-  const [audit, setAudit] = useStoredState<AuditEvent[]>(
-    "raphah.lead.audit.v1",
-    [
-      {
-        id: "audit-seed",
-        action: "workspace.opened",
-        subject: "Lead Engine preview workspace",
-        at: new Date().toISOString(),
-      },
-    ],
-  );
-
-  const pipelineValue = useMemo(
-    () =>
-      opportunities
-        .filter(
-          (item) =>
-            item.stage === "Qualified" || item.stage === "Handoff ready",
-        )
-        .reduce((total, item) => total + item.value, 0),
-    [opportunities],
-  );
-  const qualifiedCount = opportunities.filter(
-    (item) => item.stage === "Qualified" || item.stage === "Handoff ready",
-  ).length;
-  const handoffReady = opportunities.filter(
-    (item) => item.stage === "Handoff ready",
-  ).length;
-
-  function record(action: string, subject: string) {
-    setAudit((current) =>
-      [
-        {
-          id: crypto.randomUUID(),
-          action,
-          subject,
-          at: new Date().toISOString(),
-        },
-        ...current,
-      ].slice(0, 50),
+  const [session, setSession] = useState<Session | null>(null);
+  const [checking, setChecking] = useState(true);
+  useEffect(() => {
+    if (!neonClient) {
+      setChecking(false);
+      return;
+    }
+    void neonClient.auth.getSession().then(({ data }) => {
+      setSession(data.session as Session | null);
+      setChecking(false);
+    });
+    const { data } = neonClient.auth.onAuthStateChange((_event, next) =>
+      setSession(next as Session | null),
     );
-  }
+    return () => data.subscription.unsubscribe();
+  }, []);
+  if (!isNeonConfigured) return <SetupRequired />;
+  if (checking)
+    return (
+      <Centered
+        title="Opening Lead Engine…"
+        detail="Validating your secure session."
+      />
+    );
+  if (!session) return <SignIn />;
+  return <Workspace key={session.user.id} session={session} />;
+}
 
-  function changeView(nextView: View) {
-    setView(nextView);
-    setNotice(`${viewTitles[nextView]} loaded.`);
-  }
+function SetupRequired() {
+  return (
+    <Centered
+      title="Production connection required"
+      detail="Connect Neon and add the Data API/Auth environment variables to this Vercel project, then redeploy."
+    >
+      <div className="setup-list">
+        <code>VITE_NEON_AUTH_URL</code>
+        <code>VITE_NEON_DATA_API_URL</code>
+        <code>DATABASE_URL</code>
+        <code>QSTASH_TOKEN + signing keys</code>
+      </div>
+    </Centered>
+  );
+}
 
-  function addOpportunity(event: FormEvent<HTMLFormElement>) {
+function SignIn() {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const opportunity: Opportunity = {
-      id: crypto.randomUUID(),
-      name: String(form.get("name") || "").trim(),
-      signal: String(form.get("signal") || "").trim(),
-      source: String(form.get("source") || "").trim(),
-      value: Number(form.get("value") || 0),
-      score: Number(form.get("score") || 50),
-      stage: "New",
-    };
-    if (!opportunity.name || !opportunity.signal || !opportunity.source) return;
-    setOpportunities((current) => [opportunity, ...current]);
-    record("opportunity.created", opportunity.name);
-    setShowOpportunityForm(false);
-    setView("opportunities");
-    setNotice(`${opportunity.name} was added to the pipeline.`);
+    const email = String(form.get("email") ?? "");
+    const password = String(form.get("password") ?? "");
+    setBusy(true);
+    setMessage("");
+    const result =
+      mode === "signin"
+        ? await neonClient!.auth.signInWithPassword({ email, password })
+        : await neonClient!.auth.signUp({
+            email,
+            password,
+            options: { data: { workspace_name: "Raphah Lead Workspace" } },
+          });
+    setBusy(false);
+    if (result.error) setMessage(result.error.message);
+    else if (mode === "signup" && !result.data.session)
+      setMessage("Check your email to confirm the account.");
+  }
+  return (
+    <Centered
+      title="Raphah Lead Engine"
+      detail="Secure opportunity intelligence and evidence operations."
+    >
+      <form className="auth-form" onSubmit={submit}>
+        <label>
+          Email
+          <input name="email" type="email" autoComplete="email" required />
+        </label>
+        <label>
+          Password
+          <input
+            name="password"
+            type="password"
+            minLength={8}
+            autoComplete={
+              mode === "signin" ? "current-password" : "new-password"
+            }
+            required
+          />
+        </label>
+        <button className="primary" disabled={busy}>
+          {busy
+            ? "Please wait…"
+            : mode === "signin"
+              ? "Sign in"
+              : "Create workspace"}
+        </button>
+        <button
+          type="button"
+          className="text-button"
+          onClick={() => setMode(mode === "signin" ? "signup" : "signin")}
+        >
+          {mode === "signin"
+            ? "Create a new account"
+            : "Use an existing account"}
+        </button>
+        {message ? <p className="form-message">{message}</p> : null}
+      </form>
+    </Centered>
+  );
+}
+
+function Workspace({ session }: { session: Session }) {
+  const [memberships, setMemberships] = useState<Membership[]>([]);
+  const [workspaceId, setWorkspaceId] = useState(
+    localStorage.getItem("raphah.lead.workspace") ?? "",
+  );
+  const [data, setData] = useState<BootstrapData | null>(() =>
+    workspaceId ? cachedBootstrap(workspaceId, session.user.id) : null,
+  );
+  const [view, setView] = useState<View>("overview");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(
+    "Connecting to the production data plane…",
+  );
+
+  useEffect(() => {
+    void (async () => {
+      const bootstrap = await neonClient!.rpc("ensure_personal_workspace", {
+        p_name: "Raphah Lead Workspace",
+      });
+      if (bootstrap.error) {
+        setNotice(bootstrap.error.message);
+        return;
+      }
+      const result = await neonClient!
+        .from("workspace_memberships")
+        .select("workspace_id,role,workspaces(name)")
+        .eq("user_id", session.user.id)
+        .eq("status", "active");
+      if (result.error) {
+        setNotice(result.error.message);
+        return;
+      }
+      const rows = (result.data ?? []) as unknown as Membership[];
+      setMemberships(rows);
+      setWorkspaceId((current) => current || rows[0]?.workspace_id || "");
+    })();
+  }, [session.user.id]);
+
+  const refresh = useCallback(
+    async (quiet = false) => {
+      if (!workspaceId) return;
+      if (!quiet) setBusy(true);
+      try {
+        const result = await apiRequest<BootstrapData>(
+          session,
+          workspaceId,
+          "/api/v1/bootstrap",
+        );
+        setData(result);
+        cacheBootstrap(workspaceId, result);
+        setNotice(
+          `Live data synchronized at ${new Date().toLocaleTimeString()}.`,
+        );
+      } catch (error) {
+        setNotice(
+          `${error instanceof Error ? error.message : String(error)}${cachedBootstrap(workspaceId, session.user.id) ? " — showing the last local mirror." : ""}`,
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [session, workspaceId],
+  );
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    localStorage.setItem("raphah.lead.workspace", workspaceId);
+    setData(cachedBootstrap(workspaceId, session.user.id));
+    void refresh();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh(true);
+    }, 15_000);
+    return () => window.clearInterval(interval);
+  }, [workspaceId, refresh]);
+
+  async function mutate<T>(
+    path: string,
+    init: RequestInit,
+    success: string,
+  ): Promise<T | null> {
+    setBusy(true);
+    try {
+      const result = await apiRequest<T>(session, workspaceId, path, init);
+      setNotice(success);
+      await refresh(true);
+      return result;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      return null;
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function advanceOpportunity(opportunity: Opportunity) {
-    const order: Stage[] = ["New", "Discovery", "Qualified", "Handoff ready"];
-    const nextStage =
-      order[Math.min(order.indexOf(opportunity.stage) + 1, order.length - 1)];
-    setOpportunities((current) =>
-      current.map((item) =>
-        item.id === opportunity.id ? { ...item, stage: nextStage } : item,
-      ),
+  if (!memberships.length && !data)
+    return (
+      <Centered
+        title="Workspace initializing"
+        detail="No active workspace membership was found. Confirm the Neon migration, Auth, and Data API are enabled."
+      />
     );
-    record(
-      "opportunity.stage_changed",
-      `${opportunity.name}: ${opportunity.stage} → ${nextStage}`,
-    );
-    setNotice(`${opportunity.name} moved to ${nextStage}.`);
-  }
-
-  function createHandoff(opportunity: Opportunity) {
-    const packageRecord: Handoff = {
-      id: `handoff-${crypto.randomUUID()}`,
-      opportunity: opportunity.name,
-      version: "1.0.0",
-      status: "Draft",
-      createdAt: new Date().toISOString(),
-    };
-    setHandoffs((current) => [packageRecord, ...current]);
-    record("handoff.draft_created", opportunity.name);
-    setView("handoffs");
-    setNotice(
-      `Draft handoff created for ${opportunity.name}. Human approval is still required.`,
-    );
-  }
-
-  function approveHandoff(handoff: Handoff) {
-    setHandoffs((current) =>
-      current.map((item) =>
-        item.id === handoff.id ? { ...item, status: "Ready" } : item,
-      ),
-    );
-    record("handoff.approved", `${handoff.opportunity} · ${handoff.version}`);
-    setNotice(
-      `${handoff.opportunity} handoff is ready for controlled delivery.`,
-    );
-  }
-
+  const activeMembership =
+    memberships.find((item) => item.workspace_id === workspaceId) ??
+    memberships[0];
   return (
     <div className="app-shell lead-shell">
       <aside className="sidebar">
@@ -243,76 +278,62 @@ function App() {
           <span>Raphah</span>
         </div>
         <div className="product-label">
-          LEAD ENGINE <span>v1</span>
+          LEAD ENGINE <span>v3</span>
         </div>
-        <nav aria-label="Lead Engine navigation">
-          {navItems.map((item) => (
+        <nav>
+          {views.map((item) => (
             <button
               key={item.id}
               className={view === item.id ? "nav-item active" : "nav-item"}
-              onClick={() => changeView(item.id)}
-              aria-pressed={view === item.id}
+              onClick={() => setView(item.id)}
             >
               <span>{item.label}</span>
-              {item.id === "opportunities" ? (
-                <strong>{opportunities.length}</strong>
-              ) : null}
-              {item.id === "handoffs" && handoffs.length ? (
-                <strong className="green">{handoffs.length}</strong>
+              {item.id === "jobs" && data ? (
+                <strong>{data.jobs.length}</strong>
               ) : null}
             </button>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <button
-            className={view === "audit" ? "nav-item active" : "nav-item"}
-            onClick={() => changeView("audit")}
+          <select
+            className="workspace-select"
+            value={workspaceId}
+            onChange={(event) => setWorkspaceId(event.target.value)}
           >
-            Audit & evidence
-          </button>
-          <button
-            className={view === "settings" ? "nav-item active" : "nav-item"}
-            onClick={() => changeView("settings")}
-          >
-            Settings
-          </button>
+            {memberships.map((item) => (
+              <option value={item.workspace_id} key={item.workspace_id}>
+                {workspaceName(item)}
+              </option>
+            ))}
+          </select>
           <div className="user">
-            <span>DM</span>
+            <span>{session.user.email?.slice(0, 2).toUpperCase()}</span>
             <div>
-              <b>Dude D.</b>
-              <small>Operator</small>
+              <b>{session.user.email}</b>
+              <small>{activeMembership?.role ?? data?.actor.role}</small>
             </div>
-            <i>•••</i>
           </div>
+          <button
+            className="nav-item"
+            onClick={() => void neonClient!.auth.signOut()}
+          >
+            Sign out
+          </button>
         </div>
       </aside>
-
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">Workspace / Revenue pipeline</p>
-            <h1>{viewTitles[view]}</h1>
+            <p className="eyebrow">Workspace / Automation intelligence</p>
+            <h1>{views.find((item) => item.id === view)?.label}</h1>
           </div>
           <div className="top-actions">
             <button
               className="quiet"
-              onClick={() =>
-                setRange((current) =>
-                  current === "30 days"
-                    ? "90 days"
-                    : current === "90 days"
-                      ? "All time"
-                      : "30 days",
-                )
-              }
+              disabled={busy}
+              onClick={() => void refresh()}
             >
-              {range}⌄
-            </button>
-            <button
-              className="primary"
-              onClick={() => setShowOpportunityForm(true)}
-            >
-              + New opportunity
+              {busy ? "Working…" : "Refresh"}
             </button>
           </div>
         </header>
@@ -320,523 +341,538 @@ function App() {
           <span className="status-dot" />
           {notice}
         </div>
-        {view === "overview" ? (
-          <Overview
-            opportunities={opportunities}
-            pipelineValue={pipelineValue}
-            qualifiedCount={qualifiedCount}
-            handoffReady={handoffReady}
-            onViewPipeline={() => changeView("opportunities")}
-            onAdvance={advanceOpportunity}
-            onCreateHandoff={createHandoff}
-            onNavigate={changeView}
+        {!data ? (
+          <Centered
+            title="Loading workspace"
+            detail="Fetching sources, jobs, leads, and telemetry."
           />
         ) : (
-          <WorkspaceView
-            view={view}
-            opportunities={opportunities}
-            handoffs={handoffs}
-            audit={audit}
-            onAdvance={advanceOpportunity}
-            onCreateHandoff={createHandoff}
-            onApproveHandoff={approveHandoff}
-          />
+          <DashboardView view={view} data={data} mutate={mutate} />
         )}
       </main>
-
-      {showOpportunityForm ? (
-        <OpportunityDialog
-          onClose={() => setShowOpportunityForm(false)}
-          onSubmit={addOpportunity}
-        />
-      ) : null}
     </div>
   );
 }
 
-function Overview({
-  opportunities,
-  pipelineValue,
-  qualifiedCount,
-  handoffReady,
-  onViewPipeline,
-  onAdvance,
-  onCreateHandoff,
-  onNavigate,
+function DashboardView({
+  view,
+  data,
+  mutate,
 }: {
-  opportunities: Opportunity[];
-  pipelineValue: number;
-  qualifiedCount: number;
-  handoffReady: number;
-  onViewPipeline: () => void;
-  onAdvance: (opportunity: Opportunity) => void;
-  onCreateHandoff: (opportunity: Opportunity) => void;
-  onNavigate: (view: View) => void;
+  view: View;
+  data: BootstrapData;
+  mutate: Mutate;
 }) {
+  if (view === "sources") return <Sources data={data} mutate={mutate} />;
+  if (view === "jobs") return <Jobs data={data} mutate={mutate} />;
+  if (view === "leads") return <Leads data={data} mutate={mutate} />;
+  if (view === "operations") return <Operations data={data} />;
+  if (view === "audit") return <Audit data={data} />;
+  if (view === "settings") return <Settings data={data} mutate={mutate} />;
+  const complete = data.jobs.filter((job) => job.status === "completed").length;
+  const active = data.jobs.filter((job) =>
+    ["queued", "leased", "running", "retrying"].includes(job.status),
+  ).length;
   return (
     <div className="content">
       <section className="hero-row">
         <div>
-          <p className="eyebrow accent">
-            {new Intl.DateTimeFormat("en-GB", { dateStyle: "full" }).format(
-              new Date(),
-            )}
-          </p>
-          <h2>Good morning, Dude.</h2>
+          <p className="eyebrow accent">Production workspace</p>
+          <h2>Find the businesses ready for meaningful automation.</h2>
           <p className="muted">
-            Your pipeline is moving. Review evidence before advancing any
-            opportunity.
+            Permitted evidence becomes explainable signals, maturity scores, and
+            reviewable leads.
           </p>
         </div>
-        <button className="signal-box" onClick={() => onNavigate("audit")}>
-          <span className="pulse" />
-          <span>
-            <b>Source health</b>
-            <small>Approved-source preview data</small>
-          </span>
-          <span className="arrow">↗</span>
-        </button>
+        <HealthBadge data={data} />
       </section>
       <section className="metrics">
         <Metric
-          label="Qualified pipeline"
-          value={formatCurrency(pipelineValue)}
-          change={`${qualifiedCount} qualified`}
-        />
-        <Metric
-          label="Open opportunities"
-          value={String(opportunities.length)}
-          change="Browser workspace"
-        />
-        <Metric
-          label="Discovery sessions"
+          label="Approved sources"
           value={String(
-            opportunities.filter((item) => item.stage === "Discovery").length,
+            data.sources.filter((s) => s.status === "active").length,
           )}
-          change="Human notes required"
-          warn
+          detail={`${data.sources.length} configured`}
         />
         <Metric
-          label="Handoff readiness"
-          value={String(handoffReady)}
-          change="Approved baseline required"
+          label="Active jobs"
+          value={String(active)}
+          detail={`${complete} completed`}
+        />
+        <Metric
+          label="Qualified leads"
+          value={String(data.leads.length)}
+          detail="Persistent and deduplicated"
+        />
+        <Metric
+          label="72-hour canary"
+          value={`${Math.round(data.operations.canary.completionRate * 100)}%`}
+          detail={
+            data.operations.canary.passed
+              ? "Release gate passed"
+              : `${data.operations.canary.hoursCovered.toFixed(0)}h observed`
+          }
         />
       </section>
-      <div className="grid-main">
-        <section className="panel opportunities">
-          <div className="panel-head">
-            <div>
-              <h3>Priority opportunities</h3>
-              <p>Ranked by fit, evidence, and recency</p>
-            </div>
-            <button className="text-button" onClick={onViewPipeline}>
-              View pipeline →
-            </button>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Latest qualified leads</h3>
+            <p>Ranked by opportunity potential</p>
           </div>
-          <OpportunityTable
-            opportunities={opportunities.slice(0, 4)}
-            onAdvance={onAdvance}
-            onCreateHandoff={onCreateHandoff}
-          />
-        </section>
-        <section className="panel activity">
-          <div className="panel-head">
-            <div>
-              <h3>Today’s focus</h3>
-              <p>Human actions keep the system honest</p>
-            </div>
-          </div>
-          <button className="focus-item" onClick={() => onNavigate("audit")}>
-            <span className="icon amber">!</span>
-            <span>
-              <b>Validate source findings</b>
-              <small>Review evidence before promotion</small>
-            </span>
-            <span>›</span>
-          </button>
-          <button
-            className="focus-item"
-            onClick={() => onNavigate("discovery")}
-          >
-            <span className="icon blue">◷</span>
-            <span>
-              <b>Complete discovery notes</b>
-              <small>Sessions need human validation</small>
-            </span>
-            <span>›</span>
-          </button>
-          <button className="focus-item" onClick={() => onNavigate("handoffs")}>
-            <span className="icon green">✓</span>
-            <span>
-              <b>Approve handoff baseline</b>
-              <small>{handoffReady} package candidates</small>
-            </span>
-            <span>›</span>
-          </button>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function WorkspaceView({
-  view,
-  opportunities,
-  handoffs,
-  audit,
-  onAdvance,
-  onCreateHandoff,
-  onApproveHandoff,
-}: {
-  view: View;
-  opportunities: Opportunity[];
-  handoffs: Handoff[];
-  audit: AuditEvent[];
-  onAdvance: (opportunity: Opportunity) => void;
-  onCreateHandoff: (opportunity: Opportunity) => void;
-  onApproveHandoff: (handoff: Handoff) => void;
-}) {
-  if (view === "opportunities")
-    return (
-      <div className="content">
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h3>All opportunities</h3>
-              <p>Progress requires an explicit operator action</p>
-            </div>
-          </div>
-          <OpportunityTable
-            opportunities={opportunities}
-            onAdvance={onAdvance}
-            onCreateHandoff={onCreateHandoff}
-          />
-        </section>
-      </div>
-    );
-  if (view === "organizations")
-    return (
-      <SimpleList
-        title="Organizations"
-        items={opportunities.map((item) => ({
-          title: item.name,
-          detail: `${item.source} · ${item.signal}`,
-          badge: `${item.score} fit`,
-        }))}
-      />
-    );
-  if (view === "discovery")
-    return (
-      <SimpleList
-        title="Discovery sessions"
-        items={opportunities
-          .filter((item) => item.stage !== "New")
-          .map((item) => ({
-            title: `${item.name} discovery`,
-            detail: "Notes remain editable until human approval.",
-            badge: item.stage,
-          }))}
-        empty="Advance an opportunity to Discovery to create a session."
-      />
-    );
-  if (view === "requirements")
-    return (
-      <SimpleList
-        title="Requirements workspace"
-        items={opportunities
-          .filter(
-            (item) =>
-              item.stage === "Qualified" || item.stage === "Handoff ready",
-          )
-          .map((item) => ({
-            title: `${item.name} baseline`,
-            detail: "Must items require a named human validator.",
-            badge: "Validation required",
-          }))}
-        empty="Qualified opportunities will appear here."
-      />
-    );
-  if (view === "handoffs")
-    return (
-      <div className="content">
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h3>Versioned handoff packages</h3>
-              <p>Drafts remain inside Lead Engine until approved</p>
-            </div>
-          </div>
-          <div className="record-list">
-            {handoffs.length ? (
-              handoffs.map((item) => (
-                <div className="record-row" key={item.id}>
-                  <div>
-                    <b>{item.opportunity}</b>
-                    <small>
-                      Contract v{item.version} ·{" "}
-                      {new Date(item.createdAt).toLocaleString()}
-                    </small>
-                  </div>
-                  <span
-                    className={`badge ${item.status === "Ready" ? "qualified" : "discovery"}`}
-                  >
-                    {item.status}
-                  </span>
-                  {item.status === "Draft" ? (
-                    <button
-                      className="row-action"
-                      onClick={() => onApproveHandoff(item)}
-                    >
-                      Approve
-                    </button>
-                  ) : (
-                    <span className="verified">Human approved</span>
-                  )}
-                </div>
-              ))
-            ) : (
-              <p className="empty-state">
-                Create a package from a qualified opportunity in the pipeline.
-              </p>
-            )}
-          </div>
-        </section>
-      </div>
-    );
-  if (view === "audit")
-    return (
-      <div className="content">
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h3>Local audit trail</h3>
-              <p>Operator actions captured in this browser workspace</p>
-            </div>
-          </div>
-          <div className="record-list">
-            {audit.map((item) => (
-              <div className="record-row" key={item.id}>
-                <div>
-                  <b>{item.action}</b>
-                  <small>{item.subject}</small>
-                </div>
-                <time>{new Date(item.at).toLocaleString()}</time>
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-    );
-  return (
-    <SimpleList
-      title="Workspace configuration"
-      items={[
-        {
-          title: "Persistence mode",
-          detail:
-            "Browser-local preview until Supabase environment variables are provisioned.",
-          badge: "Preview",
-        },
-        {
-          title: "Automation policy",
-          detail:
-            "Human approval remains required for source, outreach, baseline, and handoff decisions.",
-          badge: "Enforced",
-        },
-      ]}
-    />
-  );
-}
-
-function OpportunityTable({
-  opportunities,
-  onAdvance,
-  onCreateHandoff,
-}: {
-  opportunities: Opportunity[];
-  onAdvance: (item: Opportunity) => void;
-  onCreateHandoff: (item: Opportunity) => void;
-}) {
-  return (
-    <div className="table">
-      <div className="table-head">
-        <span>Opportunity</span>
-        <span>Signal</span>
-        <span>Fit score</span>
-        <span>Stage / action</span>
-      </div>
-      {opportunities.map((item) => (
-        <div className="table-row" key={item.id}>
-          <div className="op-name">
-            <span className="avatar">
-              {item.name.slice(0, 2).toUpperCase()}
-            </span>
-            <div>
-              <b>{item.name}</b>
-              <small>
-                {item.source} · {formatCurrency(item.value)}
-              </small>
-            </div>
-          </div>
-          <span className="signal">{item.signal}</span>
-          <span className="score">
-            <i style={{ width: `${Math.min(item.score, 100) / 2.4}px` }} />
-            {item.score}
-          </span>
-          <span className="stage-action">
-            <span
-              className={`badge ${item.stage.toLowerCase().replace(" ", "-")}`}
-            >
-              {item.stage}
-            </span>
-            {item.stage === "Qualified" || item.stage === "Handoff ready" ? (
-              <button
-                className="row-action"
-                onClick={() => onCreateHandoff(item)}
-              >
-                Handoff
-              </button>
-            ) : (
-              <button className="row-action" onClick={() => onAdvance(item)}>
-                Advance
-              </button>
-            )}
-          </span>
         </div>
-      ))}
+        <LeadTable leads={data.leads.slice(0, 8)} />
+      </section>
     </div>
   );
 }
 
-function SimpleList({
-  title,
-  items,
-  empty = "No records yet.",
-}: {
-  title: string;
-  items: Array<{ title: string; detail: string; badge: string }>;
-  empty?: string;
-}) {
+function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const baseUrl = String(form.get("baseUrl"));
+    const host = new URL(baseUrl).hostname;
+    const result = await mutate(
+      "/api/v1/sources",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: form.get("name"),
+          baseUrl,
+          collectionMethod: form.get("method"),
+          businessPurpose: form.get("purpose"),
+          allowedDomains: [host],
+          allowlistPaths: ["/*"],
+          denylistPaths: ["/login*", "/account*", "/admin*"],
+          dailyBudget: 100,
+          monthlyBudget: 2000,
+          maxDepth: 2,
+          rateLimitRps: 1,
+          retentionMonths: 12,
+          intervalMinutes: Number(form.get("interval")),
+          userAgent: "RaphahLeadEngineBot/2.0",
+          contactEmail: form.get("contactEmail"),
+        }),
+      },
+      "Source submitted for policy approval.",
+    );
+    if (result) formElement.reset();
+  }
+  return (
+    <div className="content split-layout">
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Permitted sources</h3>
+            <p>No collection begins before explicit policy approval.</p>
+          </div>
+        </div>
+        <div className="record-list">
+          {data.sources.map((source) => (
+            <div className="record-row" key={source.id}>
+              <div>
+                <b>{source.name}</b>
+                <small>
+                  {source.base_url} · {source.collection_method}
+                </small>
+              </div>
+              <Status value={source.status} />
+              {source.status === "pending_approval" ? (
+                <button
+                  className="row-action"
+                  onClick={() =>
+                    void mutate(
+                      `/api/v1/sources/${source.id}/approve`,
+                      {
+                        method: "POST",
+                        body: JSON.stringify({
+                          reason:
+                            "Reviewed for permitted public collection and business purpose.",
+                        }),
+                      },
+                      `${source.name} approved.`,
+                    )
+                  }
+                >
+                  Approve
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="panel form-panel">
+        <div className="panel-head">
+          <div>
+            <h3>Add source</h3>
+            <p>Register policy before scheduling.</p>
+          </div>
+        </div>
+        <form className="inline-form" onSubmit={submit}>
+          <label>
+            Name
+            <input name="name" required />
+          </label>
+          <label>
+            Base URL
+            <input name="baseUrl" type="url" required />
+          </label>
+          <label>
+            Collection method
+            <select name="method" defaultValue="static_html">
+              <option value="static_html">Static HTML</option>
+              <option value="rss">RSS</option>
+              <option value="sitemap">Sitemap</option>
+              <option value="api">Public API</option>
+            </select>
+          </label>
+          <label>
+            Purpose
+            <textarea
+              name="purpose"
+              defaultValue="Identify public evidence of manual processes and automation opportunity."
+              required
+            />
+          </label>
+          <label>
+            Contact email
+            <input name="contactEmail" type="email" required />
+          </label>
+          <label>
+            Refresh interval (minutes)
+            <input
+              name="interval"
+              type="number"
+              min="5"
+              defaultValue="1440"
+              required
+            />
+          </label>
+          <button className="primary">Create source policy</button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function Jobs({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
+  const activeSources = data.sources.filter(
+    (source) => source.status === "active",
+  );
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await mutate(
+      "/api/v1/scrape-jobs",
+      {
+        method: "POST",
+        headers: {
+          "idempotency-key": `manual:${form.get("sourceId")}:${form.get("targetUrl")}:${new Date().toISOString().slice(0, 13)}`,
+        },
+        body: JSON.stringify({
+          sourceId: form.get("sourceId"),
+          targetUrl: form.get("targetUrl"),
+          maxAttempts: 3,
+        }),
+      },
+      "Persistent scrape job queued.",
+    );
+  }
+  return (
+    <div className="content">
+      <section className="panel form-strip">
+        <form className="horizontal-form" onSubmit={submit}>
+          <label>
+            Approved source
+            <select name="sourceId" required>
+              {activeSources.map((source) => (
+                <option key={source.id} value={source.id}>
+                  {source.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Public target URL
+            <input
+              name="targetUrl"
+              type="url"
+              required
+              placeholder="https://example.com/process"
+            />
+          </label>
+          <button className="primary" disabled={!activeSources.length}>
+            Queue scrape
+          </button>
+        </form>
+      </section>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Durable job lifecycle</h3>
+            <p>
+              Queued, leased, retried, completed, and dead-lettered work remains
+              queryable.
+            </p>
+          </div>
+        </div>
+        <div className="table job-table">
+          <div className="table-head">
+            <span>Target</span>
+            <span>Status</span>
+            <span>Attempts</span>
+            <span>Scheduled / action</span>
+          </div>
+          {data.jobs.map((job) => (
+            <div className="table-row" key={job.id}>
+              <div className="op-name">
+                <span className="avatar">J</span>
+                <div>
+                  <b>{new URL(job.target_url).hostname}</b>
+                  <small>
+                    {job.id.slice(0, 8)} · {job.target_url}
+                  </small>
+                </div>
+              </div>
+              <Status value={job.status} />
+              <span>
+                {job.attempt_count}/{job.max_attempts}
+                {job.last_error ? (
+                  <small className="error-text">{job.last_error}</small>
+                ) : null}
+              </span>
+              <span className="stage-action">
+                <time>{new Date(job.scheduled_for).toLocaleString()}</time>
+                {["failed", "dead_letter", "cancelled"].includes(job.status) ? (
+                  <button
+                    className="row-action"
+                    onClick={() => void jobAction(job, "retry", mutate)}
+                  >
+                    Retry
+                  </button>
+                ) : null}
+                {["queued", "retrying", "leased"].includes(job.status) ? (
+                  <button
+                    className="row-action danger"
+                    onClick={() => void jobAction(job, "cancel", mutate)}
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+async function jobAction(
+  job: JobRecord,
+  action: "retry" | "cancel",
+  mutate: Mutate,
+) {
+  await mutate(
+    `/api/v1/scrape-jobs/${job.id}/${action}`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        reason: `Operator requested ${action} from the production console.`,
+      }),
+    },
+    `Job ${action} accepted.`,
+  );
+}
+
+function Leads({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
+  async function feedback(lead: LeadRecord, decision: "accepted" | "rejected") {
+    await mutate(
+      `/api/v1/leads/${lead.id}/feedback`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          decision,
+          reasonCode:
+            decision === "accepted"
+              ? "VALID_AUTOMATION_FIT"
+              : "NOT_CURRENT_FIT",
+          notes: "Reviewed in Lead Engine console.",
+        }),
+      },
+      `${lead.title} marked ${decision}.`,
+    );
+  }
   return (
     <div className="content">
       <section className="panel">
         <div className="panel-head">
           <div>
-            <h3>{title}</h3>
-            <p>Current Lead Engine workspace</p>
+            <h3>Automation opportunity pipeline</h3>
+            <p>Each lead is backed by stored evidence and a versioned score.</p>
+          </div>
+        </div>
+        <LeadTable
+          leads={data.leads}
+          actions={(lead) => (
+            <>
+              <button
+                className="row-action"
+                onClick={() => void feedback(lead, "accepted")}
+              >
+                Accept
+              </button>
+              <button
+                className="row-action danger"
+                onClick={() => void feedback(lead, "rejected")}
+              >
+                Reject
+              </button>
+            </>
+          )}
+        />
+      </section>
+    </div>
+  );
+}
+
+function LeadTable({
+  leads,
+  actions,
+}: {
+  leads: LeadRecord[];
+  actions?: (lead: LeadRecord) => ReactNode;
+}) {
+  return (
+    <div className="table">
+      <div className="table-head">
+        <span>Organization</span>
+        <span>AI maturity</span>
+        <span>Opportunity</span>
+        <span>Confidence / review</span>
+      </div>
+      {leads.length ? (
+        leads.map((lead) => {
+          const org = Array.isArray(lead.organizations)
+            ? lead.organizations[0]
+            : lead.organizations;
+          return (
+            <div className="table-row" key={lead.id}>
+              <div className="op-name">
+                <span className="avatar">
+                  {(org?.name ?? lead.title).slice(0, 2).toUpperCase()}
+                </span>
+                <div>
+                  <b>{org?.name ?? lead.title}</b>
+                  <small>{org?.normalized_domain ?? lead.routing}</small>
+                </div>
+              </div>
+              <Score value={lead.automation_maturity_score} inverse />
+              <Score value={lead.opportunity_potential_score} />
+              <span className="stage-action">
+                <b>{Math.round(lead.confidence * 100)}%</b>
+                {actions?.(lead)}
+              </span>
+            </div>
+          );
+        })
+      ) : (
+        <p className="empty-state">
+          No lead has met the current evidence, confidence, maturity, and
+          geography gates.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Operations({ data }: { data: BootstrapData }) {
+  const { operations } = data;
+  return (
+    <div className="content">
+      <section className="metrics">
+        <Metric
+          label="72h completion"
+          value={`${Math.round(operations.canary.completionRate * 100)}%`}
+          detail={`${operations.canary.completed}/${operations.canary.total} canaries`}
+        />
+        <Metric
+          label="Coverage"
+          value={`${operations.canary.hoursCovered.toFixed(0)}h`}
+          detail="72 hours required"
+        />
+        <Metric
+          label="Run start p95"
+          value={
+            operations.jobs.scheduledStartP95Ms === null
+              ? "—"
+              : `${Math.round(operations.jobs.scheduledStartP95Ms / 1000)}s`
+          }
+          detail="Target < 300s"
+        />
+        <Metric
+          label="Workers"
+          value={String(operations.workers.length)}
+          detail={operations.workers[0]?.status ?? "No heartbeat"}
+        />
+      </section>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Worker nodes</h3>
+            <p>
+              Vercel and Sentry remain authoritative; this is the application
+              control view.
+            </p>
           </div>
         </div>
         <div className="record-list">
-          {items.length ? (
-            items.map((item) => (
-              <div className="record-row" key={item.title}>
-                <div>
-                  <b>{item.title}</b>
-                  <small>{item.detail}</small>
-                </div>
-                <span className="badge discovery">{item.badge}</span>
+          {operations.workers.map((worker) => (
+            <div className="record-row" key={worker.id}>
+              <div>
+                <b>{worker.id}</b>
+                <small>
+                  {worker.runtime} · {worker.capabilities.join(", ")}
+                </small>
               </div>
-            ))
-          ) : (
-            <p className="empty-state">{empty}</p>
-          )}
+              <Status value={worker.status} />
+              <time>{new Date(worker.last_heartbeat_at).toLocaleString()}</time>
+            </div>
+          ))}
         </div>
       </section>
     </div>
   );
 }
 
-function OpportunityDialog({
-  onClose,
-  onSubmit,
-}: {
-  onClose: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
+function Audit({ data }: { data: BootstrapData }) {
   return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="new-opportunity-title"
-      >
-        <div className="modal-head">
+    <div className="content">
+      <section className="panel">
+        <div className="panel-head">
           <div>
-            <p className="eyebrow">Human-entered opportunity</p>
-            <h2 id="new-opportunity-title">Add opportunity</h2>
+            <h3>Immutable application audit trail</h3>
+            <p>
+              Every persisted state change is captured by database triggers.
+            </p>
           </div>
-          <button
-            className="icon-button"
-            onClick={onClose}
-            aria-label="Close dialog"
-          >
-            ×
-          </button>
         </div>
-        <form onSubmit={onSubmit}>
-          <label>
-            Organization
-            <input
-              name="name"
-              required
-              autoFocus
-              placeholder="Northstar Health"
-            />
-          </label>
-          <label>
-            Opportunity signal
-            <textarea
-              name="signal"
-              required
-              placeholder="What changed, and why now?"
-            />
-          </label>
-          <div className="form-grid">
-            <label>
-              Source
-              <input
-                name="source"
-                required
-                placeholder="Approved public source"
-              />
-            </label>
-            <label>
-              Estimated value (£)
-              <input
-                name="value"
-                type="number"
-                min="0"
-                step="1000"
-                defaultValue="25000"
-              />
-            </label>
-          </div>
-          <label>
-            Initial fit score
-            <input
-              name="score"
-              type="number"
-              min="0"
-              max="100"
-              defaultValue="60"
-            />
-          </label>
-          <div className="modal-actions">
-            <button type="button" className="quiet" onClick={onClose}>
-              Cancel
-            </button>
-            <button className="primary" type="submit">
-              Create opportunity
-            </button>
-          </div>
-        </form>
+        <div className="record-list">
+          {data.audit.map((event) => (
+            <div className="record-row" key={event.id}>
+              <div>
+                <b>{event.action}</b>
+                <small>
+                  {event.resource_type} · {event.resource_id ?? "workspace"}
+                </small>
+              </div>
+              <Status value={event.outcome} />
+              <time>{new Date(event.created_at).toLocaleString()}</time>
+            </div>
+          ))}
+        </div>
       </section>
     </div>
   );
@@ -845,33 +881,81 @@ function OpportunityDialog({
 function Metric({
   label,
   value,
-  change,
-  warn = false,
+  detail,
 }: {
   label: string;
   value: string;
-  change: string;
-  warn?: boolean;
+  detail: string;
 }) {
   return (
     <div className="metric">
       <p>{label}</p>
       <strong>{value}</strong>
-      <small className={warn ? "warn" : "up"}>
-        {warn ? "• " : "↗ "}
-        {change}
-      </small>
+      <small>{detail}</small>
     </div>
   );
 }
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-GB", {
-    style: "currency",
-    currency: "GBP",
-    maximumFractionDigits: 0,
-    notation: value >= 1_000_000 ? "compact" : "standard",
-  }).format(value);
+function Score({
+  value,
+  inverse = false,
+}: {
+  value: number;
+  inverse?: boolean;
+}) {
+  return (
+    <span className="score">
+      <i style={{ width: `${Math.min(value, 100) / 2.4}px` }} />
+      {value}
+      {inverse ? " / 100 maturity" : " / 100"}
+    </span>
+  );
+}
+function Status({ value }: { value: string }) {
+  return (
+    <span className={`badge status-${value.replace(/_/g, "-")}`}>
+      {value.replace(/_/g, " ")}
+    </span>
+  );
+}
+function HealthBadge({ data }: { data: BootstrapData }) {
+  const healthy =
+    data.operations.workers.length > 0 &&
+    data.operations.jobs.scheduledStartTargetMet;
+  return (
+    <div className="signal-box">
+      <span className={`pulse ${healthy ? "" : "pulse-warn"}`} />
+      <span>
+        <b>{healthy ? "Operational" : "Release gate pending"}</b>
+        <small>
+          {data.sources.filter((source) => source.status === "active").length}{" "}
+          approved sources · {data.operations.workers.length} workers
+        </small>
+      </span>
+    </div>
+  );
+}
+function Centered({
+  title,
+  detail,
+  children,
+}: {
+  title: string;
+  detail: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="centered">
+      <section className="center-card">
+        <div className="brand centered-brand">
+          <span className="brand-mark">R</span>
+          <span>Raphah</span>
+        </div>
+        <h1>{title}</h1>
+        <p>{detail}</p>
+        {children}
+      </section>
+    </div>
+  );
 }
 
 createRoot(document.getElementById("root")!).render(

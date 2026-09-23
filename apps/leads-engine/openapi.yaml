@@ -1,0 +1,229 @@
+openapi: 3.1.0
+info:
+  title: Raphah Lead Engine API
+  version: 3.0.0
+  description: Permitted-source collection, evidence, scoring, lead, audit, and operational lifecycle API.
+servers:
+  - url: https://d-raphah-leads-engine.vercel.app
+security:
+  - bearerAuth: []
+    workspaceId: []
+paths:
+  /api/health/live:
+    get:
+      security: []
+      summary: Process liveness
+      responses: { "200": { description: Process is accepting requests } }
+  /api/health/ready:
+    get:
+      security: []
+      summary: Database, worker, and canary readiness
+      responses:
+        "200": { description: Ready }
+        "503": { description: Configuration, database, or worker is not ready }
+  /api/v1/bootstrap:
+    get:
+      summary: Load the authenticated operations workspace
+      responses: { "200": { description: Workspace snapshot } }
+  /api/v1/sources:
+    get:
+      summary: List source definitions and active policies
+      responses: { "200": { description: Source list } }
+    post:
+      summary: Create a source with a pending policy
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceInput" }
+      responses: { "201": { description: Source and policy created } }
+  /api/v1/sources/{sourceId}/approve:
+    post:
+      summary: Human-approve and activate a source policy
+      parameters:
+        - {
+            name: sourceId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties: { reason: { type: string, minLength: 5 } }
+      responses: { "200": { description: Source activated } }
+  /api/v1/criteria/{campaignId}:
+    patch:
+      summary: Update scoring criteria and persistent schedule
+      parameters:
+        - {
+            name: campaignId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CriteriaUpdate" }
+      responses: { "200": { description: Campaign updated } }
+  /api/v1/scrape-jobs:
+    get:
+      summary: List durable jobs and attempts
+      responses: { "200": { description: Job list } }
+    post:
+      summary: Queue an idempotent manual scrape job
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceId, targetUrl]
+              properties:
+                sourceId: { type: string, format: uuid }
+                targetUrl: { type: string, format: uri }
+                maxAttempts:
+                  { type: integer, minimum: 1, maximum: 10, default: 3 }
+      responses: { "202": { description: Job queued or idempotently returned } }
+  /api/v1/criteria/{campaignId}/suggestion:
+    get:
+      summary: Suggest bounded thresholds from campaign-specific weekly distinct qualified organizations
+      description: Recommendations require human review. Geography and source policy are never loosened automatically.
+      parameters:
+        - {
+            name: campaignId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      responses:
+        { "200": { description: Direction, proposed changes, and rationale } }
+  /api/v1/scrape-jobs/{jobId}:
+    get:
+      summary: Inspect a job, its attempts, evidence, and score
+      parameters:
+        - {
+            name: jobId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      responses: { "200": { description: Complete job lifecycle } }
+  /api/v1/scrape-jobs/{jobId}/events:
+    get:
+      summary: Read job lifecycle as server-sent events
+      parameters:
+        - {
+            name: jobId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      responses:
+        "200":
+          description: Ordered attempt and audit events
+          content: { text/event-stream: { schema: { type: string } } }
+  /api/v1/scrape-jobs/{jobId}/retry:
+    post:
+      summary: Recover a failed/dead-letter job
+      parameters:
+        - {
+            name: jobId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      requestBody: { $ref: "#/components/requestBodies/Reason" }
+      responses: { "200": { description: Job requeued } }
+  /api/v1/scrape-jobs/{jobId}/cancel:
+    post:
+      summary: Cancel queued/retrying/leased work
+      parameters:
+        - {
+            name: jobId,
+            in: path,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
+      requestBody: { $ref: "#/components/requestBodies/Reason" }
+      responses: { "200": { description: Job cancelled } }
+  /api/v1/leads:
+    get:
+      summary: List persistent qualified leads with evidence-backed assessments
+      responses: { "200": { description: Qualified lead list } }
+  /api/v1/audit-events:
+    get:
+      summary: List workspace audit events
+      responses: { "200": { description: Audit event list } }
+  /api/v1/operations:
+    get:
+      summary: Inspect workers, 72-hour completion, and schedule-start p95
+      responses: { "200": { description: Operational snapshot } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    workspaceId: { type: apiKey, in: header, name: X-Workspace-ID }
+  parameters:
+    IdempotencyKey:
+      {
+        name: Idempotency-Key,
+        in: header,
+        required: false,
+        schema: { type: string },
+      }
+  requestBodies:
+    Reason:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [reason]
+            properties: { reason: { type: string, minLength: 3 } }
+  schemas:
+    SourceInput:
+      type: object
+      required:
+        [
+          name,
+          baseUrl,
+          collectionMethod,
+          businessPurpose,
+          allowedDomains,
+          contactEmail,
+        ]
+      properties:
+        name: { type: string }
+        baseUrl: { type: string, format: uri }
+        collectionMethod: { enum: [api, rss, sitemap, static_html] }
+        businessPurpose: { type: string }
+        allowedDomains: { type: array, items: { type: string } }
+        allowlistPaths:
+          { type: array, items: { type: string }, default: ["/*"] }
+        denylistPaths: { type: array, items: { type: string } }
+        dailyBudget: { type: integer, default: 100 }
+        monthlyBudget: { type: integer, default: 2000 }
+        maxDepth: { type: integer, default: 2 }
+        rateLimitRps: { type: number, default: 1 }
+        retentionMonths: { type: integer, default: 12 }
+        intervalMinutes: { type: integer, default: 1440 }
+        userAgent: { type: string }
+        contactEmail: { type: string, format: email }
+    CriteriaUpdate:
+      type: object
+      required: [criteria]
+      properties:
+        criteria: { type: object, additionalProperties: true }
+        scheduleEnabled: { type: boolean }
+        intervalMinutes: { type: integer, minimum: 5 }
+        nextRunAt: { type: [string, "null"], format: date-time }
