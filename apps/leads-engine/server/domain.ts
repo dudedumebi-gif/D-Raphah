@@ -249,6 +249,13 @@ export function detectSignals(text: string): DetectedSignal[] {
   for (const rule of SIGNAL_RULES) {
     const match = rule.pattern.exec(normalized);
     if (!match) continue;
+    // Negation / history guard: a friction cue that is explicitly denied
+    // ("we do not fax") or described as resolved ("we used to fax") is not
+    // current friction. Only the enclosing clause is examined so a "not" in
+    // a neighboring sentence cannot cancel the signal.
+    const clause = precedingClause(normalized, match.index);
+    if (NEGATION_CUES.test(clause) || NEGATION_CUES.test(match[0])) continue;
+    if (HISTORY_CUES.test(clause)) continue;
     detected.push({
       code: rule.code,
       category: rule.category,
@@ -259,6 +266,34 @@ export function detectSignals(text: string): DetectedSignal[] {
     });
   }
   return detected;
+}
+
+// Matches denial of the friction cue: "do not fax", "no spreadsheets",
+// "can't apply online", "without manual entry", "no longer paper-based".
+const NEGATION_CUES =
+  /(\bnot\b|\bno\b|\bnever\b|n't|\bneither\b|\bnor\b|\bwithout\b|\bno longer\b)/i;
+
+// Matches resolved/past friction: "we used to fax", "legacy spreadsheets",
+// "migrated from paper forms". Past pain is not current opportunity.
+const HISTORY_CUES =
+  /(\bused to\b|\bpreviously\b|\bformerly\b|\bin the past\b|\blegacy\b|\bmigrat\w*\b|\breplac\w*\b|\bphased out\b|\beliminat\w*\b|\bretir\w*\b|\bditched\b)/i;
+
+/**
+ * Returns the clause preceding a match: up to 64 characters back, cut at the
+ * nearest sentence/clause boundary so negation in another sentence cannot
+ * leak across.
+ */
+function precedingClause(text: string, matchIndex: number): string {
+  const windowStart = Math.max(0, matchIndex - 64);
+  const window = text.slice(windowStart, matchIndex);
+  const lastBreak = Math.max(
+    window.lastIndexOf("."),
+    window.lastIndexOf("!"),
+    window.lastIndexOf("?"),
+    window.lastIndexOf(";"),
+    window.lastIndexOf(":"),
+  );
+  return window.slice(lastBreak + 1);
 }
 
 const REGION_ALIASES: Record<string, string[]> = {

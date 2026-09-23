@@ -109,6 +109,46 @@ describe("maturity scoring", () => {
   });
 });
 
+describe("negation and history aware signals", () => {
+  it("drops friction cues that are explicitly denied", () => {
+    expect(
+      detectSignals("We do not accept fax. Please email instead.").map(
+        (signal) => signal.code,
+      ),
+    ).not.toContain("fax");
+    expect(
+      detectSignals("No spreadsheets here; everything runs in our app.").map(
+        (signal) => signal.code,
+      ),
+    ).not.toContain("spreadsheet_ops");
+  });
+
+  it("drops friction cues described as resolved in the past", () => {
+    const signals = detectSignals(
+      "We used to fax orders, but migrated to a customer portal last year.",
+    );
+    expect(signals.map((signal) => signal.code)).not.toContain("fax");
+  });
+
+  it("does not let negation leak across sentence boundaries", () => {
+    // The "not" denies fax in sentence one; the phone cue in sentence two
+    // is a genuine current signal.
+    const signals = detectSignals(
+      "We do not accept fax. Call us to book an appointment.",
+    );
+    expect(signals.map((signal) => signal.code)).toContain("phone_only");
+    expect(signals.map((signal) => signal.code)).not.toContain("fax");
+  });
+
+  it("keeps genuinely current friction", () => {
+    const signals = detectSignals(
+      "Call us to book. Fax the paperwork to our office.",
+    );
+    expect(signals.map((signal) => signal.code)).toContain("fax");
+    expect(signals.map((signal) => signal.code)).toContain("phone_only");
+  });
+});
+
 describe("signal pattern regressions", () => {
   it("does not treat 'disappear' as SAP usage", () => {
     const signals = detectSignals(
