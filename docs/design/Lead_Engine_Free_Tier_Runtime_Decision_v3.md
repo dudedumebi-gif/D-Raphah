@@ -6,6 +6,8 @@ Run the Lead Engine in the owner's personal Vercel Hobby scope. Do not create or
 
 This decision replaces Supabase and sub-daily Vercel Cron in the Lead Engine runtime only. Delivery Factory remains independently deployable and may change its persistence architecture through a separate decision.
 
+> **Update (2026-09-23):** the separate Delivery Factory decision has been made — see [ADR 0001 — Delivery Factory runtime](../adr/0001-delivery-factory-runtime.md) (Neon + QStash + Vercel, independent instances).
+
 ## Runtime mapping
 
 | Capability                         | Selected service       | Boundary                                          |

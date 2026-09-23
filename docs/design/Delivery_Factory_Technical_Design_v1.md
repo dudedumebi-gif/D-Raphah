@@ -1,5 +1,12 @@
 # Delivery Factory Technical Design Version 1
 
+> **Superseded (2026-09-23):** the runtime choices in this document (a dedicated
+> Supabase project for PostgreSQL/Auth/Storage, with Trigger.dev for durable
+> orchestration) are superseded by
+> [ADR 0001 — Delivery Factory runtime](../adr/0001-delivery-factory-runtime.md):
+> the Delivery Factory now runs on Neon + QStash + Vercel as an independent
+> product. The rest of this document remains a historical reference.
+
 ## Purpose and decision
 
 This document defines the production architecture and delivery plan for the Raphah Delivery Factory. The Delivery Factory is an independently deployable product that accepts a verified Lead Engine handoff and converts the approved business baseline into a controlled client delivery project. It owns planning, architecture, implementation coordination, testing evidence, release readiness, handover, and post-delivery feedback.

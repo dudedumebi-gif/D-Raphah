@@ -90,6 +90,8 @@ Set these variables on the **Lead Engine project only**:
 - `NEON_DATA_API_URL`
 - `DATABASE_URL` (sensitive, server-only)
 - `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY` (sensitive, server-only)
+- `HANDOFF_SIGNING_PRIVATE_KEY_PEM`, `HANDOFF_SIGNING_PUBLIC_KEY_PEM` (sensitive, server-only; Ed25519 key pair for signing handoff packages)
+- `DELIVERY_INTAKE_URL` (Delivery Factory intake endpoint; when unset, signed handoffs queue in the outbox until it is set)
 - `WORKER_SECRET` (optional sensitive key for Postman/manual diagnostics)
 - `SENTRY_DSN` and `SENTRY_ENVIRONMENT=production`
 - `LEAD_ENGINE_ORIGIN=https://d-raphah-leads-engine.vercel.app`

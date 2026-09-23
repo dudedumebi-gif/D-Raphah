@@ -1,5 +1,13 @@
 # Lead Engine Technical Design Version 2
 
+> **Superseded (2026-09-23):** the runtime choices in this document (Supabase
+> for PostgreSQL/Auth/Storage, Trigger.dev for workflows) are superseded — for
+> the Lead Engine by
+> [Lead Engine Free-Tier Runtime Decision v3](Lead_Engine_Free_Tier_Runtime_Decision_v3.md)
+> (Neon + QStash + Vercel), and for the Delivery Factory by
+> [ADR 0001 — Delivery Factory runtime](../adr/0001-delivery-factory-runtime.md).
+> The rest of this document remains a historical reference.
+
 ## Purpose and decision
 
 This document defines the production architecture and delivery plan for the Raphah Lead Engine. The Lead Engine is an independent, internal-first opportunity management product that owns the lifecycle from approved-source discovery through commercial qualification, client discovery, requirements baselining, and accepted handoff to the Delivery Factory.

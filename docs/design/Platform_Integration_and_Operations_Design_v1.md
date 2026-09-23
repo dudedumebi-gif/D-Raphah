@@ -1,5 +1,14 @@
 # Platform Integration and Operations Design Version 1
 
+> **Superseded (2026-09-23):** the runtime topology rows in this document
+> (dedicated Supabase projects and Trigger.dev environments per product) are
+> superseded by
+> [ADR 0001 — Delivery Factory runtime](../adr/0001-delivery-factory-runtime.md):
+> both products now run on independent Neon + QStash + Vercel stacks, with the
+> versioned `LeadEngineHandoffPackage` contract as the only integration
+> surface. The contract versioning and message-shape sections remain a
+> historical reference.
+
 ## Purpose and decision
 
 This document defines the only supported integration between the Raphah Lead Engine and Delivery Factory and the shared operating model for their independent deployments. The products remain operationally separate. They communicate through versioned, signed, idempotent API messages and optional authorized package export. They do not share databases, sessions, credentials, storage buckets, queues, or provider-specific domain types.
