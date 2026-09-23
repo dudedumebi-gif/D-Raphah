@@ -1,5 +1,33 @@
 -- Lead Engine production data plane for Neon. Apply with:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f 202609220001_lead_engine_production.sql
+-- Neon prerequisite shim (idempotent). Neon Auth provisions its own
+-- `neon_auth` schema; the RLS helpers below expect Supabase-style
+-- `auth.user_id()`. pg_session_jwt (Neon's own extension) provides
+-- `auth.user_id()` reading `request.jwt.claims`, which Neon's Data API
+-- sets from the caller's JWT. The `authenticated`/`anonymous` roles are
+-- the grant targets used by the policies below; Neon does not create
+-- them. Direct connections without JWT claims see auth.user_id() = NULL,
+-- so RLS denies by default (fail closed).
+create schema if not exists auth;
+-- pg_session_jwt (Neon's own extension) is not relocatable and refuses to
+-- install through the pooler, so provide its auth.user_id() contract
+-- directly: the JWT `sub` from request.jwt.claims, which Neon's Data API
+-- sets from the caller's validated JWT. NULL (fail closed) when unset.
+create or replace function auth.user_id() returns text
+language sql stable as $$
+  -- Neon surfaces request.jwt.claims as '' (not unset) when no JWT is
+  -- present, so null the empty string BEFORE the jsonb cast.
+  select nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub';
+$$;
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+    create role authenticated nologin;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'anonymous') then
+    create role anonymous nologin;
+  end if;
+end $$;
+
 create extension if not exists pgcrypto;
 
 create type public.workspace_role as enum ('owner', 'administrator', 'analyst', 'reviewer', 'auditor');
