@@ -5,7 +5,7 @@ import {
   createPinnedFetcher,
   resolvePublicHost,
   type PinnedAddress,
-} from "../server/collection";
+} from "../api/_lib/collection";
 
 const publicResolver = async (hostname: string): Promise<PinnedAddress[]> => [
   { address: "127.0.0.1", family: 4 },

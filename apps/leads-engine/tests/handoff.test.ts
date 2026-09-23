@@ -13,7 +13,7 @@ import {
   enqueueHandoffOutbox,
   type EnqueueHandoffInput,
   type SqlClient,
-} from "../server/handoff";
+} from "../api/_lib/handoff";
 
 const keys = generateSigningKeyPair();
 process.env.HANDOFF_SIGNING_PRIVATE_KEY_PEM = keys.privateKeyPem;

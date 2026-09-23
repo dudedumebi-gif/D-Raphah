@@ -4,13 +4,13 @@ import {
   evaluateGeography,
   suggestCriteriaAdjustment,
   evaluateCanarySoak,
-} from "../server/domain";
+} from "../api/_lib/domain";
 import {
   extractCoordinates,
   assertUrlAllowed,
   type CollectionPolicy,
-} from "../server/collection";
-import { requireScheduler } from "../server/neon";
+} from "../api/_lib/collection";
+import { requireScheduler } from "../api/_lib/neon";
 
 describe("geographic qualification", () => {
   it("does not mistake the word 'on' for Ontario", () => {

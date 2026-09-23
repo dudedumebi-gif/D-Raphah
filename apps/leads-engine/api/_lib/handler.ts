@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { handleApiRequest } from "../../server/router.js";
+import { handleApiRequest } from "./router.js";
 
 export const functionConfig = {
   maxDuration: 300,

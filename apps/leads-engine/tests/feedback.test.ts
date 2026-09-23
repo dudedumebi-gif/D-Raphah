@@ -9,8 +9,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   ingestDeliveryFeedback,
   type FeedbackEnvelope,
-} from "../server/feedback";
-import type { SqlClient } from "../server/handoff";
+} from "../api/_lib/feedback";
+import type { SqlClient } from "../api/_lib/handoff";
 
 const keys = generateSigningKeyPair();
 const otherKeys = generateSigningKeyPair();
