@@ -1,5 +1,6 @@
 {
   "name": "@raphah/leads-engine-app",
+  "packageManager": "pnpm@10.28.0",
   "private": true,
   "type": "module",
   "scripts": {
