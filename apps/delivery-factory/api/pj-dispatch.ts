@@ -1,32 +1,33 @@
 import type { ServerResponse } from "node:http";
-import { sendJson, type ApiRequest } from "../_lib/http.js";
-import projectHandler from "../_projects/[id].js";
-import clarificationsHandler from "../_projects/[id]/clarifications.js";
-import resolveClarificationHandler from "../_projects/[id]/clarifications/[cid]/resolve.js";
-import eventsHandler from "../_projects/[id]/events.js";
-import milestonesHandler from "../_projects/[id]/milestones.js";
-import completeMilestoneHandler from "../_projects/[id]/milestones/[mid]/complete.js";
-import stageHandler from "../_projects/[id]/stage.js";
+import { sendJson, type ApiRequest } from "./_lib/http.js";
+import projectHandler from "./_projects/[id].js";
+import clarificationsHandler from "./_projects/[id]/clarifications.js";
+import resolveClarificationHandler from "./_projects/[id]/clarifications/[cid]/resolve.js";
+import eventsHandler from "./_projects/[id]/events.js";
+import milestonesHandler from "./_projects/[id]/milestones.js";
+import completeMilestoneHandler from "./_projects/[id]/milestones/[mid]/complete.js";
+import stageHandler from "./_projects/[id]/stage.js";
 
 type Handler = (req: ApiRequest, res: ServerResponse) => Promise<void>;
 
 /**
- * Catch-all dispatcher for /api/projects/*.
+ * Single-function dispatcher for every /api/projects/* path.
  *
- * The Hobby plan caps a deployment at 12 serverless functions, so every
- * project sub-path routes through this single function instead of one
- * file per route. URL contracts are unchanged: path params are injected
- * into req.query exactly the way Vercel's file-system router would.
+ * The Hobby plan caps a deployment at 12 serverless functions, so a
+ * vercel.json rewrite maps /api/projects/:path* to this function with the
+ * remainder in ?path=. URL contracts are unchanged: path params are
+ * injected into req.query exactly the way the file-system router did.
  */
-export default async function projectsDispatcher(
+export default async function pjDispatch(
   req: ApiRequest,
   res: ServerResponse,
 ): Promise<void> {
   const raw = req.query?.path;
-  const segments = (
-    Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split("/") : []
-  ).filter(Boolean);
+  const segments = (Array.isArray(raw) ? raw.join("/") : (raw ?? ""))
+    .split("/")
+    .filter(Boolean);
   const query = { ...(req.query ?? {}) };
+  delete query.path;
   let handler: Handler | undefined;
 
   if (segments.length === 1) {

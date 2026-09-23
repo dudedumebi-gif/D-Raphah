@@ -3,5 +3,15 @@
   "cleanUrls": true,
   "framework": "vite",
   "installCommand": "pnpm install --frozen-lockfile",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/api/workflows/:path*",
+      "destination": "/api/wf-dispatch?path=:path*"
+    },
+    {
+      "source": "/api/projects/:path*",
+      "destination": "/api/pj-dispatch?path=:path*"
+    }
+  ]
 }
