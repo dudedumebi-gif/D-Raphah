@@ -147,3 +147,41 @@ Promotion is allowed only when `canary.passed=true`, completion is at least `0.9
 ## Production decision
 
 The release status remains **NOT PRODUCTION READY** until the remaining implementation gates, Neon/QStash provisioning, RLS execution, live pipeline evidence, Postman lifecycle execution, Vercel/Sentry review, and the 72-hour canary all pass. Do not replace the deployed UI with this unfinished parity implementation.
+
+## Delivery feedback loop (Delivery Factory -> Lead Engine)
+
+Delivery lifecycle events (`delivery.handoff.accepted`, `delivery.clarification.requested`,
+`delivery.release.completed`, `delivery.project.closed`, ...) are enqueued in the Delivery
+Factory's `feedback_outbox` and dispatched to the Lead Engine machine route
+`POST /api/v1/feedback/events`. Authentication is Ed25519, the mirror image of handoff
+signing: the factory signs `{ event, nonce, issuedAt }`; the Lead Engine verifies with the
+factory's public key. The two products share no database and no credentials.
+
+Set these variables on the **Delivery Factory project only**:
+
+- `FEEDBACK_SIGNING_PRIVATE_KEY_PEM` (sensitive, server-only; factory Ed25519 private key)
+- `LEAD_ENGINE_BASE_URL` (e.g. `https://d-raphah-leads-engine.vercel.app`)
+- `DELIVERY_FACTORY_CRON_SECRET` (sensitive; bearer secret for the internal dispatch endpoint)
+
+Set this variable on the **Lead Engine project only**:
+
+- `DELIVERY_FACTORY_PUBLIC_KEY_PEM` (the factory public key below, `\n` escapes for single-line values)
+
+```
+-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqly1hebw+Xoguep3B4/Yr3OFvGOG0CIa/05Tl4sfikI=\n-----END PUBLIC KEY-----\n
+```
+
+Create the dispatcher schedule once the QStash credential is valid:
+
+```
+qstash schedule create \
+  --cron "*/5 * * * *" \
+  --header "Authorization: Bearer $DELIVERY_FACTORY_CRON_SECRET" \
+  https://<delivery-factory-app>/api/internal/dispatch-feedback
+```
+
+The dispatcher claims due rows with `FOR UPDATE SKIP LOCKED`, posts signed envelopes with a
+15s timeout, and applies exponential backoff with jitter (6h cap, 10 attempts). Terminal
+client errors (400/401/409/422) fail the row immediately; 5xx/429/network errors reschedule.
+Event inserts on the Lead Engine are idempotent on the contract's `eventId`, so a retried
+dispatch after a lost response is acknowledged as a duplicate, not stored twice.

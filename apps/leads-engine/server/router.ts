@@ -20,6 +20,7 @@ import {
   enqueueHandoffOutbox,
   type SqlClient,
 } from "./handoff";
+import { ingestDeliveryFeedback } from "./feedback";
 import { enqueueCanary, runWorkerTick } from "./worker";
 
 const SourceInputSchema = z.object({
@@ -678,6 +679,14 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     ) {
       await requireScheduler(request);
       response = json({ data: await enqueueCanary() }, 202);
+    } else if (
+      pathname === "/api/v1/feedback/events" &&
+      request.method === "POST"
+    ) {
+      // Machine-to-machine route: authenticated by the Delivery Factory's
+      // Ed25519 envelope signature, not by a user session.
+      const result = await ingestDeliveryFeedback(await bodyJson(request));
+      response = json(result, result.status === "duplicate" ? 200 : 201);
     } else {
       response = await authenticatedRoutes(request, pathname);
     }
