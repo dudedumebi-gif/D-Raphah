@@ -1,0 +1,28 @@
+{
+  "dependencies": {
+    "@neondatabase/serverless": "1.1.0",
+    "@raphah/handoff-contract": "workspace:*",
+    "@vitejs/plugin-react": "^5.0.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.2",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.25",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "vitest": "1.6.1"
+  },
+  "name": "@raphah/delivery-factory-app",
+  "packageManager": "pnpm@10.28.0",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite --host 0.0.0.0",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "type": "module"
+}

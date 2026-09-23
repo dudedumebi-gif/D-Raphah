@@ -1,5 +1,12 @@
 Lead Engine Technical Design Runbook
 
+> **Superseded (2026-09-23):** this runbook is already superseded by
+> [Lead Engine Technical Design v2](../design/Lead_Engine_Technical_Design_v2.md),
+> and its runtime references (Supabase, Trigger.dev) are further superseded by
+> [Lead Engine Free-Tier Runtime Decision v3](../design/Lead_Engine_Free_Tier_Runtime_Decision_v3.md)
+> (Lead Engine) and [ADR 0001](../adr/0001-delivery-factory-runtime.md)
+> (Delivery Factory). Historical reference only.
+
 Opportunity Management Discovery and Delivery Handoff
 
 Purpose

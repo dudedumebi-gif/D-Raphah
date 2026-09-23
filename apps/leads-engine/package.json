@@ -1,0 +1,35 @@
+{
+  "name": "@raphah/leads-engine-app",
+  "packageManager": "pnpm@10.28.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "qstash:configure": "node scripts/configure-qstash.mjs",
+    "test:rls:neon": "node scripts/verify-neon-rls.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@neondatabase/neon-js": "0.7.0-beta",
+    "@neondatabase/serverless": "1.1.0",
+    "@raphah/handoff-contract": "workspace:*",
+    "@sentry/node": "10.18.0",
+    "@upstash/qstash": "2.11.3",
+    "@vitejs/plugin-react": "^5.0.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.2",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.25",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitest/coverage-v8": "1.6.1",
+    "vitest": "1.6.1"
+  }
+}

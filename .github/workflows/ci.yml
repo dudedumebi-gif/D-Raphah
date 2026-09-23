@@ -1,0 +1,206 @@
+# D-Raphah CI
+#
+# Path-aware pipeline: each job only runs when its paths changed.
+# The `changes` job computes the path map once (see docs/ci.md); all other
+# jobs gate on its outputs plus `root` (lockfile / workspace config changes
+# re-run everything, since dependency changes can affect any package).
+#
+# No deployment jobs, no secrets required.
+
+name: CI
+
+on:
+  push:
+    branches: [feat/product-platform-design]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Compute which parts of the monorepo changed, once, for all downstream jobs.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      lead-engine: ${{ steps.filter.outputs.lead-engine }}
+      delivery-factory: ${{ steps.filter.outputs.delivery-factory }}
+      handoff-contract: ${{ steps.filter.outputs.handoff-contract }}
+      contract-usage: ${{ steps.filter.outputs.contract-usage }}
+      legacy: ${{ steps.filter.outputs.legacy }}
+      root: ${{ steps.filter.outputs.root }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            lead-engine:
+              - 'apps/leads-engine/**'
+            delivery-factory:
+              - 'apps/delivery-factory/**'
+            handoff-contract:
+              - 'packages/handoff-contract/**'
+            contract-usage:
+              # Files that consume the handoff contract schemas directly.
+              - 'apps/leads-engine/server/handoff.ts'
+              - 'apps/leads-engine/tests/handoff.test.ts'
+              - 'apps/delivery-factory/api/**'
+              - 'apps/delivery-factory/tests/intake.test.ts'
+            legacy:
+              # Pre-platform implementations; kept green, run only when touched.
+              - 'lead-engine/**'
+              - 'delivery-tool/**'
+            root:
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.github/workflows/**'
+
+  # ---------------------------------------------------------------------------
+  # Root gates: always run. Frozen install fails on stale lockfiles; the
+  # hygiene script enforces pnpm-only, no committed build artifacts.
+  # ---------------------------------------------------------------------------
+  hygiene:
+    name: Repo hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check lockfile and artifact hygiene
+        run: |
+          set -euo pipefail
+          test -f pnpm-lock.yaml || { echo "::error::pnpm-lock.yaml is missing"; exit 1; }
+          if git ls-files | grep -E '(^|/)(package-lock\.json|yarn\.lock)$'; then
+            echo "::error::npm/yarn lockfiles are tracked; this repo is pnpm-only"
+            exit 1
+          fi
+          if git ls-files | grep -E '(^|/)(node_modules/|dist/|build/)'; then
+            echo "::error::node_modules/dist/build must not be committed"
+            exit 1
+          fi
+          echo "Hygiene OK"
+
+  # ---------------------------------------------------------------------------
+  # Shared Node/pnpm setup, inlined per job (each job gets a fresh runner).
+  # ---------------------------------------------------------------------------
+  # NOTE: jobs below use the composite steps verbatim; keep them in sync.
+
+  lead-engine:
+    name: Lead Engine (test + typecheck)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.lead-engine == 'true' || needs.changes.outputs.handoff-contract == 'true' || needs.changes.outputs.root == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Workspace tests resolve @raphah/handoff-contract from its dist
+      # output; install alone does not build it.
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
+      - run: pnpm --filter @raphah/leads-engine-app test
+      - run: pnpm --filter @raphah/leads-engine-app typecheck
+
+  delivery-factory:
+    name: Delivery Factory (test + typecheck + build)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.delivery-factory == 'true' || needs.changes.outputs.handoff-contract == 'true' || needs.changes.outputs.root == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Workspace tests resolve @raphah/handoff-contract from its dist
+      # output; install alone does not build it.
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
+      - run: pnpm --filter @raphah/delivery-factory-app test
+      - run: pnpm --filter @raphah/delivery-factory-app typecheck
+      - run: pnpm --filter @raphah/delivery-factory-app build
+
+  handoff-contract:
+    name: Handoff contract (test + build)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.handoff-contract == 'true' || needs.changes.outputs.root == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @raphah/handoff-contract test
+      - run: pnpm --filter @raphah/handoff-contract build
+
+  # ---------------------------------------------------------------------------
+  # Contract compatibility: the handoff Zod schemas must keep parsing the
+  # representative fixtures on both sides of the boundary. Runs when the
+  # contract package changes or when either app's contract usage changes.
+  # ---------------------------------------------------------------------------
+  contract-compat:
+    name: Contract compatibility
+    runs-on: ubuntu-latest
+    needs: [changes, handoff-contract]
+    if: >-
+      always() &&
+      (needs.changes.outputs.handoff-contract == 'true' || needs.changes.outputs.contract-usage == 'true' || needs.changes.outputs.root == 'true') &&
+      (needs.handoff-contract.result == 'success' || needs.handoff-contract.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Contract package tests (schema fixtures)
+        run: pnpm --filter @raphah/handoff-contract test
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
+      - name: Lead Engine handoff emission tests
+        run: pnpm --filter @raphah/leads-engine-app test tests/handoff.test.ts
+      - name: Delivery Factory intake tests
+        run: pnpm --filter @raphah/delivery-factory-app test tests/intake.test.ts
+
+  legacy:
+    name: Legacy apps (lead-engine, delivery-tool)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.legacy == 'true' || needs.changes.outputs.root == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Legacy lead-engine resolves @raphah/handoff-contract subpaths from
+      # its dist output; install alone does not build it.
+      - name: Build handoff contract (workspace dependency)
+        run: pnpm --filter @raphah/handoff-contract build
+      - run: pnpm --filter lead-engine test
+      - run: pnpm --filter delivery-tool test

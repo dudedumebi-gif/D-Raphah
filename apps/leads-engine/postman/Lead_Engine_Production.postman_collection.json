@@ -1,0 +1,320 @@
+{
+  "info": {
+    "name": "Raphah Lead Engine - Production Lifecycle",
+    "description": "Observe the permitted-source scrape lifecycle in Postman. Sign in through the Lead Engine UI and paste the Neon Auth access token into accessToken; Postman is not the identity provider. workerSecret is optional and enables a manual diagnostic tick. Vercel runtime logs and Sentry remain authoritative telemetry. Reset the collection idempotencyKey only for a new logical scrape. Repeat Queue with the same key to verify replay.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "idempotencyKey",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "01 - Health",
+      "item": [
+        {
+          "name": "Liveness",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/api/health/live"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Live', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Readiness",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/api/health/ready"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Ready', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 - Workspace",
+      "item": [
+        {
+          "name": "Bootstrap workspace",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/bootstrap"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Workspace loaded', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "if (body.sources?.[0]) pm.environment.set('sourceId', body.sources[0].id);",
+                  "if (body.campaigns?.[0]) pm.environment.set('campaignId', body.campaigns[0].id);",
+                  "if (body.jobs?.[0]) pm.environment.set('jobId', body.jobs[0].id);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 - Scrape lifecycle",
+      "item": [
+        {
+          "name": "Queue persistent scrape job",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/scrape-jobs",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourceId\": \"{{sourceId}}\",\n  \"targetUrl\": \"{{targetUrl}}\",\n  \"maxAttempts\": 3\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Job accepted', () => pm.expect(pm.response.code).to.eql(202));",
+                  "pm.environment.set('jobId', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inspect job, attempts, evidence and score",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/scrape-jobs/{{jobId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Lifecycle visible', () => pm.response.to.have.status(200));",
+                  "pm.test('Status is valid', () => pm.expect(['queued','leased','running','retrying','completed','dead_letter','cancelled']).to.include(pm.response.json().data.status));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Trigger worker tick (manual diagnostic)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{workerSecret}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/worker/tick",
+            "body": { "mode": "raw", "raw": "{\"trigger\":\"postman\"}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Worker accepted diagnostic tick', () => pm.response.to.have.status(200));",
+                  "pm.test('Worker result is visible', () => pm.expect(pm.response.json().data).to.have.property('completed'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inspect ordered job events (SSE)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              },
+              {
+                "key": "Accept",
+                "value": "text/event-stream"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/scrape-jobs/{{jobId}}/events"
+          }
+        },
+        {
+          "name": "Retry dead-letter job",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/scrape-jobs/{{jobId}}/retry",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"reason\":\"Postman recovery demonstration\"}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Evidence and operations",
+      "item": [
+        {
+          "name": "Qualified leads",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/leads"
+          }
+        },
+        {
+          "name": "Audit events",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/audit-events"
+          }
+        },
+        {
+          "name": "Operational SLO snapshot",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/operations"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Metrics available', () => pm.response.to.have.status(200));",
+                  "const data = pm.response.json().data;",
+                  "pm.test('p95 field present', () => pm.expect(data.jobs).to.have.property('scheduledStartP95Ms'));",
+                  "pm.test('canary rate present', () => pm.expect(data.canary).to.have.property('completionRate'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Campaign threshold recommendation",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Workspace-ID",
+                "value": "{{workspaceId}}"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/criteria/{{campaignId}}/suggestion"
+          }
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "exec": [
+          "if (!pm.collectionVariables.get('idempotencyKey')) pm.collectionVariables.set('idempotencyKey', 'postman-' + pm.variables.replaceIn('{{$guid}}'));"
+        ]
+      }
+    }
+  ]
+}

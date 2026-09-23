@@ -35,10 +35,12 @@ minimumReleaseAgeExclude:
   - stripe-replit-sync
 
 packages:
+  - apps/*
   - lead-engine
   - delivery-tool
   - website
   - artifacts/*
+  - packages/*
   - lib/*
   - lib/integrations/*
   - scripts

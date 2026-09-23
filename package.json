@@ -7,13 +7,15 @@
     "dev": "pnpm --filter @workspace/raphah-site dev",
     "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
-    "test": "pnpm --filter lead-engine test && pnpm --filter delivery-tool test",
+    "test": "pnpm --filter @raphah/leads-engine-app test && pnpm --filter @raphah/handoff-contract test && pnpm --filter lead-engine test && pnpm --filter delivery-tool test",
+    "vercel:verify-token": "node scripts/verify-vercel-token.mjs",
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },
   "private": true,
   "dependencies": {
-    "@replit/connectors-sdk": "^0.4.3"
+    "@replit/connectors-sdk": "^0.4.3",
+    "mammoth": "^1.12.3"
   },
   "devDependencies": {
     "prettier": "^3.9.6",

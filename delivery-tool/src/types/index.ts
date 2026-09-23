@@ -1,9 +1,12 @@
+import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract/handoff/v1";
+export type { LeadEngineHandoffPackage } from "@raphah/handoff-contract/handoff/v1";
+
 export interface Requirement {
   id: string;
   opportunityId: string;
   code: string;
   statement: string;
-  priority: 'must' | 'should' | 'could' | 'wont';
+  priority: "must" | "should" | "could" | "wont";
   status: string;
   sourceEvidenceId?: string;
   humanValidatorId?: string;
@@ -24,65 +27,13 @@ export interface FeatureCandidate {
   exclusionReason?: string;
 }
 
-export interface LeadEngineHandoffPackage {
-  schemaVersion: string;
-  packageId: string;
-  packageVersion: number;
-  opportunityId: string;
-  organization: {
-    name: string;
-    domain?: string;
-    industry?: string;
-    employeeCount?: number;
-  };
-  stakeholders: Array<{
-    name: string;
-    role: string;
-    influence?: string;
-    authority?: string;
-  }>;
-  problemStatement: string;
-  currentState: Array<{
-    processName: string;
-    owner?: string;
-    painPoint: string;
-  }>;
-  requirementBaseline: {
-    version: number;
-    requirements: Requirement[];
-    features: FeatureCandidate[];
-  };
-  constraints: Array<{ description: string; category: string }>;
-  risksAndAssumptions: Array<{ description: string; type: 'risk' | 'assumption'; impact: string }>;
-  successMeasures: Array<{ metric: string; target: string }>;
-  commercialScope: {
-    scopeSummary: string;
-    estimatedValueCad?: number;
-    timelineWeeks?: number;
-  };
-  supportingArtifacts: Array<{
-    artifactId: string;
-    canonicalUrl: string;
-    contentType: string;
-    contentHash: string;
-  }>;
-  openItems: Array<{
-    description: string;
-    owner: string;
-    dueDate?: string;
-  }>;
-  approvedBy: string;
-  approvedAt: string;
-  manifestChecksum: string;
-}
-
 export type DeliveryProjectStage =
-  | 'onboarding'
-  | 'blueprint_drafting'
-  | 'implementation'
-  | 'testing'
-  | 'handover'
-  | 'completed';
+  | "onboarding"
+  | "blueprint_drafting"
+  | "implementation"
+  | "testing"
+  | "handover"
+  | "completed";
 
 export interface Milestone {
   id: string;
@@ -114,7 +65,7 @@ export interface RejectionReason {
 }
 
 export interface HandoffReceiptResult {
-  status: 'accepted' | 'rejected';
+  status: "accepted" | "rejected";
   projectId?: string;
   packageId: string;
   packageVersion: number;
@@ -126,7 +77,7 @@ export interface DeliveryFeedbackEvent {
   eventId: string;
   projectId: string;
   opportunityId: string;
-  type: 'status_updated' | 'clarification_requested' | 'milestone_completed';
+  type: "status_updated" | "clarification_requested" | "milestone_completed";
   details: any;
   emittedAt: string;
 }

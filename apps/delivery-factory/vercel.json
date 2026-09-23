@@ -1,0 +1,7 @@
+{
+  "buildCommand": "pnpm --filter @raphah/handoff-contract build && vite build",
+  "cleanUrls": true,
+  "framework": "vite",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "outputDirectory": "dist"
+}

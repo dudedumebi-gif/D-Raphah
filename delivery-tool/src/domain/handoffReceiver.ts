@@ -1,21 +1,18 @@
-import crypto from 'node:crypto';
-import { db } from '../db/store.js';
-import { LeadEngineHandoffPackage, HandoffReceiptResult, DeliveryProject, RejectionReason } from '../types/index.js';
-import { LeadEngineHandoffPackageSchema } from '../schemas/index.js';
+import crypto from "node:crypto";
+import {
+  canonicalJsonStringify,
+  sha256CanonicalJson,
+} from "@raphah/handoff-contract/canonical-json";
+import { db } from "../db/store.js";
+import {
+  LeadEngineHandoffPackage,
+  HandoffReceiptResult,
+  DeliveryProject,
+  RejectionReason,
+} from "../types/index.js";
+import { LeadEngineHandoffPackageSchema } from "../schemas/index.js";
 
-export function canonicalJsonStringify(obj: any): string {
-  if (obj === null || typeof obj !== 'object') {
-    return JSON.stringify(obj);
-  }
-  if (Array.isArray(obj)) {
-    return '[' + obj.map(item => canonicalJsonStringify(item)).join(',') + ']';
-  }
-  const keys = Object.keys(obj).sort();
-  const sortedObjParts = keys
-    .filter(k => obj[k] !== undefined)
-    .map(k => `${JSON.stringify(k)}:${canonicalJsonStringify(obj[k])}`);
-  return '{' + sortedObjParts.join(',') + '}';
-}
+export { canonicalJsonStringify };
 
 export class HandoffReceiverService {
   static receivePackage(payload: any): HandoffReceiptResult {
@@ -25,16 +22,16 @@ export class HandoffReceiverService {
     if (!schemaParse.success) {
       for (const issue of schemaParse.error.issues) {
         rejectionReasons.push({
-          code: 'SCHEMA_INVALID',
+          code: "SCHEMA_INVALID",
           message: issue.message,
-          field: issue.path.join('.')
+          field: issue.path.join("."),
         });
       }
       return {
-        status: 'rejected',
-        packageId: payload?.packageId || 'unknown',
+        status: "rejected",
+        packageId: payload?.packageId || "unknown",
         packageVersion: payload?.packageVersion || 0,
-        rejectionReasons
+        rejectionReasons,
       };
     }
 
@@ -44,53 +41,53 @@ export class HandoffReceiverService {
     if (db.packageToProjectMap.has(key)) {
       const existingProjectId = db.packageToProjectMap.get(key)!;
       return {
-        status: 'accepted',
+        status: "accepted",
         projectId: existingProjectId,
         packageId: pkg.packageId,
         packageVersion: pkg.packageVersion,
-        message: 'Package already accepted (idempotent replay).'
+        message: "Package already accepted (idempotent replay).",
       };
     }
 
     const { manifestChecksum, ...basePackageData } = pkg;
-    const computedChecksum = crypto
-      .createHash('sha256')
-      .update(canonicalJsonStringify(basePackageData))
-      .digest('hex');
+    const computedChecksum = sha256CanonicalJson(basePackageData);
 
     if (computedChecksum !== manifestChecksum) {
       rejectionReasons.push({
-        code: 'CHECKSUM_MISMATCH',
-        message: `Package checksum mismatch. Expected ${manifestChecksum}, computed ${computedChecksum}.`
+        code: "CHECKSUM_MISMATCH",
+        message: `Package checksum mismatch. Expected ${manifestChecksum}, computed ${computedChecksum}.`,
       });
       return {
-        status: 'rejected',
+        status: "rejected",
         packageId: pkg.packageId,
         packageVersion: pkg.packageVersion,
-        rejectionReasons
+        rejectionReasons,
       };
     }
 
-    if (!pkg.organization.name || pkg.organization.name.trim() === '') {
+    if (!pkg.organization.name || pkg.organization.name.trim() === "") {
       rejectionReasons.push({
-        code: 'MISSING_ORGANIZATION',
-        message: 'Organization name is required.'
+        code: "MISSING_ORGANIZATION",
+        message: "Organization name is required.",
       });
     }
 
-    if (!pkg.requirementBaseline || pkg.requirementBaseline.requirements.length === 0) {
+    if (
+      !pkg.requirementBaseline ||
+      pkg.requirementBaseline.requirements.length === 0
+    ) {
       rejectionReasons.push({
-        code: 'EMPTY_REQUIREMENTS',
-        message: 'Requirement baseline must contain at least one requirement.'
+        code: "EMPTY_REQUIREMENTS",
+        message: "Requirement baseline must contain at least one requirement.",
       });
     }
 
     if (rejectionReasons.length > 0) {
       return {
-        status: 'rejected',
+        status: "rejected",
         packageId: pkg.packageId,
         packageVersion: pkg.packageVersion,
-        rejectionReasons
+        rejectionReasons,
       };
     }
 
@@ -102,30 +99,46 @@ export class HandoffReceiverService {
       packageVersion: pkg.packageVersion,
       opportunityId: pkg.opportunityId,
       organizationName: pkg.organization.name,
-      stage: 'onboarding',
+      stage: "onboarding",
       requirementBaselineVersion: pkg.requirementBaseline.version,
       requirementsCount: pkg.requirementBaseline.requirements.length,
       featuresCount: pkg.requirementBaseline.features.length,
       milestones: [
-        { id: 'm-1', title: 'Client Onboarding & Access Verification', completed: false },
-        { id: 'm-2', title: 'Architecture Blueprint Sign-off', completed: false },
-        { id: 'm-3', title: 'Implementation & Integration Deployment', completed: false },
-        { id: 'm-4', title: 'Client Handover & Acceptance Training', completed: false }
+        {
+          id: "m-1",
+          title: "Client Onboarding & Access Verification",
+          completed: false,
+        },
+        {
+          id: "m-2",
+          title: "Architecture Blueprint Sign-off",
+          completed: false,
+        },
+        {
+          id: "m-3",
+          title: "Implementation & Integration Deployment",
+          completed: false,
+        },
+        {
+          id: "m-4",
+          title: "Client Handover & Acceptance Training",
+          completed: false,
+        },
       ],
       acceptedPackage: pkg,
       receivedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     };
 
     db.projects.set(projectId, project);
     db.packageToProjectMap.set(key, projectId);
 
     return {
-      status: 'accepted',
+      status: "accepted",
       projectId,
       packageId: pkg.packageId,
       packageVersion: pkg.packageVersion,
-      message: 'Handoff package accepted successfully.'
+      message: "Handoff package accepted successfully.",
     };
   }
 }
