@@ -9,6 +9,7 @@ import {
   scoreSignals,
 } from "./domain";
 import { createAdminClient } from "./neon";
+import { dispatchDueHandoffs, type SqlClient } from "./handoff";
 import { log, reportError } from "./telemetry";
 
 type DatabaseClient = ReturnType<typeof createAdminClient>;
@@ -59,6 +60,8 @@ export interface WorkerTickResult {
   completed: number;
   failed: number;
   deadLettered: number;
+  handoffsDispatched: number;
+  handoffsFailed: number;
 }
 
 function collectionPolicy(row: PolicyRow): CollectionPolicy {
@@ -287,6 +290,8 @@ export async function runWorkerTick(
     completed: 0,
     failed: 0,
     deadLettered: 0,
+    handoffsDispatched: 0,
+    handoffsFailed: 0,
   };
   const now = new Date().toISOString();
   const deploymentId =
@@ -341,6 +346,17 @@ export async function runWorkerTick(
       else result.failed += 1;
     }),
   );
+  // Handoff dispatch must never fail the tick: a stuck intake is retried on
+  // later ticks via the outbox backoff, and the tick reports its outcome.
+  try {
+    const dispatch = await dispatchDueHandoffs(client as unknown as SqlClient);
+    result.handoffsDispatched = dispatch.dispatched;
+    result.handoffsFailed = dispatch.failed;
+  } catch (error) {
+    log("error", "handoff_dispatch_tick_failed", { workerId });
+    await reportError(error, { workerId });
+    result.handoffsFailed += 1;
+  }
   await client`
     update public.worker_nodes
     set last_heartbeat_at = ${new Date().toISOString()}::timestamptz,

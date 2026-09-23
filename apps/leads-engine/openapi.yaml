@@ -161,6 +161,12 @@ paths:
     get:
       summary: List persistent qualified leads with evidence-backed assessments
       responses: { "200": { description: Qualified lead list } }
+  /api/v1/handoffs:
+    post:
+      summary: Human-approved emission of a signed LeadEngineHandoffPackage into the durable outbox
+      responses:
+        "201": { description: Enqueued handoff with id, manifestChecksum, status }
+        "404": { description: Opportunity not found in the caller's workspace }
   /api/v1/audit-events:
     get:
       summary: List workspace audit events

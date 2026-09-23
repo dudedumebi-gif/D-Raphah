@@ -160,6 +160,6 @@ export async function assertDatabaseReady(
     where service = 'lead-engine'
     limit 1
   `) as unknown as Array<{ version: string }>;
-  if (rows[0]?.version !== "3.0.0")
+  if (rows[0]?.version !== "3.1.0")
     throw new Error("Database readiness failed: incompatible schema version");
 }

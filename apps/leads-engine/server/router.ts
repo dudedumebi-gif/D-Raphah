@@ -15,6 +15,11 @@ import {
   requireUserContext,
 } from "./neon";
 import { log, reportError, requestContext } from "./telemetry";
+import {
+  buildHandoffPackage,
+  enqueueHandoffOutbox,
+  type SqlClient,
+} from "./handoff";
 import { enqueueCanary, runWorkerTick } from "./worker";
 
 const SourceInputSchema = z.object({
@@ -535,6 +540,52 @@ async function authenticatedRoutes(
       .single();
     if (error) throw new Error(error.message);
     return json({ data }, 201);
+  }
+
+  if (pathname === "/api/v1/handoffs" && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const input = z
+      .object({
+        opportunityId: z.string().uuid(),
+        idempotencyKey: z.string().min(1).max(200).optional(),
+      })
+      .parse(await bodyJson(request));
+    const { data: opportunity, error: opportunityError } = await client
+      .from("opportunities")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", input.opportunityId)
+      .single();
+    if (opportunityError || !opportunity)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    const { package: handoffPackage, manifestChecksum, signature } =
+      await buildHandoffPackage(createAdminClient() as unknown as SqlClient, {
+        workspaceId,
+        opportunityId: input.opportunityId,
+        approvedBy: context.user.email ?? context.user.id,
+      });
+    const enqueued = await enqueueHandoffOutbox(
+      (name, args) => client.rpc(name, args),
+      {
+        workspaceId,
+        idempotencyKey:
+          input.idempotencyKey ??
+          `handoff:${workspaceId}:${input.opportunityId}`,
+        package: handoffPackage,
+        manifestChecksum,
+        signature,
+      },
+    );
+    return json(
+      {
+        id: enqueued.id,
+        manifestChecksum,
+        status: enqueued.status,
+      },
+      201,
+    );
   }
 
   if (pathname === "/api/v1/audit-events" && request.method === "GET") {
