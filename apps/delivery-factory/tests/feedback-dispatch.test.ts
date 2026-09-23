@@ -5,7 +5,7 @@ import {
   verifyPackage,
   type DeliveryFeedbackEventV1,
 } from "@raphah/handoff-contract";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   bearerMatches,
   buildSignedFeedbackEnvelope,
@@ -16,6 +16,9 @@ import {
   type FeedbackOutboxStore,
   type FeedbackPostResult,
 } from "../api/_lib/feedback-dispatch";
+import handler from "../api/internal/dispatch-feedback";
+import type { ApiRequest } from "../api/_lib/http";
+import type { ServerResponse } from "node:http";
 
 const keys = generateSigningKeyPair();
 const OPPORTUNITY_ID = "11111111-1111-4111-8111-111111111111";
@@ -207,5 +210,67 @@ describe("bearerMatches", () => {
     expect(bearerMatches("Bearer s3cr3", "s3cr3t")).toBe(false);
     expect(bearerMatches(undefined, "s3cr3t")).toBe(false);
     expect(bearerMatches("Basic c2VjcmV0", "s3cr3t")).toBe(false);
+  });
+
+  it("never matches when the secret is empty (fail closed)", () => {
+    expect(bearerMatches("Bearer ", "")).toBe(false);
+    expect(bearerMatches("Bearer s3cr3t", "")).toBe(false);
+    expect(bearerMatches(undefined, "")).toBe(false);
+  });
+});
+
+describe("dispatch-feedback handler auth", () => {
+  const savedSecret = process.env.DELIVERY_FACTORY_CRON_SECRET;
+  afterEach(() => {
+    if (savedSecret === undefined) delete process.env.DELIVERY_FACTORY_CRON_SECRET;
+    else process.env.DELIVERY_FACTORY_CRON_SECRET = savedSecret;
+  });
+
+  function fakeRes() {
+    let body = "";
+    const res = {
+      statusCode: 200,
+      setHeader: (_name: string, _value: string) => {},
+      end: (chunk: string) => {
+        body = chunk;
+      },
+    } as unknown as ServerResponse;
+    return { res, getBody: () => body };
+  }
+
+  function fakeReq(authorization?: string) {
+    return {
+      method: "POST",
+      headers: authorization === undefined ? {} : { authorization },
+    } as unknown as ApiRequest;
+  }
+
+  it("fails closed with 500 when the cron secret is not configured", async () => {
+    delete process.env.DELIVERY_FACTORY_CRON_SECRET;
+    const { res, getBody } = fakeRes();
+    await handler(fakeReq("Bearer "), res);
+    expect(res.statusCode).toBe(500);
+    expect(getBody()).toContain("misconfigured");
+  });
+
+  it("fails closed with 500 when the cron secret is empty", async () => {
+    process.env.DELIVERY_FACTORY_CRON_SECRET = "";
+    const { res } = fakeRes();
+    await handler(fakeReq("Bearer s3cr3t"), res);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("rejects a wrong bearer with 401 when the secret is configured", async () => {
+    process.env.DELIVERY_FACTORY_CRON_SECRET = "s3cr3t";
+    const { res } = fakeRes();
+    await handler(fakeReq("Bearer nope"), res);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("rejects an empty bearer token with 401 when the secret is configured", async () => {
+    process.env.DELIVERY_FACTORY_CRON_SECRET = "s3cr3t";
+    const { res } = fakeRes();
+    await handler(fakeReq("Bearer "), res);
+    expect(res.statusCode).toBe(401);
   });
 });

@@ -25,7 +25,13 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
     sendJson(res, 405, { allow: "POST" }, { error: "Method not allowed" });
     return;
   }
-  const secret = process.env.DELIVERY_FACTORY_CRON_SECRET ?? "";
+  const secret = process.env.DELIVERY_FACTORY_CRON_SECRET;
+  if (!secret) {
+    // Fail closed: never dispatch when the cron secret is not configured.
+    // (An empty secret must not fall through to bearer comparison.)
+    sendJson(res, 500, {}, { error: "Server misconfigured" });
+    return;
+  }
   if (!bearerMatches(req.headers.authorization, secret)) {
     sendJson(res, 401, {}, { error: "Unauthorized" });
     return;

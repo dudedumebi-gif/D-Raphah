@@ -248,6 +248,9 @@ export async function dispatchDueFeedback(options: {
 
 /** Constant-time bearer comparison for the internal dispatch endpoint. */
 export function bearerMatches(header: string | undefined, secret: string): boolean {
+  // Fail closed: an unconfigured (empty) secret never matches, so a missing
+  // DELIVERY_FACTORY_CRON_SECRET cannot be bypassed with `Bearer ` (empty token).
+  if (!secret) return false;
   if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
   const token = Buffer.from(header.slice(7), "utf8");
   const expected = Buffer.from(secret, "utf8");
