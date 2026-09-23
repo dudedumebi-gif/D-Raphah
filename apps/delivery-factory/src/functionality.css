@@ -43,6 +43,31 @@
   border-radius: 50%;
   background: #8b75d1;
 }
+.pilot-badge {
+  font: 700 10px "DM Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: #8b75d1;
+  color: #f4f1ff;
+  padding: 3px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.status-action {
+  margin-left: auto;
+  font: 600 11px Manrope, sans-serif;
+  background: transparent;
+  color: #6d6684;
+  border: 1px solid #d8d4e8;
+  border-radius: 7px;
+  padding: 5px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.status-action:hover {
+  background: #e9e6f5;
+  color: #49406a;
+}
 .release-card {
   font: inherit;
   color: inherit;
