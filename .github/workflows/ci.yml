@@ -183,6 +183,27 @@ jobs:
       - name: Delivery Factory intake tests
         run: pnpm --filter @raphah/delivery-factory-app test tests/intake.test.ts
 
+  # ---------------------------------------------------------------------------
+  # Container build: keep the Cloud Run migration path warm. Builds both app
+  # images (no push) so Dockerfile drift is caught the same day it lands.
+  # Runs when either app, the contract, or the Dockerfiles change.
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      needs.changes.outputs.lead-engine == 'true' ||
+      needs.changes.outputs.delivery-factory == 'true' ||
+      needs.changes.outputs.handoff-contract == 'true' ||
+      needs.changes.outputs.root == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Delivery Factory image
+        run: docker build -f apps/delivery-factory/Dockerfile -t d-raphah-delivery-factory:ci .
+      - name: Build Lead Engine image
+        run: docker build -f apps/leads-engine/Dockerfile -t d-raphah-leads-engine:ci .
+
   legacy:
     name: Legacy apps (lead-engine, delivery-tool)
     runs-on: ubuntu-latest

@@ -14,6 +14,11 @@ COPY packages/handoff-contract ./packages/handoff-contract
 COPY apps/delivery-factory/package.json ./apps/delivery-factory/package.json
 RUN pnpm install --frozen-lockfile --filter @raphah/delivery-factory-app...
 
+# The api/ handlers import @raphah/handoff-contract from its built dist/
+# (gitignored, so absent from a fresh checkout). Build it before the app
+# build and typecheck, which both resolve the contract's dist types.
+RUN pnpm --filter @raphah/handoff-contract build
+
 # Build the Vite SPA and typecheck the api.
 COPY apps/delivery-factory ./apps/delivery-factory
 RUN pnpm --filter @raphah/delivery-factory-app build
@@ -34,6 +39,12 @@ RUN pnpm install --frozen-lockfile --prod --filter @raphah/delivery-factory-app.
 COPY --from=build /repo/apps/delivery-factory/dist ./dist
 COPY --from=build /repo/apps/delivery-factory/api ./api
 COPY --from=build /repo/apps/delivery-factory/server ./server
+# dist/ is gitignored, so the context copy of the contract above has no
+# built output — ship it from the build stage. vercel.json is required too:
+# server/adapter.ts applies its rewrites at runtime for /api/workflows/* and
+# /api/projects/* routing.
+COPY --from=build /repo/packages/handoff-contract/dist ./packages/handoff-contract/dist
+COPY --from=build /repo/apps/delivery-factory/vercel.json ./vercel.json
 
 # Required at runtime (same names as the Vercel project):
 #   DELIVERY_DATABASE_URL, HANDOFF_* / FEEDBACK_* key material,
