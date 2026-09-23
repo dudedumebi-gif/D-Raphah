@@ -4,8 +4,8 @@ import {
   verifyPackage,
 } from "@raphah/handoff-contract";
 import { z } from "zod";
-import type { SqlClient } from "./handoff";
-import { createAdminClient } from "./neon";
+import type { SqlClient } from "./handoff.js";
+import { createAdminClient } from "./neon.js";
 
 /**
  * Machine-to-machine delivery feedback ingestion.

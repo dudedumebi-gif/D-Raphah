@@ -1,8 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { handleApiRequest } from "../server/router";
+import { handleApiRequest } from "./router.js";
 
-export const config = {
-  maxDuration: 300,
+export const functionConfig = {
 };
 
 type VercelRequest = IncomingMessage & { body?: unknown };
@@ -22,7 +21,12 @@ async function requestBody(
   return chunks.length ? Buffer.concat(chunks) : undefined;
 }
 
-export default async function handler(
+/**
+ * Shared Vercel function handler. Each explicit endpoint file under api/
+ * re-exports this; the central router in server/router.ts performs its own
+ * pathname routing, auth, and validation.
+ */
+export default async function apiHandler(
   request: VercelRequest,
   response: ServerResponse,
 ): Promise<void> {

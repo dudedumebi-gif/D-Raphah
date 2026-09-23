@@ -9,8 +9,8 @@ import {
   retryDelaySeconds,
   scheduleIdempotencyKey,
   scoreSignals,
-} from "../server/domain";
-import { assertUrlAllowed, type CollectionPolicy } from "../server/collection";
+} from "../api/_lib/domain";
+import { assertUrlAllowed, type CollectionPolicy } from "../api/_lib/collection";
 
 const policy: CollectionPolicy = {
   allowedDomains: ["example.com"],

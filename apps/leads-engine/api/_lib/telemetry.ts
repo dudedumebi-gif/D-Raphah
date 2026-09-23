@@ -1,18 +1,35 @@
-import * as Sentry from "@sentry/node";
+/**
+ * Telemetry with lazily-loaded Sentry.
+ *
+ * `@sentry/node` is intentionally NOT imported at module top level: its
+ * heavy dynamic-require graph breaks Vercel's serverless function bundling
+ * (FUNCTION_INVOCATION_FAILED on every invocation). It is only loaded when
+ * SENTRY_DSN is configured and an error is actually reported.
+ */
 
-let initialized = false;
+type SentryModule = typeof import("@sentry/node");
 
-function ensureSentry(): void {
-  if (initialized || !process.env.SENTRY_DSN) return;
-  Sentry.init({
-    dsn: process.env.SENTRY_DSN,
-    environment:
-      process.env.SENTRY_ENVIRONMENT ?? process.env.VERCEL_ENV ?? "development",
-    release: process.env.VERCEL_GIT_COMMIT_SHA,
-    tracesSampleRate: 0.1,
-    sendDefaultPii: false,
-  });
-  initialized = true;
+let sentryPromise: Promise<SentryModule | null> | null = null;
+
+function loadSentry(): Promise<SentryModule | null> {
+  if (!sentryPromise) {
+    sentryPromise = (async () => {
+      if (!process.env.SENTRY_DSN) return null;
+      const Sentry = await import("@sentry/node");
+      Sentry.init({
+        dsn: process.env.SENTRY_DSN,
+        environment:
+          process.env.SENTRY_ENVIRONMENT ??
+          process.env.VERCEL_ENV ??
+          "development",
+        release: process.env.VERCEL_GIT_COMMIT_SHA,
+        tracesSampleRate: 0.1,
+        sendDefaultPii: false,
+      });
+      return Sentry;
+    })().catch(() => null);
+  }
+  return sentryPromise;
 }
 
 export interface LogContext {
@@ -53,17 +70,16 @@ export async function reportError(
 ): Promise<void> {
   const safeError = error instanceof Error ? error : new Error(String(error));
   log("error", safeError.message, { ...context, errorName: safeError.name });
-  ensureSentry();
-  if (initialized) {
-    Sentry.withScope((scope) => {
-      for (const [key, value] of Object.entries(context)) {
-        if (value !== undefined && value !== null)
-          scope.setTag(key, String(value));
-      }
-      Sentry.captureException(safeError);
-    });
-    await Sentry.flush(2_000);
-  }
+  const Sentry = await loadSentry();
+  if (!Sentry) return;
+  Sentry.withScope((scope) => {
+    for (const [key, value] of Object.entries(context)) {
+      if (value !== undefined && value !== null)
+        scope.setTag(key, String(value));
+    }
+    Sentry.captureException(safeError);
+  });
+  await Sentry.flush(2_000);
 }
 
 export function requestContext(request: Request, route: string): LogContext {
