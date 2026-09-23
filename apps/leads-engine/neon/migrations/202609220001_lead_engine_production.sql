@@ -27,6 +27,11 @@ do $$ begin
     create role anonymous nologin;
   end if;
 end $$;
+-- The Data API evaluates RLS policies as the authenticated/anonymous roles,
+-- so they must be able to resolve auth.user_id(). Without this, every
+-- policy call fails with "permission denied for schema auth" (caught by the
+-- genuine-JWT RLS test on 2026-09-23).
+grant usage on schema auth to authenticated, anonymous;
 
 create extension if not exists pgcrypto;
 
