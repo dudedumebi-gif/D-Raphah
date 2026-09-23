@@ -4,6 +4,11 @@ import type { ApiRequest } from "../api/_lib/http.js";
 
 const seen: Array<{ handler: string; query: unknown }> = [];
 
+vi.mock("../api/_workflows/index.js", () => ({
+  default: async (req: ApiRequest) => {
+    seen.push({ handler: "workflowsIndex", query: req.query });
+  },
+}));
 vi.mock("../api/_workflows/catalog.js", () => ({
   default: async (req: ApiRequest) => {
     seen.push({ handler: "catalog", query: req.query });
@@ -66,34 +71,28 @@ vi.mock("../api/_projects/[id]/stage.js", () => ({
   },
 }));
 
-const { default: workflowsDispatcher } = await import(
-  "../api/workflows/[...path].js"
-);
-const { default: projectsDispatcher } = await import(
-  "../api/projects/[...path].js"
-);
+const { default: wfDispatch } = await import("../api/wf-dispatch.js");
+const { default: pjDispatch } = await import("../api/pj-dispatch.js");
 
-function makeReq(path: string[]): { req: ApiRequest; res: ServerResponse; status: () => number | undefined; body: () => unknown } {
-  let statusCode: number | undefined;
+function makeReq(path: string): {
+  req: ApiRequest;
+  res: ServerResponse;
+  status: () => number | undefined;
+  body: () => unknown;
+} {
   let payload: unknown;
   const req = { query: { path } } as unknown as ApiRequest;
   const res = {
-    statusCode,
+    statusCode: undefined as number | undefined,
     setHeader: () => {},
     end: (data?: unknown) => {
       payload = data;
     },
-  } as unknown as ServerResponse & { statusCode: number | undefined };
-  // sendJson sets res.statusCode then res.end(string)
-  const origEnd = res.end.bind(res);
-  (res as { end: (d?: unknown) => void }).end = (d?: unknown) => {
-    payload = d;
-    return origEnd(d);
-  };
+  } as unknown as ServerResponse;
   return {
     req,
     res,
-    status: () => res.statusCode,
+    status: () => (res as { statusCode?: number }).statusCode,
     body: () => {
       try {
         return JSON.parse(String(payload));
@@ -104,54 +103,57 @@ function makeReq(path: string[]): { req: ApiRequest; res: ServerResponse; status
   };
 }
 
-describe("workflows catch-all dispatcher", () => {
+describe("wf-dispatch", () => {
   it.each([
-    [["catalog"], "catalog", {}],
-    [["wf-1"], "workflowById", { id: "wf-1" }],
-    [["wf-1", "execute"], "execute", { id: "wf-1" }],
-    [["wf-1", "runs"], "workflowRuns", { id: "wf-1" }],
-    [["runs", "run-9"], "runDetail", { runId: "run-9" }],
-  ])("routes %j to %s", async (path, expected, params) => {
+    ["", "workflowsIndex", {}],
+    ["catalog", "catalog", {}],
+    ["wf-1", "workflowById", { id: "wf-1" }],
+    ["wf-1/execute", "execute", { id: "wf-1" }],
+    ["wf-1/runs", "workflowRuns", { id: "wf-1" }],
+    ["runs/run-9", "runDetail", { runId: "run-9" }],
+  ])("routes ?path=%s to %s", async (path, expected, params) => {
     seen.length = 0;
-    const t = makeReq(path as string[]);
-    await workflowsDispatcher(t.req, t.res);
+    const t = makeReq(path);
+    await wfDispatch(t.req, t.res);
     expect(seen).toHaveLength(1);
     expect(seen[0].handler).toBe(expected);
-    expect(seen[0].query).toMatchObject({ ...params, path });
+    expect(seen[0].query).toMatchObject(params);
+    expect(seen[0].query).not.toHaveProperty("path");
   });
 
   it("returns 404 for unknown workflow sub-paths", async () => {
     seen.length = 0;
-    const t = makeReq(["wf-1", "nope", "deep"]);
-    await workflowsDispatcher(t.req, t.res);
+    const t = makeReq("wf-1/nope/deep");
+    await wfDispatch(t.req, t.res);
     expect(seen).toHaveLength(0);
     expect(t.status()).toBe(404);
     expect(t.body()).toMatchObject({ error: "Not found" });
   });
 });
 
-describe("projects catch-all dispatcher", () => {
+describe("pj-dispatch", () => {
   it.each([
-    [["p-1"], "project", { id: "p-1" }],
-    [["p-1", "clarifications"], "clarifications", { id: "p-1" }],
-    [["p-1", "clarifications", "c-2", "resolve"], "resolveClarification", { id: "p-1", cid: "c-2" }],
-    [["p-1", "events"], "events", { id: "p-1" }],
-    [["p-1", "milestones"], "milestones", { id: "p-1" }],
-    [["p-1", "milestones", "m-3", "complete"], "completeMilestone", { id: "p-1", mid: "m-3" }],
-    [["p-1", "stage"], "stage", { id: "p-1" }],
-  ])("routes %j to %s", async (path, expected, params) => {
+    ["p-1", "project", { id: "p-1" }],
+    ["p-1/clarifications", "clarifications", { id: "p-1" }],
+    ["p-1/clarifications/c-2/resolve", "resolveClarification", { id: "p-1", cid: "c-2" }],
+    ["p-1/events", "events", { id: "p-1" }],
+    ["p-1/milestones", "milestones", { id: "p-1" }],
+    ["p-1/milestones/m-3/complete", "completeMilestone", { id: "p-1", mid: "m-3" }],
+    ["p-1/stage", "stage", { id: "p-1" }],
+  ])("routes ?path=%s to %s", async (path, expected, params) => {
     seen.length = 0;
-    const t = makeReq(path as string[]);
-    await projectsDispatcher(t.req, t.res);
+    const t = makeReq(path);
+    await pjDispatch(t.req, t.res);
     expect(seen).toHaveLength(1);
     expect(seen[0].handler).toBe(expected);
-    expect(seen[0].query).toMatchObject({ ...params, path });
+    expect(seen[0].query).toMatchObject(params);
+    expect(seen[0].query).not.toHaveProperty("path");
   });
 
   it("returns 404 for unknown project sub-paths", async () => {
     seen.length = 0;
-    const t = makeReq(["p-1", "nope"]);
-    await projectsDispatcher(t.req, t.res);
+    const t = makeReq("p-1/nope");
+    await pjDispatch(t.req, t.res);
     expect(seen).toHaveLength(0);
     expect(t.status()).toBe(404);
   });

@@ -6,14 +6,14 @@
  * here, so the service can be shipped as a container to Google Cloud Run,
  * a VM, or `docker compose` with zero handler changes.
  *
- * Routing mirrors Vercel file-system routing:
+ * Routing mirrors Vercel file-system routing plus vercel.json rewrites:
  *   api/health.ts              -> GET /api/health
- *   api/workflows/[...path].ts -> /api/workflows/* (catch-all dispatcher;
- *                                 req.query.path is the segment array)
+ *   /api/workflows/:path*      -> /api/wf-dispatch?path=:path* (rewrite)
+ *   /api/projects/:path*       -> /api/pj-dispatch?path=:path* (rewrite)
  *
  * Underscore-prefixed directories (api/_lib, api/_workflows, api/_projects)
  * are not routes — they hold shared code and per-path handlers invoked by
- * the catch-all dispatchers.
+ * the dispatcher functions.
  *
  * Vercel normally provides `req.query`; the adapter populates it from the
  * URL search params merged over the route params.
@@ -25,10 +25,15 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
+import {
+  createReadStream,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { extname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-
 type Handler = (
   req: IncomingMessage & { query?: Record<string, string | string[] | undefined> },
   res: ServerResponse,
@@ -45,6 +50,84 @@ interface Route {
 const API_DIR = join(process.cwd(), "api");
 const STATIC_DIR = process.env.STATIC_DIR || "";
 const PORT = Number(process.env.PORT || 8080);
+
+interface RewriteRule {
+  pattern: RegExp;
+  destination: string;
+}
+
+/** Compile vercel.json rewrite sources (:name and :name* segments) to regexes. */
+function loadRewrites(): RewriteRule[] {
+  const configPath = join(process.cwd(), "vercel.json");
+  if (!existsSync(configPath)) return [];
+  try {
+    const config = JSON.parse(
+      readFileSync(configPath, "utf8"),
+    ) as { rewrites?: Array<{ source?: string; destination?: string }> };
+    return (config.rewrites ?? [])
+      .filter((r) => r.source && r.destination)
+      .map((r) => {
+        const src = r.source as string;
+        let regex = "";
+        for (let i = 0; i < src.length; i++) {
+          if (src[i] === ":") {
+            const m = /^:([A-Za-z0-9_]+)(\*)?/.exec(src.slice(i));
+            if (m) {
+              if (m[2] && regex.endsWith("/")) {
+                // ":name*" matches zero or more segments, so the preceding
+                // slash is optional too (mirrors Vercel: /api/workflows/:path*
+                // also matches the bare /api/workflows).
+                regex = regex.slice(0, -1) + `(?:/(?<${m[1]}>.*))?`;
+              } else {
+                regex += m[2] ? `(?<${m[1]}>.*)` : `(?<${m[1]}>[^/]+)`;
+              }
+              i += m[0].length - 1;
+              continue;
+            }
+          }
+          regex += src[i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        }
+        return {
+          pattern: new RegExp(`^${regex}/?$`),
+          destination: r.destination as string,
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+const REWRITES = loadRewrites();
+
+/**
+ * Apply the first matching vercel.json rewrite, mirroring Vercel's routing:
+ * rewrites run before the file-system router. Returns the rewritten
+ * pathname and the destination's query params to merge.
+ */
+function applyRewrite(
+  pathname: string,
+): { pathname: string; extraQuery: Record<string, string> } | null {
+  for (const rule of REWRITES) {
+    const match = rule.pattern.exec(pathname);
+    if (!match || !match.groups) continue;
+    let dest = rule.destination;
+    for (const [name, value] of Object.entries(match.groups)) {
+      const v = value ?? "";
+      dest = dest.split(`:${name}*`).join(v).split(`:${name}`).join(v);
+    }
+    const qIndex = dest.indexOf("?");
+    const extraQuery: Record<string, string> = {};
+    let destPath = dest;
+    if (qIndex >= 0) {
+      destPath = dest.slice(0, qIndex);
+      for (const [k, v] of new URLSearchParams(dest.slice(qIndex + 1))) {
+        extraQuery[k] = v;
+      }
+    }
+    return { pathname: destPath, extraQuery };
+  }
+  return null;
+}
 
 function discover(dir: string): Route[] {
   const routes: Route[] = [];
@@ -126,7 +209,7 @@ async function main(): Promise<void> {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const url = new URL(req.url || "/", "http://localhost");
-      const pathname = url.pathname;
+      let pathname = url.pathname;
 
       if (!pathname.startsWith("/api/")) {
         if (serveStatic(pathname, res)) return;
@@ -135,6 +218,11 @@ async function main(): Promise<void> {
         res.end(JSON.stringify({ error: "Not found" }));
         return;
       }
+
+      // Mirror Vercel: vercel.json rewrites run before the file-system router.
+      const rewritten = applyRewrite(pathname);
+      const rewriteQuery = rewritten?.extraQuery ?? {};
+      if (rewritten) pathname = rewritten.pathname;
 
       for (const route of routes) {
         const match = route.pattern.exec(pathname);
@@ -160,6 +248,9 @@ async function main(): Promise<void> {
           else query[key] = [existing, value];
         });
         Object.assign(query, params);
+        // Rewrite-supplied params (e.g. ?path= from the dispatcher rewrites)
+        // behave like Vercel's: destination params win over the request's.
+        Object.assign(query, rewriteQuery);
         (req as unknown as { query: typeof query }).query = query;
         await mod.default(req as Parameters<Handler>[0], res);
         return;
