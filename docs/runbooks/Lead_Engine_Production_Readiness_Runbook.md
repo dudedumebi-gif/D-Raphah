@@ -168,7 +168,7 @@ Set this variable on the **Lead Engine project only**:
 - `DELIVERY_FACTORY_PUBLIC_KEY_PEM` (the factory public key below, `\n` escapes for single-line values)
 
 ```
------BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqly1hebw+Xoguep3B4/Yr3OFvGOG0CIa/05Tl4sfikI=\n-----END PUBLIC KEY-----\n
+-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAtCKCkpzUCBRA4DmIDWzBf0kamljtBlUus7sIvTzD3pI=\n-----END PUBLIC KEY-----
 ```
 
 Create the dispatcher schedule once the QStash credential is valid:
