@@ -42,6 +42,10 @@ export class FakeDeliveryDb implements DeliveryDb {
     return email ? { email } : null;
   }
 
+  async revokeOperatorSession(token: string): Promise<boolean> {
+    return this.operatorSessions.delete(token);
+  }
+
   async reserveNonce(nonce: string): Promise<boolean> {
     if (this.nonces.has(nonce)) return false;
     this.nonces.add(nonce);

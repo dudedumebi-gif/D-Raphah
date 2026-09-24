@@ -101,3 +101,28 @@ export async function requireOperator(
 export function dbSessionValidator(db: DeliveryDb): SessionValidator {
   return (token: string) => db.findOperatorSession(token);
 }
+
+/**
+ * Verify that the request carries a live better-auth session, WITHOUT the
+ * operator allowlist check. Used by POST /api/sign-out: anyone holding a
+ * valid session (allowlisted or not) must be able to revoke it.
+ * Throws OperatorAuthError(401) for missing/invalid/expired tokens.
+ */
+export async function requireSession(
+  req: ApiRequest,
+  validateSession: SessionValidator,
+): Promise<OperatorIdentity & { token: string }> {
+  const token = bearerToken(req);
+  if (!token) {
+    throw new OperatorAuthError(401, "Missing operator credentials");
+  }
+  const session = await validateSession(token);
+  if (!session) {
+    throw new OperatorAuthError(401, "Invalid or expired operator session");
+  }
+  const email = session.email.trim().toLowerCase();
+  if (!email) {
+    throw new OperatorAuthError(401, "Operator session has no email");
+  }
+  return { email, token };
+}

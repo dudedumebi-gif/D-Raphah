@@ -204,27 +204,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
+    const token = currentToken;
     const authUrl = authUrlRef.current;
-    if (!authUrl) throw new Error("Operator sign-in is not configured.");
     setError(null);
-    const res = await fetch(`${authUrl}/sign-out`, {
-      method: "POST",
-      credentials: "include",
-    }).catch(() => null);
-    if (!res || !res.ok) {
-      setError("Sign-out failed — please try again.");
-      return;
+    // Authoritative revocation first: delete the session row via our own
+    // API. This does not depend on the Neon Auth /sign-out endpoint.
+    if (token) {
+      let revoked = false;
+      try {
+        const res = await fetch("/api/sign-out", {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}` },
+        });
+        revoked = res.ok;
+      } catch {
+        revoked = false;
+      }
+      if (!revoked) {
+        setError("Sign-out failed — please try again.");
+        return;
+      }
     }
-    // Confirm the server actually revoked the session: a surviving cookie
-    // would silently re-establish it on the next bootstrap, making sign-out
-    // look successful while the session stays live.
-    const check = await loadOperatorSession(authUrl).catch(() => ({
-      token: "",
-      email: null,
-    }));
-    if (check.token) {
-      setError("Sign-out did not complete — please try again.");
-      return;
+    // Best-effort: also ask Neon Auth to clear its cookie. Ignored on
+    // failure — the session row is already gone, so the cookie is dead.
+    if (authUrl) {
+      fetch(`${authUrl}/sign-out`, {
+        method: "POST",
+        credentials: "include",
+      }).catch(() => {});
     }
     currentToken = null;
     setEmail(null);
