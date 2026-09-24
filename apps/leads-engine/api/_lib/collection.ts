@@ -33,6 +33,12 @@ export interface CollectionResult {
   robotsDecision: "allowed" | "not_checked";
   fetchedAt: string;
   coordinates?: { latitude: number; longitude: number };
+  /**
+   * How coordinates were obtained: "embedded" from JSON-LD/API payloads,
+   * "geocoded" from address extraction + Nominatim (lead-vision gap 5).
+   * Absent when no coordinates could be resolved.
+   */
+  coordinatesSource?: "embedded" | "geocoded";
 }
 
 export function extractCoordinates(
@@ -85,6 +91,378 @@ export function extractCoordinates(
   );
   // Multiple branch coordinates are ambiguous; do not guess which business is targeted.
   return unique.size === 1 ? [...unique.values()][0] : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence enrichment (lead-vision gaps 4 & 5).
+//
+// The collector captures tech-stack fingerprint artifacts (response headers,
+// <meta name="generator">, <script src> values), discovers and fetches a
+// bounded set of careers/jobs pages, and resolves street addresses to
+// coordinates via Nominatim. Fingerprint and job evidence is appended to the
+// collected text as marked lines so it flows through the existing
+// detectSignals() -> scoreSignals() pipeline unchanged; geocoded coordinates
+// fill CollectionResult.coordinates only when no embedded coordinates were
+// found, so sites that already carried coordinates behave exactly as before.
+// ---------------------------------------------------------------------------
+
+/** Maximum careers/jobs pages fetched per homepage scrape (page budget). */
+export const MAX_JOB_PAGES = 2;
+
+export interface PageFingerprint {
+  /** Value of <meta name="generator">, when present. */
+  metaGenerator: string | null;
+  /** Selected response headers, keyed by lowercased header name. */
+  headers: Record<string, string>;
+  /** Every <script src> value found in the HTML. */
+  scriptSrcs: string[];
+}
+
+const FINGERPRINT_HEADER_NAMES = [
+  "server",
+  "x-powered-by",
+  "x-generator",
+  "x-aspnet-version",
+  "x-aspnetmvc-version",
+] as const;
+
+export function fingerprintPage(
+  html: string,
+  headers: Record<string, string>,
+): PageFingerprint {
+  const lowered: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers))
+    lowered[name.toLowerCase()] = value;
+  const picked: Record<string, string> = {};
+  for (const name of FINGERPRINT_HEADER_NAMES) {
+    const value = lowered[name];
+    if (value) picked[name] = value;
+  }
+  const metaGenerator =
+    /<meta\b[^>]*\bname=["']generator["'][^>]*\bcontent=["']([^"']+)["']/i.exec(
+      html,
+    )?.[1] ??
+    /<meta\b[^>]*\bcontent=["']([^"']+)["'][^>]*\bname=["']generator["']/i.exec(
+      html,
+    )?.[1] ??
+    null;
+  const scriptSrcs = [
+    ...html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi),
+  ].map((match) => match[1]);
+  return { metaGenerator, headers: picked, scriptSrcs };
+}
+
+/**
+ * Renders fingerprint artifacts as marked evidence lines. The fp_* signal
+ * rules in domain.ts match these lines; each excerpt cites the concrete
+ * artifact (header value, generator string, or script URL).
+ */
+export function fingerprintEvidenceLines(
+  fingerprint: PageFingerprint,
+): string[] {
+  const lines: string[] = [];
+  if (fingerprint.metaGenerator)
+    lines.push(
+      `[tech-fingerprint] meta-generator: ${fingerprint.metaGenerator}`,
+    );
+  for (const [name, value] of Object.entries(fingerprint.headers))
+    lines.push(`[tech-fingerprint] header: ${name}: ${value}`);
+  for (const src of fingerprint.scriptSrcs)
+    lines.push(`[tech-fingerprint] script-src: ${src}`);
+  return lines;
+}
+
+const JOB_PATH_PATTERN = /\b(careers?|jobs?|join[-\s]?us|work[-\s]?with[-\s]?us)\b/i;
+
+const JOB_BOARD_DOMAINS = [
+  "lever.co",
+  "greenhouse.io",
+  "workable.com",
+  "jobvite.com",
+  "icims.com",
+  "smartrecruiters.com",
+] as const;
+
+const MANUAL_ROLE_PHRASES = [
+  "data entry",
+  "receptionist",
+  "file clerk",
+  "administrative assistant",
+  "office assistant",
+  "manual filing",
+] as const;
+
+/**
+ * Discovers careers/jobs pages linked from the homepage. Same-host links only
+ * (cross-host links cannot be fetched under the source policy anyway);
+ * returns at most MAX_JOB_PAGES canonicalized URLs in document order.
+ */
+export function discoverJobPageUrls(html: string, baseUrl: string): string[] {
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const match of html.matchAll(
+    /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+  )) {
+    const href = match[1].trim();
+    if (!href || href.startsWith("#")) continue;
+    // Skip non-navigational schemes; http(s) (absolute or relative) only.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^https?:/i.test(href)) continue;
+    let url: URL;
+    try {
+      url = new URL(href, base);
+    } catch {
+      continue;
+    }
+    if (url.hostname.toLowerCase() !== base.hostname.toLowerCase()) continue;
+    const anchorText = stripHtml(match[2] ?? "");
+    if (
+      !JOB_PATH_PATTERN.test(url.pathname) &&
+      !JOB_PATH_PATTERN.test(anchorText)
+    )
+      continue;
+    let key: string;
+    try {
+      key = canonicalizeUrl(url.toString());
+    } catch {
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push(key);
+    if (found.length >= MAX_JOB_PAGES) break;
+  }
+  return found;
+}
+
+/** Detects embedded job-board widgets (script, iframe, or link references). */
+export function detectJobBoards(html: string): string[] {
+  const references = [
+    ...html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi),
+    ...html.matchAll(/<iframe\b[^>]*\bsrc=["']([^"']+)["']/gi),
+    ...html.matchAll(/<a\b[^>]*\bhref=["']([^"']+)["']/gi),
+  ].map((match) => match[1].toLowerCase());
+  return JOB_BOARD_DOMAINS.filter((board) =>
+    references.some((reference) => reference.includes(board)),
+  );
+}
+
+/** Finds manual-role hiring phrases in job-page text. */
+export function detectHiringRoles(text: string): string[] {
+  const lowered = ` ${text.toLowerCase()} `;
+  return MANUAL_ROLE_PHRASES.filter((phrase) => lowered.includes(phrase));
+}
+
+const STREET_SUFFIX =
+  "(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|circle|cir|place|pl|terrace|ter|parkway|pkwy|trail|square|sq)";
+
+const POSTAL_CODE = "(?:[A-Z]\\d[A-Z]\\s?\\d[A-Z]\\d|\\d{5}(?:-\\d{4})?)";
+
+// Street line: number + name + recognized suffix. Case-insensitive, with a
+// lookahead so "St" cannot match inside "Styx".
+const STREET_RE = new RegExp(
+  `\\b\\d{1,5}\\s+[A-Za-z0-9][\\w.'-]*(?:\\s+[A-Za-z][\\w.'-]*){0,4}\\s+${STREET_SUFFIX}\\.?(?![A-Za-z])`,
+  "i",
+);
+
+// Address tail, anchored right after the street line. Deliberately NOT
+// case-insensitive: a state/province code must be truly uppercase ("ON"),
+// otherwise trailing prose ("Open daily.") would be swallowed as a city.
+const ADDRESS_TAIL_RE = new RegExp(
+  `^(?:` +
+    `\\s*,\\s*[A-Za-z][\\w.'-]*(?:\\s+[A-Za-z][\\w.'-]*){0,2}(?:\\s*,?\\s*[A-Z]{2})?(?:\\s*${POSTAL_CODE})?` +
+    `|\\s+[A-Z]{2}(?:\\s*${POSTAL_CODE})?` +
+    `|\\s*${POSTAL_CODE}` +
+    `)`,
+);
+
+/**
+ * Extracts the first plausible street address from page text. Heuristic and
+ * conservative: requires a street number plus a recognized street suffix,
+ * and the tail only extends the match over a comma-separated city, an
+ * uppercase state/province code, or a postal code.
+ */
+export function extractAddress(text: string): string | null {
+  const street = STREET_RE.exec(text);
+  if (!street) return null;
+  const tail = ADDRESS_TAIL_RE.exec(
+    text.slice(street.index + street[0].length),
+  );
+  return normalizeText(street[0] + (tail ? tail[0] : ""));
+}
+
+/** Cache key for the geocode_cache table: case/whitespace/punctuation free. */
+export function normalizeAddress(address: string): string {
+  return address
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export interface GeocodeCoordinates {
+  latitude: number;
+  longitude: number;
+}
+
+/**
+ * Cache adapter for geocode results. Production wiring installs a
+ * Neon-backed adapter over the geocode_cache table (see
+ * neon/migrations/202609240001_geocode_cache.sql); the default is an
+ * in-process memory cache.
+ */
+export interface GeocodeCacheAdapter {
+  get(
+    normalizedAddress: string,
+  ): Promise<GeocodeCoordinates | null>;
+  set(
+    normalizedAddress: string,
+    coords: GeocodeCoordinates,
+  ): Promise<void>;
+}
+
+export function createMemoryGeocodeCache(): GeocodeCacheAdapter {
+  const store = new Map<string, GeocodeCoordinates>();
+  return {
+    get: async (key) => store.get(key) ?? null,
+    set: async (key, coords) => {
+      store.set(key, { ...coords });
+    },
+  };
+}
+
+let defaultGeocodeCache: GeocodeCacheAdapter = createMemoryGeocodeCache();
+
+/** Installs the process-wide geocode cache adapter (production wiring). */
+export function setGeocodeCacheAdapter(adapter: GeocodeCacheAdapter): void {
+  defaultGeocodeCache = adapter;
+}
+
+/** Test seam: restores the default in-memory geocode cache. */
+export function resetGeocodeCacheAdapter(): void {
+  defaultGeocodeCache = createMemoryGeocodeCache();
+}
+
+export interface GeocodeOptions {
+  cache?: GeocodeCacheAdapter;
+  fetcher?: typeof fetch;
+  userAgent?: string;
+  /** Test seams for the 1 req/s politeness throttle. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
+const NOMINATIM_MIN_INTERVAL_MS = 1000;
+let lastNominatimRequestAt = 0;
+
+/** Test seam: resets the in-process Nominatim request throttle. */
+export function resetGeocodeThrottle(): void {
+  lastNominatimRequestAt = 0;
+}
+
+function validGeocodeCoords(coords: GeocodeCoordinates): boolean {
+  return (
+    Number.isFinite(coords.latitude) &&
+    Number.isFinite(coords.longitude) &&
+    Math.abs(coords.latitude) <= 90 &&
+    Math.abs(coords.longitude) <= 180
+  );
+}
+
+/**
+ * Resolves a street address to coordinates via Nominatim, cache-first.
+ * Best-effort: any failure (cache error, network error, bad payload,
+ * no result) returns null instead of throwing, so enrichment can never
+ * fail a scrape.
+ */
+export async function geocodeAddress(
+  rawAddress: string,
+  options: GeocodeOptions = {},
+): Promise<GeocodeCoordinates | null> {
+  try {
+    const key = normalizeAddress(rawAddress);
+    if (!key) return null;
+    const cache = options.cache ?? defaultGeocodeCache;
+    const cached = await cache.get(key);
+    if (cached && validGeocodeCoords(cached)) return cached;
+
+    // Nominatim usage policy: at most 1 request/second, valid User-Agent.
+    const now = options.now ?? Date.now;
+    const sleep =
+      options.sleep ??
+      ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const waitMs = NOMINATIM_MIN_INTERVAL_MS - (now() - lastNominatimRequestAt);
+    if (waitMs > 0) await sleep(waitMs);
+
+    const fetcher = options.fetcher ?? pinnedFetch;
+    const params = new URLSearchParams({
+      format: "jsonv2",
+      q: rawAddress,
+      limit: "1",
+      addressdetails: "0",
+    });
+    const response = await fetcher(`${NOMINATIM_URL}?${params.toString()}`, {
+      headers: {
+        "user-agent": options.userAgent ?? "RaphahLeadEngine/1.0",
+        accept: "application/json",
+      },
+      redirect: "error",
+    });
+    lastNominatimRequestAt = now();
+    if (!response.ok) return null;
+    const payload = (await response.json()) as unknown;
+    const first =
+      Array.isArray(payload) && payload.length > 0 ? payload[0] : null;
+    const coords =
+      first && typeof first === "object"
+        ? {
+            latitude: Number(
+              (first as Record<string, unknown>).lat,
+            ),
+            longitude: Number(
+              (first as Record<string, unknown>).lon,
+            ),
+          }
+        : null;
+    if (!coords || !validGeocodeCoords(coords)) return null;
+    try {
+      await cache.set(key, coords);
+    } catch {
+      // Cache writes are advisory: a good geocode result is still returned.
+    }
+    return coords;
+  } catch {
+    return null;
+  }
+}
+
+function truncateChars(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
+export interface CollectUrlOptions {
+  /** Capture tech-stack fingerprint artifacts. Default true for HTML. */
+  fingerprint?: boolean;
+  /**
+   * Discover and fetch up to MAX_JOB_PAGES careers/jobs pages from the
+   * homepage. Default true; job pages never recurse further.
+   */
+  jobPages?: boolean;
+  /**
+   * Address -> coordinate enrichment via Nominatim. Enabled by default with
+   * the process-wide cache adapter; set false to disable.
+   */
+  geocode?: GeocodeOptions | false;
+  /** Test seam: skip DNS public-host verification (unit tests lack real DNS). */
+  skipPublicHostCheck?: boolean;
+  /** Internal: recursion depth for job-page fetches. */
+  _depth?: number;
 }
 
 const PRIVATE_V4 = [
@@ -437,6 +815,7 @@ export async function collectUrl(
   rawUrl: string,
   policy: CollectionPolicy,
   fetcher: typeof fetch = pinnedFetch,
+  options: CollectUrlOptions = {},
 ): Promise<CollectionResult> {
   if (
     !["static_html", "api", "rss", "sitemap"].includes(policy.collectionMethod)
@@ -445,8 +824,13 @@ export async function collectUrl(
       `Collection method ${policy.collectionMethod} is not supported by the production worker`,
     );
   }
+  // Test seam: unit tests run without real DNS, so they skip the public-host
+  // check. Production callers always leave this unset.
+  const verifyHost = options.skipPublicHostCheck
+    ? async (_hostname: string): Promise<void> => undefined
+    : assertPublicHost;
   let current = assertUrlAllowed(rawUrl, policy);
-  await assertPublicHost(current.hostname);
+  await verifyHost(current.hostname);
   const robotsDecision = await checkRobots(current, policy, fetcher);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), policy.timeoutMs);
@@ -467,7 +851,7 @@ export async function collectUrl(
       if (!location)
         throw new Error("Redirect response omitted Location header");
       current = assertUrlAllowed(new URL(location, current).toString(), policy);
-      await assertPublicHost(current.hostname);
+      await verifyHost(current.hostname);
       await checkRobots(current, policy, fetcher);
       response = null;
     }
@@ -500,22 +884,97 @@ export async function collectUrl(
     const organization =
       extractMeta(rawContent, "og:site_name") ??
       extractMeta(rawContent, "application-name");
+    const isHtml = contentType.includes("html");
+    const baseExtractedText = isHtml
+      ? stripHtml(rawContent)
+      : normalizeText(rawContent);
+
+    // Gap 4: tech-stack fingerprinting + job-page evidence. Marked lines flow
+    // through the existing detectSignals() -> scoreSignals() pipeline.
+    const depth = options._depth ?? 0;
+    const evidenceExtras: string[] = [];
+    if (isHtml && options.fingerprint !== false) {
+      const headerRecord: Record<string, string> = {};
+      for (const name of FINGERPRINT_HEADER_NAMES) {
+        const value = response.headers.get(name);
+        if (value) headerRecord[name] = value;
+      }
+      evidenceExtras.push(
+        ...fingerprintEvidenceLines(fingerprintPage(rawContent, headerRecord)),
+      );
+    }
+    if (isHtml && depth === 0 && options.jobPages !== false) {
+      for (const jobUrl of discoverJobPageUrls(
+        rawContent,
+        current.toString(),
+      )) {
+        try {
+          const jobPage = await collectUrl(jobUrl, policy, fetcher, {
+            ...options,
+            _depth: depth + 1,
+            jobPages: false,
+            geocode: false,
+          });
+          const jobPath = new URL(jobUrl).pathname;
+          for (const board of detectJobBoards(jobPage.rawContent))
+            evidenceExtras.push(
+              `[job-page:${jobPath}] embedded-board: ${board}`,
+            );
+          for (const role of detectHiringRoles(jobPage.extractedText))
+            evidenceExtras.push(`[job-page:${jobPath}] hiring-role: ${role}`);
+          const jobExcerpt = truncateChars(jobPage.extractedText, 3000);
+          if (jobExcerpt)
+            evidenceExtras.push(`[job-page:${jobPath}] ${jobExcerpt}`);
+        } catch {
+          // Job-page enrichment is best-effort: policy denials, robots
+          // decisions, and fetch failures must not fail the homepage scrape.
+        }
+      }
+    }
+    const extractedText = evidenceExtras.length
+      ? `${baseExtractedText}\n${evidenceExtras.join("\n")}`
+      : baseExtractedText;
+
+    // Gap 5: address -> geocode enrichment. Only fills coordinates when the
+    // page carried none, so embedded-coordinate behavior is unchanged.
+    let coordinates = extractCoordinates(rawContent, contentType);
+    let coordinatesSource: "embedded" | "geocoded" | undefined = coordinates
+      ? "embedded"
+      : undefined;
+    if (!coordinates && isHtml && depth === 0 && options.geocode !== false) {
+      const address = extractAddress(extractedText);
+      if (address) {
+        const geocodeOpts =
+          typeof options.geocode === "object" ? options.geocode : {};
+        const resolved = await geocodeAddress(address, {
+          ...geocodeOpts,
+          fetcher: geocodeOpts.fetcher ?? fetcher,
+          userAgent:
+            geocodeOpts.userAgent ??
+            `${policy.userAgent} (${policy.contactEmail})`,
+        });
+        if (resolved) {
+          coordinates = resolved;
+          coordinatesSource = "geocoded";
+        }
+      }
+    }
+
     return {
       canonicalUrl: canonicalizeUrl(rawUrl),
       finalUrl: canonicalizeUrl(current.toString()),
       statusCode: response.status,
       contentType,
       rawContent,
-      extractedText: contentType.includes("html")
-        ? stripHtml(rawContent)
-        : normalizeText(rawContent),
+      extractedText,
       extractedTitle: title ? stripHtml(title) : null,
       extractedOrganization: organization ? stripHtml(organization) : null,
       contentHash: contentHash(rawContent),
       bytesDownloaded: new TextEncoder().encode(rawContent).byteLength,
       robotsDecision,
       fetchedAt: new Date().toISOString(),
-      coordinates: extractCoordinates(rawContent, contentType),
+      coordinates,
+      coordinatesSource,
     };
   } finally {
     clearTimeout(timeout);

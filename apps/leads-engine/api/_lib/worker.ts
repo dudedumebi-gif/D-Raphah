@@ -4,9 +4,11 @@ import { collectUrl, type CollectionPolicy } from "./collection.js";
 import {
   CriteriaSchema,
   detectSignals,
+  evaluateAutoApply,
   evaluateGeography,
   retryDelaySeconds,
   scoreSignals,
+  suggestCriteriaAdjustment,
 } from "./domain.js";
 import { truncateToByteLength } from "@raphah/handoff-contract";
 import { createAdminClient } from "./neon.js";
@@ -63,6 +65,7 @@ export interface WorkerTickResult {
   deadLettered: number;
   handoffsDispatched: number;
   handoffsFailed: number;
+  autoApplied: number;
 }
 
 function collectionPolicy(row: PolicyRow): CollectionPolicy {
@@ -293,6 +296,7 @@ export async function runWorkerTick(
     deadLettered: 0,
     handoffsDispatched: 0,
     handoffsFailed: 0,
+    autoApplied: 0,
   };
   const now = new Date().toISOString();
   const deploymentId =
@@ -333,6 +337,57 @@ export async function runWorkerTick(
     select public.compact_expired_evidence(${now}::timestamptz) as count
   `) as unknown as Array<{ count: number }>;
   result.compactedEvidence = Number(compactedRows[0]?.count ?? 0);
+  // Auto-apply (gap 3): one bounded criteria step per opted-in campaign.
+  // Failure-isolated so a bad campaign row can never fail the tick.
+  try {
+    const optedIn = (await client`
+      select id, workspace_id, criteria, updated_by
+      from public.scrape_campaigns
+      where auto_apply_criteria
+    `) as unknown as Array<{
+      id: string;
+      workspace_id: string;
+      criteria: unknown;
+      updated_by: string | null;
+    }>;
+    for (const campaign of optedIn) {
+      const counts = (await client`
+        select * from public.campaign_qualified_counts(${campaign.workspace_id}::uuid)
+      `) as unknown as Array<{ campaign_id: string; qualified_count: number }>;
+      const observed = Number(
+        counts.find((row) => row.campaign_id === campaign.id)
+          ?.qualified_count ?? 0,
+      );
+      const suggestion = suggestCriteriaAdjustment(campaign.criteria, observed);
+      const next = evaluateAutoApply(campaign.criteria, suggestion, {
+        autoApplyEnabled: true,
+      });
+      if (!next) continue;
+      await client`
+        update public.scrape_campaigns
+        set criteria = ${JSON.stringify(next)}::jsonb,
+          criteria_version = ${new Date().toISOString()},
+          updated_by = ${campaign.updated_by}
+        where id = ${campaign.id}::uuid
+      `;
+      // humanValidatorId = campaign owner-of-record (updated_by).
+      await client`
+        select public.log_workspace_event(
+          ${campaign.workspace_id}::uuid,
+          'criteria.auto_applied',
+          'scrape_campaigns',
+          ${campaign.id}::text,
+          ${`Auto-applied one bounded ${suggestion.direction} step (validator: ${campaign.updated_by ?? "unknown"})`}::text,
+          ${JSON.stringify(campaign.criteria)}::jsonb,
+          ${JSON.stringify(next)}::jsonb
+        )
+      `;
+      result.autoApplied += 1;
+    }
+  } catch (error) {
+    log("error", "auto_apply_tick_failed", { workerId });
+    await reportError(error, { workerId });
+  }
   const jobs = (await client`
     select * from public.lease_scrape_jobs(
       ${workerId}, 3, 240, ${now}::timestamptz

@@ -89,7 +89,10 @@ export interface CriteriaSuggestion {
     >
   >;
   rationale: string[];
-  autoApply: false;
+  // False for every engine-produced suggestion today (gap analysis: the
+  // suggestion stops at display). Widens to boolean so callers can mark
+  // suggestions that were produced for an auto-apply-opted-in campaign.
+  autoApply: boolean;
 }
 
 const SIGNAL_RULES: Array<{
@@ -230,6 +233,79 @@ const SIGNAL_RULES: Array<{
     strength: 14,
     pattern:
       /new location|expansion|rapid growth|acquired|acquires|acquiring|merger|takeover|scaling operations/i,
+  },
+  // --- Evidence enrichment: tech-stack fingerprinting (lead-vision gap 4).
+  // These rules fire on concrete collection artifacts (response headers,
+  // <meta name="generator">, <script src> values) that the collector appends
+  // to the evidence text as marked [tech-fingerprint] lines. They also fire
+  // on plain prose mentions ("we run on Shopify"), which is the same
+  // keyword-level evidence the engine already uses.
+  {
+    code: "fp_wordpress",
+    category: "digital_foundation",
+    polarity: "automated",
+    strength: 12,
+    pattern: /wordpress|wp-content|wp-includes/i,
+  },
+  {
+    code: "fp_shopify",
+    category: "digital_foundation",
+    polarity: "automated",
+    strength: 12,
+    pattern: /shopify|cdn\.shopify\.com/i,
+  },
+  {
+    code: "fp_site_builder",
+    category: "digital_foundation",
+    polarity: "automated",
+    strength: 8,
+    pattern: /wixstatic\.com|wix\.com|squarespace/i,
+  },
+  {
+    code: "fp_analytics",
+    category: "data_analytics",
+    polarity: "automated",
+    strength: 12,
+    pattern:
+      /google-analytics|googletagmanager|gtag\.js|segment\.io|mixpanel|hotjar/i,
+  },
+  {
+    code: "fp_chat_widget",
+    category: "customer_self_service",
+    polarity: "automated",
+    strength: 12,
+    pattern: /intercom|drift\.com|zendesk|freshchat|tawk\.to/i,
+  },
+  {
+    code: "fp_booking_widget",
+    category: "workflow_automation",
+    polarity: "automated",
+    strength: 14,
+    pattern: /calendly|acuityscheduling|bookafy|setmore/i,
+  },
+  {
+    code: "fp_legacy_stack",
+    category: "digital_foundation",
+    polarity: "manual",
+    strength: 14,
+    pattern: /asp\.net|coldfusion|frontpage|sharepoint|x-aspnet-version/i,
+  },
+  // --- Evidence enrichment: job-posting signals (lead-vision gap 4). ---
+  {
+    code: "job_board_embed",
+    category: "commercial_urgency",
+    polarity: "commercial",
+    strength: 14,
+    pattern:
+      /lever\.co|greenhouse\.io|workable\.com|jobvite|icims|smartrecruiters/i,
+  },
+  {
+    code: "job_manual_roles",
+    category: "workflow_automation",
+    polarity: "manual",
+    strength: 16,
+    pattern:
+      /\bdata entry\b|\breceptionist\b|\bfile clerk\b|\badministrative assistant\b|\boffice assistant\b/i,
   },
 ];
 
@@ -473,6 +549,97 @@ export function suggestCriteriaAdjustment(
     ],
     autoApply: false,
   };
+}
+
+// --- Lead-vision gap 3: apply suggestion + opt-in auto-apply. ---
+
+/**
+ * Maximum single-step movement per auto-apply evaluation, per criterion.
+ * Deliberately mirrors the step sizes suggestCriteriaAdjustment() itself
+ * uses, so an automated run can never move faster than the engine's own
+ * one-step recommendation.
+ */
+export const AUTO_APPLY_MAX_STEP = {
+  automationMaturityMax: 5,
+  opportunityPotentialMin: 5,
+  confidenceMin: 0.05,
+  minimumEvidenceCategories: 1,
+} as const;
+
+type AutoAdjustableKey = keyof typeof AUTO_APPLY_MAX_STEP;
+
+const AUTO_APPLY_HARD_BOUNDS: Record<AutoAdjustableKey, [number, number]> = {
+  automationMaturityMax: [0, 100],
+  opportunityPotentialMin: [0, 100],
+  confidenceMin: [0, 1],
+  minimumEvidenceCategories: [1, 6],
+};
+
+/**
+ * Merges a suggestion's partial changes into the campaign's current criteria
+ * and validates the result through CriteriaSchema — the exact same validation
+ * the PATCH /api/v1/criteria/:id route applies. Throws a ZodError on any
+ * invalid merge (same 400 behavior as the manual criteria editor).
+ */
+export function mergeSuggestionChanges(
+  criteriaInput: unknown,
+  changes: CriteriaSuggestion["changes"],
+): LeadCriteria {
+  const criteria = CriteriaSchema.parse(criteriaInput);
+  return CriteriaSchema.parse({ ...criteria, ...changes });
+}
+
+/**
+ * Pure, testable auto-apply evaluation (lead-vision gap 3).
+ *
+ * Given a campaign's current criteria, its current suggestion, and the
+ * per-campaign opt-in flag, returns the criteria after ONE bounded step
+ * toward the suggestion — or null when nothing should be applied:
+ *  - opt-in flag off
+ *  - suggestion direction is "hold" (or changes are empty)
+ *  - criteria already converged on the suggestion target
+ *
+ * Guardrails: each criterion moves at most AUTO_APPLY_MAX_STEP toward the
+ * suggested value, never overshoots it, and stays inside the CriteriaSchema
+ * hard bounds. The caller (worker tick) persists the returned criteria and
+ * records the humanValidatorId (campaign owner) in the audit entry.
+ */
+export function evaluateAutoApply(
+  criteriaInput: unknown,
+  suggestion: CriteriaSuggestion,
+  options: { autoApplyEnabled: boolean },
+): LeadCriteria | null {
+  if (!options.autoApplyEnabled) return null;
+  if (suggestion.direction === "hold") return null;
+  const criteria = CriteriaSchema.parse(criteriaInput);
+  const entries = Object.entries(suggestion.changes) as Array<
+    [AutoAdjustableKey, number]
+  >;
+  if (entries.length === 0) return null;
+  const next: LeadCriteria = { ...criteria };
+  let moved = false;
+  for (const [key, target] of entries) {
+    if (typeof target !== "number" || !Number.isFinite(target)) continue;
+    const current = criteria[key];
+    if (target === current) continue;
+    const direction = Math.sign(target - current);
+    let stepped = current + direction * AUTO_APPLY_MAX_STEP[key];
+    // Never overshoot the suggestion target.
+    stepped =
+      direction > 0 ? Math.min(stepped, target) : Math.max(stepped, target);
+    // Hard schema bounds.
+    const [minimum, maximum] = AUTO_APPLY_HARD_BOUNDS[key];
+    stepped = Math.min(maximum, Math.max(minimum, stepped));
+    if (key === "confidenceMin") stepped = Number(stepped.toFixed(2));
+    if (key === "minimumEvidenceCategories")
+      stepped = Math.round(stepped);
+    if (stepped !== current) {
+      next[key] = stepped;
+      moved = true;
+    }
+  }
+  if (!moved) return null;
+  return CriteriaSchema.parse(next);
 }
 
 const MATURITY_WEIGHTS: Record<

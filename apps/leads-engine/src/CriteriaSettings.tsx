@@ -6,6 +6,11 @@ type Mutate = <T>(
   init: RequestInit,
   success: string,
 ) => Promise<T | null>;
+// auto_apply_criteria arrives via bootstrap select("*") once migration
+// 202609240003 is applied; kept local so api.ts stays untouched.
+type CampaignWithAutoApply = CampaignRecord & {
+  auto_apply_criteria?: boolean | null;
+};
 type EditableCriteria = {
   automationMaturityMax?: number;
   opportunityPotentialMin?: number;
@@ -32,8 +37,37 @@ function CampaignSettings({
   const criteria = campaign.criteria as EditableCriteria;
   const [mode, setMode] = useState(criteria.geography?.mode ?? "regions");
   const [busy, setBusy] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [autoApply, setAutoApply] = useState(
+    (campaign as CampaignWithAutoApply).auto_apply_criteria === true,
+  );
   const suggestion = campaign.criteria_suggestion;
   const usesRadius = mode === "radius" || mode === "hybrid";
+  const hasSuggestedChanges =
+    suggestion != null && Object.keys(suggestion.changes).length > 0;
+  async function applySuggestion() {
+    setApplying(true);
+    try {
+      await mutate(
+        `/api/v1/criteria/${campaign.id}/apply-suggestion`,
+        { method: "POST" },
+        `Suggestion applied to ${campaign.name}.`,
+      );
+    } finally {
+      setApplying(false);
+    }
+  }
+  async function toggleAutoApply(next: boolean) {
+    setAutoApply(next);
+    const result = await mutate(
+      `/api/v1/criteria/${campaign.id}/auto-apply`,
+      { method: "PATCH", body: JSON.stringify({ autoApply: next }) },
+      `Auto-apply ${next ? "enabled" : "disabled"} for ${campaign.name}.`,
+    );
+    // mutate() reports failures via the notice and returns null — revert the
+    // optimistic toggle so the checkbox reflects server state.
+    if (result === null) setAutoApply(!next);
+  }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -108,6 +142,18 @@ function CampaignSettings({
               {Math.round(suggestion.changes.confidenceMin * 100)}%. Review and
               enter below to apply.
             </small>
+          ) : null}
+          {hasSuggestedChanges ? (
+            <div>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy || applying}
+                onClick={() => void applySuggestion()}
+              >
+                {applying ? "Applying…" : "Apply suggestion"}
+              </button>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -260,6 +306,22 @@ function CampaignSettings({
             />{" "}
             Enable persistent schedule
           </label>
+          <label className="check-label">
+            <input
+              type="checkbox"
+              checked={autoApply}
+              disabled={busy || applying}
+              onChange={(event) => void toggleAutoApply(event.currentTarget.checked)}
+            />{" "}
+            Auto-apply future suggestions (one bounded step per evaluation)
+          </label>
+          {autoApply ? (
+            <p className="muted">
+              Auto-apply is on: scheduled evaluations move at most one bounded
+              step toward the suggestion and record each change in the audit
+              log. Default is off.
+            </p>
+          ) : null}
           <button className="primary">
             {busy ? "Saving…" : "Save reviewed criteria"}
           </button>
