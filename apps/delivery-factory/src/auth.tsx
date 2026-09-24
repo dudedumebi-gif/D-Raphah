@@ -14,6 +14,7 @@ interface AuthContextValue {
   email: string | null;
   error: string | null;
   signIn: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   retry: () => void;
 }
@@ -179,6 +180,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setStatus("signed-in");
   }, []);
 
+  const signUp = useCallback(async (signUpEmail: string, password: string) => {
+    const authUrl = authUrlRef.current;
+    if (!authUrl) throw new Error("Operator sign-in is not configured.");
+    const res = await fetch(`${authUrl}/sign-up/email`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: signUpEmail,
+        password,
+        name: signUpEmail,
+      }),
+    });
+    if (!res.ok) throw new Error(await readErrorMessage(res));
+    const { jwt, email: sessionEmail } = await loadOperatorJwt(authUrl);
+    if (!jwt) {
+      throw new Error("Account created, but no operator token was issued.");
+    }
+    currentToken = jwt;
+    setEmail(sessionEmail ?? signUpEmail);
+    setError(null);
+    setStatus("signed-in");
+  }, []);
+
   const signOut = useCallback(async () => {
     const authUrl = authUrlRef.current;
     if (authUrl) {
@@ -197,7 +222,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ status, email, error, signIn, signOut, retry }}
+      value={{ status, email, error, signIn, signUp, signOut, retry }}
     >
       {children}
     </AuthContext.Provider>
@@ -207,6 +232,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 /** Full-screen operator login gate rendered when there is no session. */
 export function LoginScreen() {
   const auth = useAuth();
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -217,22 +243,40 @@ export function LoginScreen() {
     setBusy(true);
     setFormError(null);
     try {
-      await auth.signIn(email.trim(), password);
+      if (mode === "signup") {
+        await auth.signUp(email.trim(), password);
+      } else {
+        await auth.signIn(email.trim(), password);
+      }
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Sign-in failed.");
+      setFormError(
+        err instanceof Error
+          ? err.message
+          : mode === "signup"
+            ? "Sign-up failed."
+            : "Sign-in failed.",
+      );
     } finally {
       setBusy(false);
     }
   }
 
+  function switchMode(next: "signin" | "signup") {
+    setMode(next);
+    setFormError(null);
+  }
+
+  const isSignup = mode === "signup";
+
   return (
     <div className="auth-screen">
       <form className="auth-card" onSubmit={onSubmit}>
         <p className="eyebrow accent">Delivery Factory · Operators</p>
-        <h1>Operator sign-in</h1>
+        <h1>{isSignup ? "Create operator account" : "Operator sign-in"}</h1>
         <p className="muted">
-          Sign in with your operator account to manage workflows, projects and
-          monitoring.
+          {isSignup
+            ? "Create your operator account to manage workflows, projects and monitoring."
+            : "Sign in with your operator account to manage workflows, projects and monitoring."}
         </p>
         {auth.error ? <p className="auth-error">{auth.error}</p> : null}
         {formError ? <p className="auth-error">{formError}</p> : null}
@@ -251,16 +295,40 @@ export function LoginScreen() {
           Password
           <input
             type="password"
-            autoComplete="current-password"
+            autoComplete={isSignup ? "new-password" : "current-password"}
             required
+            minLength={8}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="••••••••"
           />
         </label>
         <button type="submit" className="btn-primary" disabled={busy}>
-          {busy ? "Signing in…" : "Sign in"}
+          {busy
+            ? isSignup
+              ? "Creating account…"
+              : "Signing in…"
+            : isSignup
+              ? "Create account"
+              : "Sign in"}
         </button>
+        <p className="muted auth-switch">
+          {isSignup ? (
+            <>
+              Already have an account?{" "}
+              <button type="button" onClick={() => switchMode("signin")}>
+                Sign in
+              </button>
+            </>
+          ) : (
+            <>
+              No operator account yet?{" "}
+              <button type="button" onClick={() => switchMode("signup")}>
+                Create one
+              </button>
+            </>
+          )}
+        </p>
       </form>
     </div>
   );

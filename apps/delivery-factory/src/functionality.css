@@ -274,3 +274,17 @@
   opacity: 0.75;
   font-family: "DM Mono", ui-monospace, monospace;
 }
+.auth-switch {
+  margin: 0;
+  font-size: 13px;
+  text-align: center;
+}
+.auth-switch button {
+  font: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #a78bfa;
+  cursor: pointer;
+  text-decoration: underline;
+}
