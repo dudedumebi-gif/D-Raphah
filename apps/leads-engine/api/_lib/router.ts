@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CriteriaSchema,
   evaluateCanarySoak,
+  mergeSuggestionChanges,
   percentile95,
   suggestCriteriaAdjustment,
 } from "./domain.js";
@@ -10,6 +11,7 @@ import {
   assertDatabaseReady,
   configurationStatus,
   createAdminClient,
+  type DataClient,
   requireScheduler,
   requireRole,
   requireUserContext,
@@ -102,6 +104,133 @@ async function bodyJson(request: Request): Promise<unknown> {
     });
   }
   return request.json();
+}
+
+// --- Lead export (lead-vision gap 2): pure serialization helpers. ---
+
+const EXPORT_FORMATS = ["csv", "json"] as const;
+export type LeadExportFormat = (typeof EXPORT_FORMATS)[number];
+
+/** Bounded page size: export reuses the leads list query, capped. */
+export const EXPORT_MAX_LEADS = 5_000;
+
+export function parseExportFormat(raw: string | null): LeadExportFormat {
+  if (raw === "csv" || raw === "json") return raw;
+  throw Object.assign(
+    new Error(`format must be one of: ${EXPORT_FORMATS.join(", ")}`),
+    { statusCode: 400 },
+  );
+}
+
+export function exportFilename(
+  format: LeadExportFormat,
+  now = new Date(),
+): string {
+  return `leads-export-${now.toISOString().slice(0, 10)}.${format}`;
+}
+
+/** CSV escaping: wrap in quotes when the value contains a quote, comma, or newline. */
+export function csvEscape(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  return /[",\n\r]/.test(text)
+    ? `"${text.replace(/"/g, '""')}"`
+    : text;
+}
+
+export const LEAD_EXPORT_COLUMNS = [
+  "lead_id",
+  "organization_name",
+  "domain",
+  "website",
+  "title",
+  "stage",
+  "status",
+  "routing",
+  "automation_maturity_score",
+  "opportunity_potential_score",
+  "confidence",
+  "coverage_categories",
+  "qualified",
+  "last_refreshed_at",
+  "created_at",
+] as const;
+
+/**
+ * Maps one leads-list row (same select/joins as GET /api/v1/leads) to a flat,
+ * serialization-ready export object. Supabase returns the joined relations
+ * as objects or single-element arrays; both are handled.
+ */
+export function mapExportLeadRow(lead: any): Record<string, unknown> {
+  const organization = Array.isArray(lead.organizations)
+    ? lead.organizations[0]
+    : lead.organizations;
+  const assessment = Array.isArray(lead.maturity_assessments)
+    ? lead.maturity_assessments[0]
+    : lead.maturity_assessments;
+  const row: Record<string, unknown> = {
+    lead_id: lead.id ?? "",
+    organization_name: organization?.name ?? "",
+    domain: organization?.normalized_domain ?? "",
+    website: organization?.website_url ?? "",
+    title: lead.title ?? "",
+    stage: lead.stage ?? "",
+    status: lead.status ?? "",
+    routing: lead.routing ?? "",
+    automation_maturity_score: lead.automation_maturity_score ?? null,
+    opportunity_potential_score: lead.opportunity_potential_score ?? null,
+    confidence: lead.confidence ?? null,
+    coverage_categories: assessment?.coverage_categories ?? null,
+    qualified: assessment?.qualified ?? null,
+    last_refreshed_at: lead.last_refreshed_at ?? null,
+    created_at: lead.created_at ?? null,
+  };
+  return Object.fromEntries(
+    LEAD_EXPORT_COLUMNS.map((column) => [column, row[column]]),
+  );
+}
+
+export function serializeLeadsExport(
+  leads: any[],
+  format: LeadExportFormat,
+): string {
+  const rows = leads.map(mapExportLeadRow);
+  if (format === "json") return JSON.stringify(rows, null, 2);
+  const lines = [LEAD_EXPORT_COLUMNS.map(csvEscape).join(",")];
+  for (const row of rows)
+    lines.push(LEAD_EXPORT_COLUMNS.map((column) => csvEscape(row[column])).join(","));
+  return lines.join("\r\n") + "\r\n";
+}
+
+/**
+ * Writes an audit entry through the log_workspace_event RPC. Direct
+ * audit_events inserts are revoked for authenticated users by design, and
+ * export/apply are not table writes, so the DB trigger cannot capture them.
+ * actor_id inside the RPC is the calling human — the humanValidatorId the
+ * architectural policy requires for applied model suggestions.
+ */
+async function logWorkspaceEvent(
+  client: DataClient,
+  workspaceId: string,
+  event: {
+    action: string;
+    resourceType: string;
+    resourceId: string | null;
+    reason: string;
+    before?: unknown;
+    after?: unknown;
+  },
+): Promise<void> {
+  const { error } = await client.rpc("log_workspace_event", {
+    p_workspace_id: workspaceId,
+    p_action: event.action,
+    p_resource_type: event.resourceType,
+    p_resource_id: event.resourceId,
+    p_reason: event.reason,
+    p_before_state: event.before ?? null,
+    p_after_state: event.after ?? null,
+  });
+  if (error) throw new Error(error.message);
 }
 
 async function operationalSnapshot(
@@ -393,6 +522,129 @@ async function authenticatedRoutes(
     });
   }
 
+  // --- Lead-vision gap 3: one-click suggestion apply + auto-apply opt-in. ---
+  // These routes reuse the existing criteria storage model (criteria jsonb on
+  // scrape_campaigns) and the same CriteriaSchema validation the PATCH route
+  // applies; they are additive and do not change any existing route.
+  const applySuggestion = pathname.match(
+    /^\/api\/v1\/criteria\/([0-9a-f-]+)\/apply-suggestion$/i,
+  );
+  if (applySuggestion && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const campaignId = applySuggestion[1];
+    const { data: campaign, error: campaignError } = await client
+      .from("scrape_campaigns")
+      .select("id,criteria")
+      .eq("workspace_id", workspaceId)
+      .eq("id", campaignId)
+      .single();
+    if (campaignError || !campaign)
+      throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
+    const { data: counts, error: countsError } = await client.rpc(
+      "campaign_qualified_counts",
+      { p_workspace_id: workspaceId },
+    );
+    if (countsError) throw new Error(countsError.message);
+    const observed = Number(
+      (counts as Array<{ campaign_id: string; qualified_count: number }> | null)?.find(
+        (row) => row.campaign_id === campaignId,
+      )?.qualified_count ?? 0,
+    );
+    const suggestion = suggestCriteriaAdjustment(campaign.criteria, observed);
+    if (
+      suggestion.direction === "hold" ||
+      Object.keys(suggestion.changes).length === 0
+    ) {
+      return json({
+        applied: false,
+        direction: suggestion.direction,
+        reason:
+          "Suggestion is hold or has no changes; nothing was applied.",
+      });
+    }
+    // Merge through the same validation the PATCH route uses (full
+    // CriteriaSchema), then persist like the PATCH route does.
+    const merged = mergeSuggestionChanges(
+      campaign.criteria,
+      suggestion.changes,
+    );
+    const { data: updated, error: updateError } = await client
+      .from("scrape_campaigns")
+      .update({
+        criteria: merged,
+        criteria_version: new Date().toISOString(),
+        updated_by: context.user.id,
+      })
+      .eq("workspace_id", workspaceId)
+      .eq("id", campaignId)
+      .select()
+      .single();
+    if (updateError) throw new Error(updateError.message);
+    const before: Record<string, unknown> = {};
+    const after: Record<string, unknown> = {};
+    for (const key of Object.keys(suggestion.changes)) {
+      before[key] = (campaign.criteria as Record<string, unknown>)[key];
+      after[key] = (merged as unknown as Record<string, unknown>)[key];
+    }
+    await logWorkspaceEvent(client, workspaceId, {
+      action: "criteria.suggestion_applied",
+      resourceType: "scrape_campaigns",
+      resourceId: campaignId,
+      reason:
+        `Applied ${suggestion.direction} suggestion ` +
+        `(${observed}/${suggestion.targetQualifiedLeads} qualified this week). ` +
+        suggestion.rationale.join(" "),
+      before,
+      after,
+    });
+    return json({
+      data: {
+        applied: true,
+        direction: suggestion.direction,
+        appliedChanges: suggestion.changes,
+        rationale: suggestion.rationale,
+        criteria: updated.criteria,
+      },
+    });
+  }
+  const autoApplyToggle = pathname.match(
+    /^\/api\/v1\/criteria\/([0-9a-f-]+)\/auto-apply$/i,
+  );
+  if (autoApplyToggle && request.method === "PATCH") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const campaignId = autoApplyToggle[1];
+    const input = z
+      .object({ autoApply: z.boolean() })
+      .parse(await bodyJson(request));
+    const { data: existing, error: existingError } = await client
+      .from("scrape_campaigns")
+      .select("id,auto_apply_criteria")
+      .eq("workspace_id", workspaceId)
+      .eq("id", campaignId)
+      .single();
+    if (existingError || !existing)
+      throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
+    const { data: updated, error: updateError } = await client
+      .from("scrape_campaigns")
+      .update({ auto_apply_criteria: input.autoApply })
+      .eq("workspace_id", workspaceId)
+      .eq("id", campaignId)
+      .select()
+      .single();
+    if (updateError) throw new Error(updateError.message);
+    await logWorkspaceEvent(client, workspaceId, {
+      action: "criteria.auto_apply_changed",
+      resourceType: "scrape_campaigns",
+      resourceId: campaignId,
+      reason: `Auto-apply ${input.autoApply ? "enabled" : "disabled"} by ${
+        context.user.email ?? context.user.id
+      }.`,
+      before: { auto_apply_criteria: existing.auto_apply_criteria },
+      after: { auto_apply_criteria: input.autoApply },
+    });
+    return json({ data: updated });
+  }
+
   if (pathname === "/api/v1/scrape-jobs" && request.method === "GET") {
     const { data, error } = await client
       .from("scrape_jobs")
@@ -524,6 +776,40 @@ async function authenticatedRoutes(
       .order("opportunity_potential_score", { ascending: false });
     if (error) throw new Error(error.message);
     return json({ data });
+  }
+  // --- Lead-vision gap 2: lead export. Reuses the list endpoint's
+  // filters/joins (same query shape pre-serialization), capped at
+  // EXPORT_MAX_LEADS, and writes an audit entry via log_workspace_event.
+  if (pathname === "/api/v1/leads/export" && request.method === "GET") {
+    const format = parseExportFormat(
+      new URL(request.url).searchParams.get("format"),
+    );
+    const { data, error } = await client
+      .from("opportunities")
+      .select("*,organizations(*),maturity_assessments!latest_assessment_id(*)")
+      .eq("workspace_id", workspaceId)
+      .order("opportunity_potential_score", { ascending: false })
+      .limit(EXPORT_MAX_LEADS);
+    if (error) throw new Error(error.message);
+    const leads = (data ?? []) as any[];
+    await logWorkspaceEvent(client, workspaceId, {
+      action: "leads.export",
+      resourceType: "opportunities",
+      resourceId: null,
+      reason: `Exported ${leads.length} leads as ${format} (limit ${EXPORT_MAX_LEADS}).`,
+    });
+    const body = serializeLeadsExport(leads, format);
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-type":
+          format === "csv"
+            ? "text/csv; charset=utf-8"
+            : "application/json; charset=utf-8",
+        "content-disposition": `attachment; filename="${exportFilename(format)}"`,
+        "cache-control": "no-store",
+      },
+    });
   }
   const leadFeedback = pathname.match(
     /^\/api\/v1\/leads\/([0-9a-f-]+)\/feedback$/i,
