@@ -1,55 +1,27 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  createLocalJWKSet,
-  exportJWK,
-  generateKeyPair,
-  jwtVerify,
-  SignJWT,
-  type JWTPayload,
-  type KeyLike,
-} from "jose";
-import {
   operatorAllowlist,
   requireOperator,
-  type JwtVerifier,
+  type OperatorSession,
+  type SessionValidator,
 } from "../api/_lib/operator.js";
 import type { ApiRequest } from "../api/_lib/http.js";
 
 /**
- * Operator auth tests. The JWT verifier is stubbed with a locally generated
- * RS256 key pair (no network): the stub still runs the real jose signature
- * verification, so bad-signature and expiry cases exercise the true path.
+ * Operator auth tests. The session validator is stubbed (no network, no
+ * database): it returns a canned session for known tokens and null for
+ * unknown ones, mirroring the production better-auth table lookup.
  */
 
-const KID = "test-key";
+const SESSIONS: Record<string, OperatorSession> = {
+  "valid-token": { email: "ops@example.com" },
+  "upper-token": { email: "OPS@EXAMPLE.COM" },
+  "intruder-token": { email: "intruder@example.com" },
+  "noemail-token": { email: "   " },
+};
 
-let privateKey: KeyLike;
-let verifier: JwtVerifier;
-let wrongKey: KeyLike;
-
-beforeEach(async () => {
-  const pair = await generateKeyPair("RS256");
-  privateKey = pair.privateKey;
-  const publicJwk = await exportJWK(pair.publicKey);
-  const jwks = createLocalJWKSet({
-    keys: [{ ...publicJwk, kid: KID, alg: "RS256", use: "sig" }],
-  });
-  verifier = async (token: string): Promise<JWTPayload> =>
-    (await jwtVerify(token, jwks, { clockTolerance: 60 })).payload;
-  wrongKey = (await generateKeyPair("RS256")).privateKey;
-  process.env.OPERATOR_EMAILS = "ops@example.com, Admin@Example.com";
-});
-
-async function signedToken(
-  claims: Record<string, unknown>,
-  key: KeyLike = privateKey,
-): Promise<string> {
-  return new SignJWT(claims)
-    .setProtectedHeader({ alg: "RS256", kid: KID })
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(key);
-}
+const validator: SessionValidator = async (token: string) =>
+  SESSIONS[token] ?? null;
 
 function reqWith(token: string | null): ApiRequest {
   return {
@@ -57,66 +29,65 @@ function reqWith(token: string | null): ApiRequest {
   } as ApiRequest;
 }
 
+beforeEach(() => {
+  process.env.OPERATOR_EMAILS = "ops@example.com, Admin@Example.com";
+});
+
 describe("requireOperator", () => {
-  it("passes a valid token whose email is allowlisted", async () => {
-    const token = await signedToken({ email: "ops@example.com" });
-    const identity = await requireOperator(reqWith(token), verifier);
+  it("passes a valid session whose email is allowlisted", async () => {
+    const identity = await requireOperator(reqWith("valid-token"), validator);
     expect(identity.email).toBe("ops@example.com");
   });
 
   it("compares emails case-insensitively", async () => {
-    const token = await signedToken({ email: "OPS@EXAMPLE.COM" });
-    const identity = await requireOperator(reqWith(token), verifier);
+    const identity = await requireOperator(reqWith("upper-token"), validator);
     expect(identity.email).toBe("ops@example.com");
   });
 
-  it("rejects a valid token whose email is not allowlisted (403)", async () => {
-    const token = await signedToken({ email: "intruder@example.com" });
-    const err = await requireOperator(reqWith(token), verifier).catch(
+  it("rejects a valid session whose email is not allowlisted (403)", async () => {
+    const err = await requireOperator(reqWith("intruder-token"), validator).catch(
       (e) => e,
     );
     expect(err).toMatchObject({ statusCode: 403 });
   });
 
-  it("rejects a token signed by an unknown key (401)", async () => {
-    const token = await signedToken({ email: "ops@example.com" }, wrongKey);
-    const err = await requireOperator(reqWith(token), verifier).catch(
+  it("rejects an unknown token (401)", async () => {
+    const err = await requireOperator(reqWith("nope-not-a-session"), validator).catch(
       (e) => e,
     );
     expect(err).toMatchObject({ statusCode: 401 });
   });
 
   it("rejects a missing Authorization header (401)", async () => {
-    const err = await requireOperator(reqWith(null), verifier).catch((e) => e);
+    const err = await requireOperator(reqWith(null), validator).catch((e) => e);
     expect(err).toMatchObject({ statusCode: 401 });
   });
 
   it("rejects a malformed bearer value (401)", async () => {
     const err = await requireOperator(
       { headers: { authorization: "Token abc.def" } } as ApiRequest,
-      verifier,
+      validator,
     ).catch((e) => e);
     expect(err).toMatchObject({ statusCode: 401 });
   });
 
-  it("rejects a valid token with no email claim (403)", async () => {
-    const token = await signedToken({ sub: "user-123" });
-    const err = await requireOperator(reqWith(token), verifier).catch(
+  it("rejects a valid session with no email (403)", async () => {
+    const err = await requireOperator(reqWith("noemail-token"), validator).catch(
       (e) => e,
     );
     expect(err).toMatchObject({ statusCode: 403 });
   });
 
-  it("rejects an expired token (401)", async () => {
-    const token = await new SignJWT({ email: "ops@example.com" })
-      .setProtectedHeader({ alg: "RS256", kid: KID })
-      .setIssuedAt(Math.floor(Date.now() / 1000) - 7200)
-      .setExpirationTime(Math.floor(Date.now() / 1000) - 3600)
-      .sign(privateKey);
-    const err = await requireOperator(reqWith(token), verifier).catch(
+  it("lets validator failures propagate (mapped to 500, not 401)", async () => {
+    const boom: SessionValidator = async () => {
+      throw new Error("database unreachable");
+    };
+    const err = await requireOperator(reqWith("valid-token"), boom).catch(
       (e) => e,
     );
-    expect(err).toMatchObject({ statusCode: 401 });
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toMatchObject({ statusCode: 401 });
+    expect(err).not.toMatchObject({ statusCode: 403 });
   });
 });
 

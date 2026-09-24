@@ -131,6 +131,19 @@ export interface DeliveryDb {
     event: Record<string, unknown>;
   }): Promise<void>;
   getMonitoringSnapshot(): Promise<MonitoringSnapshot>;
+  /**
+   * Operator auth: look up a better-auth session token in the `neon_auth`
+   * schema (Neon Auth branches with this database). Returns the session user's
+   * email, or null when the token is unknown or the session has expired.
+   */
+  findOperatorSession(token: string): Promise<{ email: string } | null>;
+
+  /**
+   * Operator sign-out: delete a better-auth session row by its token.
+   * Returns true when a row was deleted. Used by POST /api/sign-out so
+   * sign-out does not depend on the Neon Auth /sign-out endpoint.
+   */
+  revokeOperatorSession(token: string): Promise<boolean>;
 }
 
 export interface MonitoringHandoff {
@@ -377,6 +390,33 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
         insert into public.feedback_outbox(project_id, event)
         values (${input.projectId}::uuid, ${JSON.stringify(input.event)}::jsonb)
       `;
+    },
+
+    async findOperatorSession(token: string): Promise<{ email: string } | null> {
+      // Neon Auth (managed better-auth) keeps its tables in the `neon_auth`
+      // schema — NOT `auth` (that schema holds Neon's RLS helpers).
+      // neon_auth.session.token is the opaque token stored verbatim;
+      // expiresAt / userId are camelCase.
+      const rows = (await client`
+        select u.email as email
+        from neon_auth.session s
+        join neon_auth.user u on u.id = s."userId"
+        where s.token = ${token} and s."expiresAt" > now()
+        limit 1
+      `) as unknown as Array<{ email: string }>;
+      const email = rows[0]?.email;
+      return typeof email === "string" && email ? { email } : null;
+    },
+
+    async revokeOperatorSession(token: string): Promise<boolean> {
+      // Delete exactly the presented session row. The Neon Auth cookie may
+      // linger, but it points at a dead session afterwards.
+      const rows = (await client`
+        delete from neon_auth.session
+        where token = ${token}
+        returning token
+      `) as unknown as Array<{ token: string }>;
+      return rows.length > 0;
     },
 
     async getMonitoringSnapshot(): Promise<MonitoringSnapshot> {

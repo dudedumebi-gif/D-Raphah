@@ -423,6 +423,11 @@ function App() {
           >
             Sign out
           </button>
+          {auth.error ? (
+            <span className="auth-error" role="alert">
+              {auth.error}
+            </span>
+          ) : null}
         </div>
         {view === "portfolio" ? (
           <Portfolio

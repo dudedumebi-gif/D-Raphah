@@ -29,9 +29,21 @@ export class FakeDeliveryDb implements DeliveryDb {
     toStage: string;
     changedBy?: string;
   }> = [];
+  operatorSessions = new Map<string, string>();
 
   inboxCount(): number {
     return this.inboxes.size;
+  }
+
+  async findOperatorSession(
+    token: string,
+  ): Promise<{ email: string } | null> {
+    const email = this.operatorSessions.get(token);
+    return email ? { email } : null;
+  }
+
+  async revokeOperatorSession(token: string): Promise<boolean> {
+    return this.operatorSessions.delete(token);
   }
 
   async reserveNonce(nonce: string): Promise<boolean> {
