@@ -231,6 +231,79 @@ const SIGNAL_RULES: Array<{
     pattern:
       /new location|expansion|rapid growth|acquired|acquires|acquiring|merger|takeover|scaling operations/i,
   },
+  // --- Evidence enrichment: tech-stack fingerprinting (lead-vision gap 4).
+  // These rules fire on concrete collection artifacts (response headers,
+  // <meta name="generator">, <script src> values) that the collector appends
+  // to the evidence text as marked [tech-fingerprint] lines. They also fire
+  // on plain prose mentions ("we run on Shopify"), which is the same
+  // keyword-level evidence the engine already uses.
+  {
+    code: "fp_wordpress",
+    category: "digital_foundation",
+    polarity: "automated",
+    strength: 12,
+    pattern: /wordpress|wp-content|wp-includes/i,
+  },
+  {
+    code: "fp_shopify",
+    category: "digital_foundation",
+    polarity: "automated",
+    strength: 12,
+    pattern: /shopify|cdn\.shopify\.com/i,
+  },
+  {
+    code: "fp_site_builder",
+    category: "digital_foundation",
+    polarity: "automated",
+    strength: 8,
+    pattern: /wixstatic\.com|wix\.com|squarespace/i,
+  },
+  {
+    code: "fp_analytics",
+    category: "data_analytics",
+    polarity: "automated",
+    strength: 12,
+    pattern:
+      /google-analytics|googletagmanager|gtag\.js|segment\.io|mixpanel|hotjar/i,
+  },
+  {
+    code: "fp_chat_widget",
+    category: "customer_self_service",
+    polarity: "automated",
+    strength: 12,
+    pattern: /intercom|drift\.com|zendesk|freshchat|tawk\.to/i,
+  },
+  {
+    code: "fp_booking_widget",
+    category: "workflow_automation",
+    polarity: "automated",
+    strength: 14,
+    pattern: /calendly|acuityscheduling|bookafy|setmore/i,
+  },
+  {
+    code: "fp_legacy_stack",
+    category: "digital_foundation",
+    polarity: "manual",
+    strength: 14,
+    pattern: /asp\.net|coldfusion|frontpage|sharepoint|x-aspnet-version/i,
+  },
+  // --- Evidence enrichment: job-posting signals (lead-vision gap 4). ---
+  {
+    code: "job_board_embed",
+    category: "commercial_urgency",
+    polarity: "commercial",
+    strength: 14,
+    pattern:
+      /lever\.co|greenhouse\.io|workable\.com|jobvite|icims|smartrecruiters/i,
+  },
+  {
+    code: "job_manual_roles",
+    category: "workflow_automation",
+    polarity: "manual",
+    strength: 16,
+    pattern:
+      /\bdata entry\b|\breceptionist\b|\bfile clerk\b|\badministrative assistant\b|\boffice assistant\b/i,
+  },
 ];
 
 export function normalizeText(input: string): string {
