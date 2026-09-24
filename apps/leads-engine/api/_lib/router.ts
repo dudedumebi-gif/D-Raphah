@@ -78,10 +78,19 @@ function json(
   });
 }
 
-function withCors(response: Response, request: Request): Response {
+function withCors(
+  response: Response,
+  request: Request,
+  pathname: string,
+): Response {
   const origin = request.headers.get("origin");
   const configured = process.env.LEAD_ENGINE_ORIGIN;
-  if (origin && configured && origin === configured) {
+  if (pathname === "/api/health/live" || pathname === "/api/health/ready") {
+    // Public, unauthenticated health endpoints: any origin may read them.
+    // Without this, browser-based monitoring (e.g. the Delivery Factory
+    // dashboard polling cross-origin) is blocked and reports "Unreachable".
+    response.headers.set("access-control-allow-origin", "*");
+  } else if (origin && configured && origin === configured) {
     response.headers.set("access-control-allow-origin", origin);
     response.headers.set("vary", "Origin");
   }
@@ -1065,7 +1074,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
   const pathname = url.pathname.replace(/\/$/, "") || "/";
   const context = requestContext(request, pathname);
   if (request.method === "OPTIONS")
-    return withCors(new Response(null, { status: 204 }), request);
+    return withCors(new Response(null, { status: 204 }), request, pathname);
   log("info", "request_started", context);
   try {
     let response: Response;
@@ -1150,7 +1159,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       "x-correlation-id",
       context.correlationId ?? randomUUID(),
     );
-    return withCors(response, request);
+    return withCors(response, request, pathname);
   } catch (error) {
     const status = Number(
       (error as { statusCode?: number }).statusCode ??
@@ -1181,6 +1190,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
         status,
       ),
       request,
+      pathname,
     );
   }
 }
