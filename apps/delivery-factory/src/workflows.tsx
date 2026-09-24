@@ -99,7 +99,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { ...init, headers });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) notifyUnauthorized();
+    if (res.status === 401 || res.status === 403) notifyUnauthorized(res.status);
     throw new Error(
       typeof data.error === "string" ? data.error : `Request failed (${res.status})`,
     );

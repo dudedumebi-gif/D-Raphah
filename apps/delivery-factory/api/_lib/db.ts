@@ -386,12 +386,14 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
     },
 
     async findOperatorSession(token: string): Promise<{ email: string } | null> {
-      // better-auth core schema (Neon Auth default): auth.session.token is
-      // the opaque token stored verbatim; expiresAt is camelCase.
+      // Neon Auth (managed better-auth) keeps its tables in the `neon_auth`
+      // schema — NOT `auth` (that schema holds Neon's RLS helpers).
+      // neon_auth.session.token is the opaque token stored verbatim;
+      // expiresAt / userId are camelCase.
       const rows = (await client`
         select u.email as email
-        from auth.session s
-        join auth.user u on u.id = s."userId"
+        from neon_auth.session s
+        join neon_auth.user u on u.id = s."userId"
         where s.token = ${token} and s."expiresAt" > now()
         limit 1
       `) as unknown as Array<{ email: string }>;

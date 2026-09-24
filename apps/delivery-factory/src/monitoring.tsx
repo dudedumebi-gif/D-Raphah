@@ -68,7 +68,7 @@ async function fetchJson(url: string, timeoutMs = 12_000): Promise<{ ok: boolean
     const res = await fetch(url, { signal: ctrl.signal, headers });
     const data = await res.json().catch(() => ({}));
     if (!res.ok && (res.status === 401 || res.status === 403) && url.startsWith("/api/")) {
-      notifyUnauthorized();
+      notifyUnauthorized(res.status);
     }
     return { ok: res.ok, status: res.status, data, latencyMs: Date.now() - started };
   } finally {

@@ -31,7 +31,7 @@ export function getAuthToken(): string | null {
   return currentToken;
 }
 
-type UnauthorizedListener = () => void;
+type UnauthorizedListener = (status?: number) => void;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
 export function onUnauthorized(fn: UnauthorizedListener): () => void {
   unauthorizedListeners.add(fn);
@@ -39,8 +39,8 @@ export function onUnauthorized(fn: UnauthorizedListener): () => void {
     unauthorizedListeners.delete(fn);
   };
 }
-function emitUnauthorized(): void {
-  for (const fn of [...unauthorizedListeners]) fn();
+function emitUnauthorized(status?: number): void {
+  for (const fn of [...unauthorizedListeners]) fn(status);
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -139,14 +139,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [bootstrap, attempt]);
 
   // A 401/403 from the DF API means the token is dead or not allowlisted:
-  // drop back to the login screen instead of showing broken views.
+  // drop back to the login screen instead of showing broken views. A 403
+  // means the session was valid but the email is not an operator, so say
+  // that rather than "session expired".
   useEffect(
     () =>
-      onUnauthorized(() => {
+      onUnauthorized((status) => {
         if (statusRef.current === "signed-in") {
           currentToken = null;
           setEmail(null);
-          setError("Session expired — please sign in again.");
+          setError(
+            status === 403
+              ? "Access denied — this operator account is not authorized."
+              : "Session expired — please sign in again.",
+          );
           setStatus("signed-out");
         }
       }),
@@ -199,11 +205,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = useCallback(async () => {
     const authUrl = authUrlRef.current;
-    if (authUrl) {
-      await fetch(`${authUrl}/sign-out`, {
-        method: "POST",
-        credentials: "include",
-      }).catch(() => {});
+    if (!authUrl) throw new Error("Operator sign-in is not configured.");
+    setError(null);
+    const res = await fetch(`${authUrl}/sign-out`, {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      setError("Sign-out failed — please try again.");
+      return;
+    }
+    // Confirm the server actually revoked the session: a surviving cookie
+    // would silently re-establish it on the next bootstrap, making sign-out
+    // look successful while the session stays live.
+    const check = await loadOperatorSession(authUrl).catch(() => ({
+      token: "",
+      email: null,
+    }));
+    if (check.token) {
+      setError("Sign-out did not complete — please try again.");
+      return;
     }
     currentToken = null;
     setEmail(null);
@@ -398,6 +419,6 @@ export function LoginScreen() {
 }
 
 /** Notify the auth layer that an API call was rejected (401/403). */
-export function notifyUnauthorized(): void {
-  emitUnauthorized();
+export function notifyUnauthorized(status?: number): void {
+  emitUnauthorized(status);
 }

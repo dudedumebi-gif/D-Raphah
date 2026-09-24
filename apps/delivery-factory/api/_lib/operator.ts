@@ -13,7 +13,7 @@ import type { DeliveryDb } from "./db.js";
  * Here we validate that token directly against the better-auth tables in
  * our own database — the Delivery Factory owns its database outright and
  * Neon Auth branches with it, so this is first-party data, not cross-product
- * access. The token must match a live, unexpired `auth.session` row, and the
+ * access. The token must match a live, unexpired `neon_auth.session` row, and the
  * session's user email must be on the OPERATOR_EMAILS allowlist. The
  * allowlist is the real gate: anyone can create a Neon Auth account, but
  * only allowlisted emails get past this.
