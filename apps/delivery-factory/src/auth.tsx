@@ -128,6 +128,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!jwt) {
         currentToken = null;
         setEmail(null);
+        if (sessionEmail) {
+          // A provider session exists but no operator JWT could be minted:
+          // the Neon Auth JWT plugin is not enabled. Say so instead of
+          // silently bouncing back to the login screen.
+          setError(
+            "Signed in, but no operator token was issued. Enable the JWT plugin in Neon Auth, then sign in again.",
+          );
+        }
         setStatus("signed-out");
         return;
       }
