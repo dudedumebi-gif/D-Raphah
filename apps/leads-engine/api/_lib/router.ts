@@ -22,6 +22,16 @@ import {
 } from "./handoff.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
 import { enqueueCanary, runWorkerTick } from "./worker.js";
+import {
+  DiscoveryGeoInputSchema,
+  resolveGeoQuery,
+} from "./discovery/adapter.js";
+import { OverpassAdapter } from "./discovery/overpass.js";
+import {
+  runDiscoveryRun,
+  type DiscoverySourceRow,
+  type DiscoveryStore,
+} from "./discovery/run.js";
 
 const SourceInputSchema = z.object({
   name: z.string().min(2).max(160),
@@ -45,6 +55,14 @@ const ManualJobSchema = z.object({
   sourceId: z.string().uuid(),
   targetUrl: z.string().url(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
+});
+
+const DiscoverySourceInputSchema = z.object({
+  name: z.string().min(2).max(160),
+  adapterId: z.literal("overpass"),
+  geo: DiscoveryGeoInputSchema,
+  sourceId: z.string().uuid(),
+  campaignId: z.string().uuid().optional(),
 });
 
 function json(
@@ -603,6 +621,153 @@ async function authenticatedRoutes(
     return json({
       data: await operationalSnapshot(createAdminClient(), workspaceId),
     });
+  }
+
+  if (pathname === "/api/v1/discovery/sources" && request.method === "GET") {
+    const { data, error } = await client
+      .from("discovery_sources")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: false });
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+  if (pathname === "/api/v1/discovery/sources" && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const input = DiscoverySourceInputSchema.parse(await bodyJson(request));
+    const resolvedGeo = resolveGeoQuery(input.geo);
+    // The discovery source borrows an existing, approved collection source:
+    // its policy governs the scrape jobs enqueued from discovered websites.
+    const { data: linked, error: linkedError } = await client
+      .from("source_definitions")
+      .select("id,status")
+      .eq("workspace_id", workspaceId)
+      .eq("id", input.sourceId)
+      .maybeSingle();
+    if (linkedError) throw new Error(linkedError.message);
+    if (!linked)
+      throw Object.assign(new Error("Collection source not found"), {
+        statusCode: 404,
+      });
+    if (input.campaignId) {
+      const { data: campaign, error: campaignError } = await client
+        .from("scrape_campaigns")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("id", input.campaignId)
+        .maybeSingle();
+      if (campaignError) throw new Error(campaignError.message);
+      if (!campaign)
+        throw Object.assign(new Error("Campaign not found"), {
+          statusCode: 404,
+        });
+    }
+    const { data, error } = await client
+      .from("discovery_sources")
+      .insert({
+        workspace_id: workspaceId,
+        name: input.name,
+        adapter_id: input.adapterId,
+        geo_params: resolvedGeo,
+        source_id: input.sourceId,
+        campaign_id: input.campaignId ?? null,
+        active: true,
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return json({ data }, 201);
+  }
+  if (pathname === "/api/v1/discovery/runs" && request.method === "GET") {
+    const sourceFilter = new URL(request.url).searchParams.get("source_id");
+    let query = client
+      .from("discovery_runs")
+      .select("*")
+      .eq("workspace_id", workspaceId);
+    if (sourceFilter) query = query.eq("discovery_source_id", sourceFilter);
+    const { data, error } = await query
+      .order("started_at", { ascending: false })
+      .limit(100);
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+  const discoveryRun = pathname.match(
+    /^\/api\/v1\/discovery\/sources\/([0-9a-f-]+)\/run$/i,
+  );
+  if (discoveryRun && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const store: DiscoveryStore = {
+      getSource: async (discoverySourceId: string) => {
+        const { data, error } = await client
+          .from("discovery_sources")
+          .select("*")
+          .eq("workspace_id", workspaceId)
+          .eq("id", discoverySourceId)
+          .maybeSingle();
+        if (error) throw new Error(error.message);
+        return (data as DiscoverySourceRow | null) ?? null;
+      },
+      createRun: async (discoverySourceId: string) => {
+        const { data, error } = await client
+          .from("discovery_runs")
+          .insert({
+            workspace_id: workspaceId,
+            discovery_source_id: discoverySourceId,
+            status: "running",
+          })
+          .select("id,started_at")
+          .single();
+        if (error) throw new Error(error.message);
+        const row = data as { id: string; started_at: string };
+        return { id: row.id, startedAt: row.started_at };
+      },
+      finishRun: async (runId: string, outcome) => {
+        const { error } = await client
+          .from("discovery_runs")
+          .update({
+            status: outcome.status,
+            finished_at: new Date().toISOString(),
+            candidates_found: outcome.candidatesFound,
+            candidates_enqueued: outcome.candidatesEnqueued,
+            error: outcome.error,
+          })
+          .eq("workspace_id", workspaceId)
+          .eq("id", runId);
+        if (error) throw new Error(error.message);
+      },
+      listExistingTargets: async (sourceId: string) => {
+        const { data, error } = await client
+          .from("scrape_jobs")
+          .select("target_url,idempotency_key")
+          .eq("workspace_id", workspaceId)
+          .eq("source_id", sourceId);
+        if (error) throw new Error(error.message);
+        return (data ?? []) as Array<{
+          target_url: string;
+          idempotency_key: string;
+        }>;
+      },
+      queueJob: async ({ sourceId, targetUrl, key, maxAttempts }) => {
+        // Existing creation path: the DB validates the source is approved
+        // and active, links the campaign, and enforces idempotency.
+        const { data, error } = await client.rpc("queue_scrape_job", {
+          p_workspace_id: workspaceId,
+          p_source_id: sourceId,
+          p_target_url: targetUrl,
+          p_key: key,
+          p_max_attempts: maxAttempts,
+        });
+        if (error) throw new Error(error.message);
+        const row = data as { id: string; created_at: string };
+        return { id: row.id, createdAt: row.created_at };
+      },
+    };
+    const summary = await runDiscoveryRun({
+      store,
+      adapters: { overpass: new OverpassAdapter() },
+      discoverySourceId: discoveryRun[1],
+    });
+    return json({ data: summary }, 202);
   }
 
   throw Object.assign(new Error("Route not found"), { statusCode: 404 });
