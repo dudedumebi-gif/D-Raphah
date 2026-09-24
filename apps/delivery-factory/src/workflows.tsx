@@ -91,7 +91,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   const initHeaders = init?.headers as Record<string, string> | undefined;
   if (initHeaders) Object.assign(headers, initHeaders);
-  // Operator JWT, same-origin DF API only (never leak it cross-origin).
+  // Operator session token, same-origin DF API only (never leak it cross-origin).
   const token = getAuthToken();
   if (token && path.startsWith("/api/")) {
     headers.authorization = `Bearer ${token}`;

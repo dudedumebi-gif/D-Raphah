@@ -1,63 +1,40 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ServerResponse } from "node:http";
-import { exportJWK, generateKeyPair, SignJWT, type KeyLike } from "jose";
 import { defineRoute } from "../api/_lib/route.js";
 import { sendJson, type ApiRequest } from "../api/_lib/http.js";
+import type { OperatorSession } from "../api/_lib/operator.js";
 
 /**
  * Route-level operator auth test: proves `defineRoute` (the wrapper every
  * /api/workflows, /api/projects and /api/monitoring route uses) actually
- * enforces the JWT + allowlist gate, using the real production code path
- * (JWKS fetched via a stubbed global fetch, signed with the matching key).
+ * enforces the session + allowlist gate, using the real production code path
+ * with a stubbed database session lookup.
  */
 
-const KID = "route-test-key";
-const AUTH_BASE = "https://auth.test.example/neondb/auth";
-
-let privateKey: KeyLike;
-
-beforeEach(async () => {
-  const pair = await generateKeyPair("RS256");
-  privateKey = pair.privateKey;
-  const publicJwk = await exportJWK(pair.publicKey);
-  const jwks = {
-    keys: [{ ...publicJwk, kid: KID, alg: "RS256", use: "sig" }],
+const sessions = vi.hoisted(() => {
+  const map: Record<string, OperatorSession> = {
+    "ops-session": { email: "ops@example.com" },
+    "intruder-session": { email: "intruder@example.com" },
   };
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url: string | URL | Request) => {
-      if (String(url).endsWith("/.well-known/jwks.json")) {
-        return new Response(JSON.stringify(jwks), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      throw new Error(`unexpected fetch: ${String(url)}`);
-    }),
-  );
-  process.env.NEON_AUTH_URL = AUTH_BASE;
+  return map;
+});
+
+vi.mock("../api/_lib/db.js", () => ({
+  createDeliveryDb: () => ({
+    findOperatorSession: async (token: string) =>
+      sessions[token] ?? null,
+  }),
+}));
+
+beforeEach(() => {
   process.env.OPERATOR_EMAILS = "ops@example.com";
   process.env.LEAD_ENGINE_PUBLIC_KEY_PEM = "dummy-pem-for-test";
-  // createDeliveryDb() runs after auth inside defineRoute; neon() only
-  // builds a client (no connection), so a dummy URL suffices here.
-  process.env.DELIVERY_DATABASE_URL = "postgresql://user:pass@localhost/db";
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
-  delete process.env.NEON_AUTH_URL;
   delete process.env.OPERATOR_EMAILS;
   delete process.env.LEAD_ENGINE_PUBLIC_KEY_PEM;
-  delete process.env.DELIVERY_DATABASE_URL;
 });
-
-async function signedToken(email: string): Promise<string> {
-  return new SignJWT({ email })
-    .setProtectedHeader({ alg: "RS256", kid: KID })
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(privateKey);
-}
 
 function mockReq(authHeader?: string): ApiRequest {
   return {
@@ -100,10 +77,18 @@ describe("defineRoute operator gate", () => {
     });
   });
 
-  it("returns 403 JSON for a valid token with a non-allowlisted email", async () => {
-    const token = await signedToken("intruder@example.com");
+  it("returns 401 JSON for an unknown session token", async () => {
     const res = mockRes();
-    await probe(mockReq(`Bearer ${token}`), res);
+    await probe(mockReq("Bearer bogus-token"), res);
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: "Invalid or expired operator session",
+    });
+  });
+
+  it("returns 403 JSON for a valid session with a non-allowlisted email", async () => {
+    const res = mockRes();
+    await probe(mockReq("Bearer intruder-session"), res);
     expect(res.statusCode).toBe(403);
     expect(JSON.parse(res.body)).toMatchObject({
       error: "Operator not authorized",
@@ -111,9 +96,8 @@ describe("defineRoute operator gate", () => {
   });
 
   it("reaches the handler with the operator identity for an allowlisted email", async () => {
-    const token = await signedToken("ops@example.com");
     const res = mockRes();
-    await probe(mockReq(`Bearer ${token}`), res);
+    await probe(mockReq("Bearer ops-session"), res);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({
       ok: true,

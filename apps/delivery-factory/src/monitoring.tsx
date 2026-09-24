@@ -58,7 +58,7 @@ async function fetchJson(url: string, timeoutMs = 12_000): Promise<{ ok: boolean
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    // Operator JWT for same-origin DF API calls only; the Lead Engine
+    // Operator session token for same-origin DF API calls only; the Lead Engine
     // health endpoints are cross-origin and stay unauthenticated.
     const headers: Record<string, string> = {};
     const token = getAuthToken();

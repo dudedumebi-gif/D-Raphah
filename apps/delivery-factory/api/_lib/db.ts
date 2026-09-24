@@ -131,6 +131,12 @@ export interface DeliveryDb {
     event: Record<string, unknown>;
   }): Promise<void>;
   getMonitoringSnapshot(): Promise<MonitoringSnapshot>;
+  /**
+   * Operator auth: look up a better-auth session token in the auth schema
+   * (Neon Auth branches with this database). Returns the session user's
+   * email, or null when the token is unknown or the session has expired.
+   */
+  findOperatorSession(token: string): Promise<{ email: string } | null>;
 }
 
 export interface MonitoringHandoff {
@@ -377,6 +383,20 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
         insert into public.feedback_outbox(project_id, event)
         values (${input.projectId}::uuid, ${JSON.stringify(input.event)}::jsonb)
       `;
+    },
+
+    async findOperatorSession(token: string): Promise<{ email: string } | null> {
+      // better-auth core schema (Neon Auth default): auth.session.token is
+      // the opaque token stored verbatim; expiresAt is camelCase.
+      const rows = (await client`
+        select u.email as email
+        from auth.session s
+        join auth.user u on u.id = s."userId"
+        where s.token = ${token} and s."expiresAt" > now()
+        limit 1
+      `) as unknown as Array<{ email: string }>;
+      const email = rows[0]?.email;
+      return typeof email === "string" && email ? { email } : null;
     },
 
     async getMonitoringSnapshot(): Promise<MonitoringSnapshot> {

@@ -62,39 +62,31 @@ async function readErrorMessage(res: Response): Promise<string> {
 }
 
 /**
- * Resolve the operator JWT for the current browser session.
+ * Resolve the operator session for the current browser session.
  *
- * better-auth's get-session returns an opaque session token, not a JWT, so
- * after confirming the session we mint a JWT: first from the `set-auth-jwt`
- * response header (emitted when the JWT plugin is active), otherwise from
- * the `/token` endpoint (JWT plugin). The JWT is what the DF API
- * verifies against the Neon Auth JWKS.
+ * The better-auth session cookie is `Partitioned`, so the browser sends it
+ * on this cross-origin `get-session` call. The response JSON carries the
+ * opaque session token, which we keep in memory and send as
+ * `Authorization: Bearer` on same-origin DF API calls. The DF backend
+ * validates the token against the better-auth tables in its own database —
+ * no JWT plugin involved.
  */
-async function loadOperatorJwt(
+async function loadOperatorSession(
   authUrl: string,
-): Promise<{ jwt: string; email: string | null }> {
+): Promise<{ token: string; email: string | null }> {
   const sessRes = await fetch(`${authUrl}/get-session`, {
     credentials: "include",
   });
-  if (!sessRes.ok) return { jwt: "", email: null };
+  if (!sessRes.ok) return { token: "", email: null };
   const sess = (await sessRes.json().catch(() => null)) as {
+    session?: { token?: unknown };
     user?: { email?: unknown };
   } | null;
+  const token =
+    sess && typeof sess.session?.token === "string" ? sess.session.token : "";
   const email =
     sess && typeof sess.user?.email === "string" ? sess.user.email : null;
-  const headerJwt = sessRes.headers.get("set-auth-jwt");
-  if (headerJwt && headerJwt.split(".").length === 3) {
-    return { jwt: headerJwt, email };
-  }
-  const tokRes = await fetch(`${authUrl}/token`, {
-    credentials: "include",
-  });
-  if (!tokRes.ok) return { jwt: "", email };
-  const tok = (await tokRes.json().catch(() => null)) as {
-    token?: unknown;
-  } | null;
-  const jwt = tok && typeof tok.token === "string" ? tok.token : "";
-  return { jwt, email };
+  return { token, email };
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -124,22 +116,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       authUrlRef.current = authUrl;
-      const { jwt, email: sessionEmail } = await loadOperatorJwt(authUrl);
-      if (!jwt) {
+      const { token, email: sessionEmail } = await loadOperatorSession(authUrl);
+      if (!token) {
         currentToken = null;
         setEmail(null);
-        if (sessionEmail) {
-          // A provider session exists but no operator JWT could be minted:
-          // the Neon Auth JWT plugin is not enabled. Say so instead of
-          // silently bouncing back to the login screen.
-          setError(
-            "Signed in, but no operator token was issued. Enable the JWT plugin in Neon Auth, then sign in again.",
-          );
-        }
         setStatus("signed-out");
         return;
       }
-      currentToken = jwt;
+      currentToken = token;
       setEmail(sessionEmail);
       setStatus("signed-in");
     } catch (e) {
@@ -179,11 +163,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       body: JSON.stringify({ email: signInEmail, password }),
     });
     if (!res.ok) throw new Error(await readErrorMessage(res));
-    const { jwt, email: sessionEmail } = await loadOperatorJwt(authUrl);
-    if (!jwt) {
-      throw new Error("Signed in, but no operator token was issued.");
+    const { token, email: sessionEmail } = await loadOperatorSession(authUrl);
+    if (!token) {
+      throw new Error("Signed in, but no operator session was established.");
     }
-    currentToken = jwt;
+    currentToken = token;
     setEmail(sessionEmail ?? signInEmail);
     setError(null);
     setStatus("signed-in");
@@ -203,11 +187,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }),
     });
     if (!res.ok) throw new Error(await readErrorMessage(res));
-    const { jwt, email: sessionEmail } = await loadOperatorJwt(authUrl);
-    if (!jwt) {
-      throw new Error("Account created, but no operator token was issued.");
+    const { token, email: sessionEmail } = await loadOperatorSession(authUrl);
+    if (!token) {
+      throw new Error("Account created, but no operator session was established.");
     }
-    currentToken = jwt;
+    currentToken = token;
     setEmail(sessionEmail ?? signUpEmail);
     setError(null);
     setStatus("signed-in");
@@ -230,8 +214,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   /**
    * Google social sign-in. better-auth redirects the browser to Google and
    * back to `callbackURL` (this app) with a session cookie; the normal
-   * bootstrap then mints the operator JWT from that session. The DF API
-   * allowlist check is unchanged — it only looks at the JWT email claim.
+   * bootstrap then picks up the session token from that session. The DF API
+   * allowlist check is unchanged — it only looks at the session's email.
    */
   const signInWithGoogle = useCallback(async () => {
     const authUrl = authUrlRef.current;

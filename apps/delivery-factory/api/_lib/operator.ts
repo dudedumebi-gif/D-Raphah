@@ -1,21 +1,25 @@
-import {
-  createLocalJWKSet,
-  errors,
-  jwtVerify,
-  type JSONWebKeySet,
-  type JWTPayload,
-} from "jose";
 import type { ApiRequest } from "./http.js";
+import type { DeliveryDb } from "./db.js";
 
 /**
  * Operator authentication for the Delivery Factory dashboard.
  *
- * Operators sign in through Neon Auth (better-auth) in the browser; the SPA
- * exchanges the session for a JWT via the auth server's `/api/auth/token`
- * endpoint and sends it as `Authorization: Bearer <jwt>` on every operator
- * API call. Here we verify the JWT signature against the Neon Auth JWKS and
- * enforce an email allowlist. The allowlist is the real gate: anyone can
- * create a Neon Auth account, but only allowlisted emails get past this.
+ * Operators sign in through Neon Auth (better-auth) in the browser. The SPA
+ * reads the better-auth session via a cross-origin `get-session` call (the
+ * session cookie is `Partitioned`, so the browser sends it) and keeps the
+ * opaque session token in memory, sending it as
+ * `Authorization: Bearer <session token>` on every operator API call.
+ *
+ * Here we validate that token directly against the better-auth tables in
+ * our own database — the Delivery Factory owns its database outright and
+ * Neon Auth branches with it, so this is first-party data, not cross-product
+ * access. The token must match a live, unexpired `auth.session` row, and the
+ * session's user email must be on the OPERATOR_EMAILS allowlist. The
+ * allowlist is the real gate: anyone can create a Neon Auth account, but
+ * only allowlisted emails get past this.
+ *
+ * This deliberately avoids the better-auth JWT plugin (not available in the
+ * Neon Auth console): no JWKS, no `/token` endpoint, no JWT minting.
  *
  * /api/intake (Lead Engine handoff ingress, Ed25519-signed) and
  * /api/internal/* (DELIVERY_FACTORY_CRON_SECRET bearer) do not use
@@ -35,77 +39,19 @@ export interface OperatorIdentity {
   email: string;
 }
 
-/** Injectable JWT verifier; production uses the Neon Auth JWKS, tests stub it. */
-export type JwtVerifier = (token: string) => Promise<JWTPayload>;
-
-/** Accept a small clock skew between the auth server and serverless clocks. */
-const CLOCK_TOLERANCE_SECONDS = 60;
-
-/** How long a fetched JWKS is reused before re-fetching. */
-const JWKS_TTL_MS = 10 * 60 * 1000;
-
-interface CachedKeySet {
-  expires: number;
-  verify: (token: string) => Promise<JWTPayload>;
+/** A validated better-auth session: just the operator's email. */
+export interface OperatorSession {
+  email: string;
 }
 
-const jwksCache = new Map<string, CachedKeySet>();
-
-function authBaseUrl(): string {
-  const raw = (process.env.NEON_AUTH_URL ?? "").trim().replace(/\/+$/, "");
-  if (!raw) {
-    // Plain Error -> mapped to 500 by errorStatus(); this is a server
-    // misconfiguration, not an operator credential problem.
-    throw new Error("Operator auth is not configured (NEON_AUTH_URL is unset)");
-  }
-  return raw;
-}
-
-async function fetchKeySet(jwksUrl: string) {
-  const res = await fetch(jwksUrl, { headers: { accept: "application/json" } });
-  if (!res.ok) {
-    throw new Error(`JWKS fetch failed with status ${res.status}`);
-  }
-  const jwks = (await res.json()) as JSONWebKeySet;
-  const keySet = createLocalJWKSet(jwks);
-  return async (token: string): Promise<JWTPayload> =>
-    (
-      await jwtVerify(token, keySet, {
-        clockTolerance: CLOCK_TOLERANCE_SECONDS,
-      })
-    ).payload;
-}
-
-async function cachedKeySet(jwksUrl: string, refresh: boolean) {
-  const cached = jwksCache.get(jwksUrl);
-  if (!refresh && cached && cached.expires > Date.now()) return cached;
-  const verify = await fetchKeySet(jwksUrl);
-  const entry: CachedKeySet = {
-    expires: Date.now() + JWKS_TTL_MS,
-    verify,
-  };
-  jwksCache.set(jwksUrl, entry);
-  return entry;
-}
-
-function remoteVerifier(): JwtVerifier {
-  const jwksUrl = `${authBaseUrl()}/.well-known/jwks.json`;
-  return async (token: string) => {
-    try {
-      return await (await cachedKeySet(jwksUrl, false)).verify(token);
-    } catch (err) {
-      if (
-        err instanceof errors.JWKSNoMatchingKey ||
-        err instanceof errors.JWSSignatureVerificationFailed
-      ) {
-        // The auth server may have rotated signing keys (same or new kid):
-        // refresh the JWKS once and retry before rejecting the token.
-        return await (await cachedKeySet(jwksUrl, true)).verify(token);
-      }
-      throw err;
-    }
-  };
-}
+/**
+ * Injectable session validator; production looks the token up in the
+ * better-auth tables, tests stub it. Database failures propagate as-is
+ * (mapped to 500 by the route wrapper) — they are not credential problems.
+ */
+export type SessionValidator = (
+  token: string,
+) => Promise<OperatorSession | null>;
 
 function bearerToken(req: ApiRequest): string | null {
   const raw = req.headers.authorization;
@@ -124,31 +70,34 @@ export function operatorAllowlist(): string[] {
 }
 
 /**
- * Verify the operator JWT on the request and return the operator identity.
- * Throws OperatorAuthError(401) for missing/invalid tokens and
- * OperatorAuthError(403) for valid tokens whose email is not allowlisted.
+ * Verify the operator session token on the request and return the operator
+ * identity. Throws OperatorAuthError(401) for missing/invalid/expired
+ * tokens and OperatorAuthError(403) for valid sessions whose email is not
+ * allowlisted.
  */
 export async function requireOperator(
   req: ApiRequest,
-  verify: JwtVerifier = remoteVerifier(),
+  validateSession: SessionValidator,
 ): Promise<OperatorIdentity> {
   const token = bearerToken(req);
   if (!token) {
     throw new OperatorAuthError(401, "Missing operator credentials");
   }
-  let payload: JWTPayload;
-  try {
-    payload = await verify(token);
-  } catch {
-    throw new OperatorAuthError(401, "Invalid operator token");
+  const session = await validateSession(token);
+  if (!session) {
+    throw new OperatorAuthError(401, "Invalid or expired operator session");
   }
-  const email =
-    typeof payload.email === "string" ? payload.email.trim().toLowerCase() : "";
+  const email = session.email.trim().toLowerCase();
   if (!email) {
-    throw new OperatorAuthError(403, "Operator token carries no email claim");
+    throw new OperatorAuthError(403, "Operator session has no email");
   }
   if (!operatorAllowlist().includes(email)) {
     throw new OperatorAuthError(403, "Operator not authorized");
   }
   return { email };
+}
+
+/** Build a SessionValidator from a DeliveryDb (used by the route wrapper). */
+export function dbSessionValidator(db: DeliveryDb): SessionValidator {
+  return (token: string) => db.findOperatorSession(token);
 }
