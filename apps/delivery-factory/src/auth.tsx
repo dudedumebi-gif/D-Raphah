@@ -65,13 +65,13 @@ async function readErrorMessage(res: Response): Promise<string> {
  * better-auth's get-session returns an opaque session token, not a JWT, so
  * after confirming the session we mint a JWT: first from the `set-auth-jwt`
  * response header (emitted when the JWT plugin is active), otherwise from
- * the `/api/auth/token` endpoint (JWT plugin). The JWT is what the DF API
+ * the `/token` endpoint (JWT plugin). The JWT is what the DF API
  * verifies against the Neon Auth JWKS.
  */
 async function loadOperatorJwt(
   authUrl: string,
 ): Promise<{ jwt: string; email: string | null }> {
-  const sessRes = await fetch(`${authUrl}/api/auth/get-session`, {
+  const sessRes = await fetch(`${authUrl}/get-session`, {
     credentials: "include",
   });
   if (!sessRes.ok) return { jwt: "", email: null };
@@ -84,7 +84,7 @@ async function loadOperatorJwt(
   if (headerJwt && headerJwt.split(".").length === 3) {
     return { jwt: headerJwt, email };
   }
-  const tokRes = await fetch(`${authUrl}/api/auth/token`, {
+  const tokRes = await fetch(`${authUrl}/token`, {
     credentials: "include",
   });
   if (!tokRes.ok) return { jwt: "", email };
@@ -162,7 +162,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signIn = useCallback(async (signInEmail: string, password: string) => {
     const authUrl = authUrlRef.current;
     if (!authUrl) throw new Error("Operator sign-in is not configured.");
-    const res = await fetch(`${authUrl}/api/auth/sign-in/email`, {
+    const res = await fetch(`${authUrl}/sign-in/email`, {
       method: "POST",
       credentials: "include",
       headers: { "content-type": "application/json" },
@@ -182,7 +182,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     const authUrl = authUrlRef.current;
     if (authUrl) {
-      await fetch(`${authUrl}/api/auth/sign-out`, {
+      await fetch(`${authUrl}/sign-out`, {
         method: "POST",
         credentials: "include",
       }).catch(() => {});
