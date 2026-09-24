@@ -73,8 +73,16 @@ async function readErrorMessage(res: Response): Promise<string> {
  */
 async function loadOperatorSession(
   authUrl: string,
+  verifier: string | null,
 ): Promise<{ token: string; email: string | null }> {
-  const sessRes = await fetch(`${authUrl}/get-session`, {
+  // When Neon Auth's social flow returns to our callbackURL it carries a
+  // one-time `neon_auth_session_verifier` claim ticket instead of a session.
+  // Redeeming it via get-session (with the challenge cookie set at
+  // initiation) mints the real session.
+  const url = verifier
+    ? `${authUrl}/get-session?neon_auth_session_verifier=${encodeURIComponent(verifier)}`
+    : `${authUrl}/get-session`;
+  const sessRes = await fetch(url, {
     credentials: "include",
   });
   if (!sessRes.ok) return { token: "", email: null };
@@ -116,7 +124,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       authUrlRef.current = authUrl;
-      const { token, email: sessionEmail } = await loadOperatorSession(authUrl);
+      // Neon Auth social sign-in redirects back to this app with a one-time
+      // `neon_auth_session_verifier` ticket: redeem it via get-session, then
+      // strip it from the URL so it can't leak through referer headers.
+      const params = new URLSearchParams(window.location.search);
+      const verifier = params.get("neon_auth_session_verifier");
+      if (verifier) {
+        const clean = new URL(window.location.href);
+        clean.searchParams.delete("neon_auth_session_verifier");
+        window.history.replaceState(null, "", clean.toString());
+      }
+      const { token, email: sessionEmail } = await loadOperatorSession(
+        authUrl,
+        verifier,
+      );
       if (!token) {
         currentToken = null;
         setEmail(null);
@@ -169,7 +190,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       body: JSON.stringify({ email: signInEmail, password }),
     });
     if (!res.ok) throw new Error(await readErrorMessage(res));
-    const { token, email: sessionEmail } = await loadOperatorSession(authUrl);
+    const { token, email: sessionEmail } = await loadOperatorSession(authUrl, null);
     if (!token) {
       throw new Error("Signed in, but no operator session was established.");
     }
@@ -193,7 +214,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }),
     });
     if (!res.ok) throw new Error(await readErrorMessage(res));
-    const { token, email: sessionEmail } = await loadOperatorSession(authUrl);
+    const { token, email: sessionEmail } = await loadOperatorSession(authUrl, null);
     if (!token) {
       throw new Error("Account created, but no operator session was established.");
     }
@@ -241,9 +262,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   /**
    * Google social sign-in. better-auth redirects the browser to Google and
-   * back to `callbackURL` (this app) with a session cookie; the normal
-   * bootstrap then picks up the session token from that session. The DF API
-   * allowlist check is unchanged — it only looks at the session's email.
+   * back to `callbackURL` (this app) carrying a one-time
+   * `neon_auth_session_verifier` ticket — not a session. The bootstrap
+   * redeems that ticket via get-session (the challenge cookie set here at
+   * initiation is what makes the redemption valid), which mints the real
+   * session whose token the app then uses. The DF API allowlist check is
+   * unchanged — it only looks at the session's email.
    */
   const signInWithGoogle = useCallback(async () => {
     const authUrl = authUrlRef.current;
