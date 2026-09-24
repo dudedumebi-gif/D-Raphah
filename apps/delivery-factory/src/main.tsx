@@ -12,6 +12,7 @@ import "./workflows.css";
 import "./monitoring.css";
 import { WorkflowsSection } from "./workflows";
 import { MonitoringSection } from "./monitoring";
+import { AuthProvider, LoginScreen, useAuth } from "./auth";
 
 type View =
   | "portfolio"
@@ -152,6 +153,7 @@ function useStoredState<T>(key: string, initialValue: T) {
 }
 
 function App() {
+  const auth = useAuth();
   const [view, setView] = useState<View>("portfolio");
   const [workspace, setWorkspace] = useState<"All workspaces" | "Active only">(
     "All workspaces",
@@ -409,6 +411,17 @@ function App() {
             title="Clear the sample portfolio data from this browser and restore the seed data"
           >
             Reset demo workspace
+          </button>
+          <span className="auth-email" title="Signed-in operator">
+            {auth.email}
+          </span>
+          <button
+            type="button"
+            className="status-action"
+            onClick={() => void auth.signOut()}
+            title="Sign out of the operator account"
+          >
+            Sign out
           </button>
         </div>
         {view === "portfolio" ? (
@@ -941,6 +954,24 @@ function Metric({
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <AuthProvider>
+      <GatedApp />
+    </AuthProvider>
   </StrictMode>,
 );
+
+/** Operator login gate: the dashboard renders only with a live session. */
+function GatedApp() {
+  const auth = useAuth();
+  if (auth.status === "loading") {
+    return (
+      <div className="auth-screen">
+        <p className="muted">Checking operator session…</p>
+      </div>
+    );
+  }
+  if (auth.status === "signed-out") {
+    return <LoginScreen />;
+  }
+  return <App />;
+}

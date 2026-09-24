@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getAuthToken, notifyUnauthorized } from "./auth";
 
 /* ── Types (mirror api/_lib/workflows.ts) ─────────────────────────────── */
 
@@ -87,12 +88,18 @@ function newKey(prefix: string): string {
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...init,
-  });
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  const initHeaders = init?.headers as Record<string, string> | undefined;
+  if (initHeaders) Object.assign(headers, initHeaders);
+  // Operator JWT, same-origin DF API only (never leak it cross-origin).
+  const token = getAuthToken();
+  if (token && path.startsWith("/api/")) {
+    headers.authorization = `Bearer ${token}`;
+  }
+  const res = await fetch(path, { ...init, headers });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
+    if (res.status === 401 || res.status === 403) notifyUnauthorized();
     throw new Error(
       typeof data.error === "string" ? data.error : `Request failed (${res.status})`,
     );

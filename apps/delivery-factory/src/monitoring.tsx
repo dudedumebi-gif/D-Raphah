@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getAuthToken, notifyUnauthorized } from "./auth";
 
 /* ── Monitoring view ────────────────────────────────────────────────────
  * Service liveness, readiness, handoff intake activity, feedback outbox
@@ -57,8 +58,18 @@ async function fetchJson(url: string, timeoutMs = 12_000): Promise<{ ok: boolean
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
+    // Operator JWT for same-origin DF API calls only; the Lead Engine
+    // health endpoints are cross-origin and stay unauthenticated.
+    const headers: Record<string, string> = {};
+    const token = getAuthToken();
+    if (token && url.startsWith("/api/")) {
+      headers.authorization = `Bearer ${token}`;
+    }
+    const res = await fetch(url, { signal: ctrl.signal, headers });
     const data = await res.json().catch(() => ({}));
+    if (!res.ok && (res.status === 401 || res.status === 403) && url.startsWith("/api/")) {
+      notifyUnauthorized();
+    }
     return { ok: res.ok, status: res.status, data, latencyMs: Date.now() - started };
   } finally {
     clearTimeout(timer);

@@ -225,3 +225,52 @@
     order: 3;
   }
 }
+
+/* ── Operator auth gate ─────────────────────────────────────────────── */
+.auth-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid rgba(139, 117, 209, 0.25);
+  border-radius: 12px;
+  padding: 28px;
+  background: rgba(20, 16, 38, 0.6);
+}
+.auth-card h1 {
+  margin: 0;
+  font-size: 22px;
+}
+.auth-error {
+  margin: 0;
+  color: #f0a3a3;
+  font-size: 13px;
+}
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+.auth-field input {
+  font: inherit;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(139, 117, 209, 0.35);
+  background: rgba(10, 8, 24, 0.7);
+  color: inherit;
+}
+.auth-email {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.75;
+  font-family: "DM Mono", ui-monospace, monospace;
+}
