@@ -15,6 +15,7 @@ interface AuthContextValue {
   error: string | null;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
+  signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
   retry: () => void;
 }
@@ -218,11 +219,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setStatus("signed-out");
   }, []);
 
+  /**
+   * Google social sign-in. better-auth redirects the browser to Google and
+   * back to `callbackURL` (this app) with a session cookie; the normal
+   * bootstrap then mints the operator JWT from that session. The DF API
+   * allowlist check is unchanged — it only looks at the JWT email claim.
+   */
+  const signInWithGoogle = useCallback(async () => {
+    const authUrl = authUrlRef.current;
+    if (!authUrl) throw new Error("Operator sign-in is not configured.");
+    const res = await fetch(`${authUrl}/sign-in/social`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "google",
+        callbackURL: window.location.origin,
+      }),
+    });
+    if (!res.ok) throw new Error(await readErrorMessage(res));
+    const data = (await res.json().catch(() => null)) as {
+      url?: unknown;
+    } | null;
+    const url = data && typeof data.url === "string" ? data.url : null;
+    if (!url) throw new Error("Google sign-in did not return a redirect URL.");
+    window.location.href = url;
+  }, []);
+
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   return (
     <AuthContext.Provider
-      value={{ status, email, error, signIn, signUp, signOut, retry }}
+      value={{ status, email, error, signIn, signUp, signInWithGoogle, signOut, retry }}
     >
       {children}
     </AuthContext.Provider>
@@ -261,6 +289,20 @@ export function LoginScreen() {
     }
   }
 
+  async function onGoogle() {
+    setBusy(true);
+    setFormError(null);
+    try {
+      await auth.signInWithGoogle();
+    } catch (err) {
+      setFormError(
+        err instanceof Error ? err.message : "Google sign-in failed.",
+      );
+      setBusy(false);
+    }
+    // On success the browser leaves for Google; no finally needed.
+  }
+
   function switchMode(next: "signin" | "signup") {
     setMode(next);
     setFormError(null);
@@ -280,6 +322,35 @@ export function LoginScreen() {
         </p>
         {auth.error ? <p className="auth-error">{auth.error}</p> : null}
         {formError ? <p className="auth-error">{formError}</p> : null}
+        <button
+          type="button"
+          className="btn-google"
+          onClick={onGoogle}
+          disabled={busy}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              fill="#4285F4"
+              d="M23.5 12.3c0-.9-.1-1.5-.3-2.2H12v4.1h6.5c-.1 1.1-.8 2.7-2.4 3.8l3.7 2.9c2.3-2.1 3.7-5.1 3.7-8.6z"
+            />
+            <path
+              fill="#34A853"
+              d="M12 24c3.2 0 5.9-1.1 7.9-2.9l-3.7-2.9c-1 .7-2.4 1.2-4.2 1.2-3.1 0-5.8-2.1-6.8-5l-3.7 2.9c1.9 3.7 5.8 6.7 10.5 6.7z"
+            />
+            <path
+              fill="#FBBC05"
+              d="M5.2 14.4c-.2-.7-.4-1.5-.4-2.4s.1-1.7.4-2.4l-3.7-2.9C.5 8.5 0 10.2 0 12s.5 3.5 1.5 5.1l3.7-2.7z"
+            />
+            <path
+              fill="#EA4335"
+              d="M12 4.7c1.8 0 3 .8 3.7 1.4l3.3-3.2C17.9 1.1 15.2 0 12 0 7.3 0 3.4 2.7 1.5 6.7l3.7 2.9c1-2.9 3.7-4.9 6.8-4.9z"
+            />
+          </svg>
+          Sign in with Google
+        </button>
+        <p className="muted auth-divider">
+          <span>or with email</span>
+        </p>
         <label className="auth-field">
           Email
           <input
