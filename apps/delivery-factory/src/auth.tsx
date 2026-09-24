@@ -346,7 +346,7 @@ export function LoginScreen() {
               d="M12 4.7c1.8 0 3 .8 3.7 1.4l3.3-3.2C17.9 1.1 15.2 0 12 0 7.3 0 3.4 2.7 1.5 6.7l3.7 2.9c1-2.9 3.7-4.9 6.8-4.9z"
             />
           </svg>
-          Sign in with Google
+          {isSignup ? "Sign up with Google" : "Sign in with Google"}
         </button>
         <p className="muted auth-divider">
           <span>or with email</span>
