@@ -116,11 +116,14 @@
   flex-direction: column;
   gap: 4px;
   flex: 1;
+  min-width: 0;
 }
 .record-row small,
 .record-row time {
   font-size: 11px;
   color: #809497;
+  overflow-wrap: break-word;
+  word-break: break-all;
 }
 .verified {
   font-size: 10px;
@@ -394,4 +397,15 @@
 .live-summary {
   color: #2b3138;
   overflow-wrap: anywhere;
+}
+
+/* Responsive: allow record rows to wrap when viewport is narrow (zoomed) */
+@media (max-width: 900px) {
+  .record-row {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .record-row > div {
+    flex-basis: 100%;
+  }
 }
