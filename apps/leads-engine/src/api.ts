@@ -115,6 +115,7 @@ export interface SourceRecord {
   name: string;
   base_url: string;
   collection_method: string;
+  business_purpose: string;
   status: string;
   active_policy_id: string | null;
   created_at: string;

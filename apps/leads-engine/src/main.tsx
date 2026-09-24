@@ -31,7 +31,8 @@ type View =
   | "leads"
   | "operations"
   | "audit"
-  | "settings";
+  | "settings"
+  | "help";
 type Mutate = <T>(
   path: string,
   init: RequestInit,
@@ -45,6 +46,7 @@ const views: Array<{ id: View; label: string }> = [
   { id: "operations", label: "Operations" },
   { id: "audit", label: "Audit log" },
   { id: "settings", label: "Criteria & schedule" },
+  { id: "help", label: "Help & guide" },
 ];
 
 function workspaceName(membership: Membership): string {
@@ -397,6 +399,7 @@ function DashboardView({
   if (view === "operations") return <Operations data={data} />;
   if (view === "audit") return <Audit data={data} />;
   if (view === "settings") return <Settings data={data} mutate={mutate} />;
+  if (view === "help") return <HelpGuide />;
   const complete = data.jobs.filter((job) => job.status === "completed").length;
   const active = data.jobs.filter((job) =>
     ["queued", "leased", "running", "retrying"].includes(job.status),
@@ -456,6 +459,7 @@ function DashboardView({
 }
 
 function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
+  const [editingId, setEditingId] = useState<string | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -507,6 +511,14 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
                 </small>
               </div>
               <Status value={source.status} />
+              <button
+                className="row-action"
+                onClick={() =>
+                  setEditingId(editingId === source.id ? null : source.id)
+                }
+              >
+                {editingId === source.id ? "Cancel" : "Edit"}
+              </button>
               {source.status === "pending_approval" ? (
                 <button
                   className="row-action"
@@ -526,6 +538,66 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
                 >
                   Approve
                 </button>
+              ) : null}
+              {editingId === source.id ? (
+                <form
+                  className="inline-form edit-form"
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    const form = new FormData(event.currentTarget);
+                    const result = await mutate(
+                      `/api/v1/sources/${source.id}`,
+                      {
+                        method: "PATCH",
+                        body: JSON.stringify({
+                          name: String(form.get("name")),
+                          baseUrl: String(form.get("baseUrl")),
+                          collectionMethod: String(form.get("method")),
+                          businessPurpose: String(form.get("purpose")),
+                        }),
+                      },
+                      `${String(form.get("name"))} updated.`,
+                    );
+                    if (result) setEditingId(null);
+                  }}
+                >
+                  <label>
+                    Name
+                    <input name="name" defaultValue={source.name} required />
+                  </label>
+                  <label>
+                    Base URL
+                    <input
+                      name="baseUrl"
+                      type="url"
+                      defaultValue={source.base_url}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Collection method
+                    <select
+                      name="method"
+                      defaultValue={source.collection_method}
+                    >
+                      <option value="static_html">Static HTML</option>
+                      <option value="rss">RSS</option>
+                      <option value="sitemap">Sitemap</option>
+                      <option value="api">Public API</option>
+                    </select>
+                  </label>
+                  <label>
+                    Purpose
+                    <textarea
+                      name="purpose"
+                      defaultValue={source.business_purpose}
+                      required
+                    />
+                  </label>
+                  <button type="submit" className="primary">
+                    Save changes
+                  </button>
+                </form>
               ) : null}
             </div>
           ))}
@@ -989,6 +1061,97 @@ function HealthBadge({ data }: { data: BootstrapData }) {
     </div>
   );
 }
+function HelpGuide() {
+  return (
+    <div className="content">
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Lead Engine User Guide</h3>
+            <p>How to use the Raphah Lead Engine — from first source to qualified lead.</p>
+          </div>
+        </div>
+        <div className="help-content">
+          <h4>1. Getting started</h4>
+          <p>
+            The Lead Engine discovers businesses with low automation maturity,
+            scores them as opportunities, and keeps a continuously-refreshed
+            list of qualified leads. Work flows through <b>workspaces</b> —
+            your personal workspace was created automatically on first sign-in.
+          </p>
+
+          <h4>2. Sources &amp; policies — the approval gate</h4>
+          <p>
+            A <b>source</b> is a website or API you want to collect public
+            evidence from. Nothing is collected until a source's policy is
+            explicitly approved:
+          </p>
+          <ol>
+            <li>Go to <b>Sources &amp; policies</b> → fill in <b>Add source</b> (name, base URL, collection method, purpose, contact email, refresh interval).</li>
+            <li>The source is created with status <b>pending approval</b> — it appears in the list with a badge and an <b>Approve</b> button.</li>
+            <li>Review the policy (allowed domains, rate limits, budgets), then click <b>Approve</b>. Only owners and administrators can approve.</li>
+            <li>Once approved, the status becomes <b>active</b> and the source appears in the <b>Approved source</b> dropdown on the Scrape jobs page.</li>
+          </ol>
+          <p>
+            <b>Why the gate?</b> The Lead Engine only collects public evidence
+            for a stated business purpose. The approval step is your record
+            that a human reviewed and permitted the collection.
+          </p>
+
+          <h4>3. Criteria &amp; schedule — what counts as a lead</h4>
+          <p>Each discovery campaign has scoring thresholds:</p>
+          <ul>
+            <li><b>Maximum maturity</b> — only businesses scoring at or below this automation-maturity level qualify (lower = less automated = better prospect).</li>
+            <li><b>Minimum opportunity</b> — the opportunity score a business must reach.</li>
+            <li><b>Confidence %</b> — minimum evidence confidence.</li>
+            <li><b>Evidence categories</b> — how many distinct evidence types must be observed.</li>
+            <li><b>Geography</b> — limit discovery to cities, regions, or a radius around a point.</li>
+          </ul>
+          <p>
+            The engine watches your qualified-lead output and suggests
+            threshold adjustments (e.g. "loosen" when output is below target).
+            Click <b>Apply suggestion</b> to accept, or edit the values
+            manually and save. Enable <b>auto-apply</b> to let future
+            suggestions apply themselves.
+          </p>
+
+          <h4>4. Scrape jobs — collecting evidence</h4>
+          <p>
+            Go to <b>Scrape jobs</b>, pick an <b>approved source</b>, enter a
+            public target URL, and click <b>Queue scrape</b>. Jobs move through
+            a durable lifecycle: <b>queued → leased → completed</b> (or
+            retried, then dead-lettered after max attempts). Every job stays
+            queryable in the job table.
+          </p>
+
+          <h4>5. Qualified leads — the output</h4>
+          <p>
+            <b>Qualified leads</b> lists businesses that met your criteria,
+            ranked by opportunity potential. Each lead links to its evidence.
+            Export the list for outreach — note: the system drafts messages,
+            a human approves and sends them (no automated outreach).
+          </p>
+
+          <h4>6. Operations &amp; audit</h4>
+          <p>
+            <b>Operations</b> shows worker health, job throughput, and the
+            canary status (the hourly pipeline smoke test). <b>Audit log</b>
+            records every significant action — source approvals, criteria
+            changes, and handoffs — for compliance review.
+          </p>
+
+          <h4>Troubleshooting</h4>
+          <ul>
+            <li><b>Source dropdown is empty</b> — no active sources in this workspace yet. Create one under Sources &amp; policies and approve it.</li>
+            <li><b>Stuck on "Workspace initializing"</b> — refresh the page; the bootstrap retries automatically.</li>
+            <li><b>"Request failed (404)"</b> — the data plane had a hiccup; click Refresh or reload the page.</li>
+          </ul>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function Centered({
   title,
   detail,

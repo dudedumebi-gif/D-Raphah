@@ -458,6 +458,54 @@ async function authenticatedRoutes(
     if (error) throw new Error(error.message);
     return json({ data });
   }
+  const sourceUpdate = pathname.match(/^\/api\/v1\/sources\/([0-9a-f-]+)$/i);
+  if (sourceUpdate && request.method === "PATCH") {
+    requireRole(context, ["owner", "administrator"]);
+    const input = z
+      .object({
+        name: z.string().min(1).max(200).optional(),
+        baseUrl: z.string().url().max(2000).optional(),
+        collectionMethod: z
+          .enum(["static_html", "rss", "sitemap", "api"])
+          .optional(),
+        businessPurpose: z.string().min(10).max(2000).optional(),
+      })
+      .parse(await bodyJson(request));
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+    if (input.name !== undefined) {
+      sets.push(`name = $${idx++}`);
+      params.push(input.name);
+    }
+    if (input.baseUrl !== undefined) {
+      sets.push(`base_url = $${idx++}`);
+      params.push(input.baseUrl);
+    }
+    if (input.collectionMethod !== undefined) {
+      sets.push(`collection_method = $${idx++}`);
+      params.push(input.collectionMethod);
+    }
+    if (input.businessPurpose !== undefined) {
+      sets.push(`business_purpose = $${idx++}`);
+      params.push(input.businessPurpose);
+    }
+    if (sets.length === 0)
+      throw Object.assign(new Error("No fields to update"), { statusCode: 400 });
+    const sql = createAdminClient() as unknown as (
+      query: string,
+      params: unknown[],
+    ) => Promise<Array<Record<string, unknown>>>;
+    const rows = await sql(
+      `update public.source_definitions set ${sets.join(", ")}, updated_at = now()
+       where workspace_id = $${idx++} and id = $${idx++}
+       returning id, name, base_url, collection_method, business_purpose, status`,
+      [...params, workspaceId, sourceUpdate[1]],
+    );
+    if (!rows.length)
+      throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    return json({ data: rows[0] });
+  }
 
   if (pathname === "/api/v1/criteria" && request.method === "GET") {
     const { data, error } = await client

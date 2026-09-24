@@ -431,3 +431,28 @@ button {
     padding: 24px 16px;
   }
 }
+
+.edit-form {
+  grid-column: 1 / -1;
+  margin-top: 12px;
+  padding: 16px;
+  background: var(--surface-2, #f8fafc);
+  border-radius: 8px;
+  border: 1px solid var(--border, #e2e8f0);
+}
+
+.help-content h4 {
+  margin-top: 24px;
+  margin-bottom: 8px;
+  font-size: 1.1rem;
+}
+
+.help-content p, .help-content li {
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+
+.help-content ol, .help-content ul {
+  margin-left: 20px;
+  margin-bottom: 12px;
+}
