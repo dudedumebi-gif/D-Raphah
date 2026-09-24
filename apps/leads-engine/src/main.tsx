@@ -183,11 +183,25 @@ function Workspace({ session }: { session: Session }) {
 
   useEffect(() => {
     void (async () => {
-      const bootstrap = await neonClient!.rpc("ensure_personal_workspace", {
-        p_name: "Raphah Lead Workspace",
-      });
-      if (bootstrap.error) {
-        setNotice(bootstrap.error.message);
+      // Retry the bootstrap RPC — the session JWT can take a moment to
+      // propagate to the Data API after sign-in, causing a transient failure
+      // on the first attempt. Retry with backoff instead of giving up.
+      let bootstrap: { error: { message: string } | null } | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        bootstrap = await neonClient!.rpc("ensure_personal_workspace", {
+          p_name: "Raphah Lead Workspace",
+        });
+        if (!bootstrap.error) break;
+        setNotice(
+          `Connecting… (attempt ${attempt + 1}/3: ${bootstrap.error.message})`,
+        );
+      }
+      if (!bootstrap || bootstrap.error) {
+        setNotice(
+          bootstrap?.error?.message ??
+            "Workspace bootstrap failed after 3 attempts.",
+        );
         return;
       }
       const result = await neonClient!
