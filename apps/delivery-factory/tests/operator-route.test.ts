@@ -105,3 +105,66 @@ describe("defineRoute operator gate", () => {
     });
   });
 });
+
+describe("defineRoute CORS origin gate", () => {
+  function mockReqWithOrigin(
+    authHeader: string,
+    origin: string | undefined,
+    host: string | undefined,
+  ): ApiRequest {
+    const headers: Record<string, string> = { authorization: authHeader };
+    if (origin !== undefined) headers.origin = origin;
+    if (host !== undefined) headers.host = host;
+    return { method: "GET", headers, query: {} } as unknown as ApiRequest;
+  }
+
+  it("allows a same-origin request even when the origin is not allowlisted", async () => {
+    delete process.env.DELIVERY_ALLOWED_ORIGINS;
+    const res = mockRes();
+    await probe(
+      mockReqWithOrigin(
+        "Bearer ops-session",
+        "https://new-preview-123.vercel.app",
+        "new-preview-123.vercel.app",
+      ),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      ok: true,
+      operator: "ops@example.com",
+    });
+  });
+
+  it("returns 403 for a cross-origin request whose origin is not allowlisted", async () => {
+    delete process.env.DELIVERY_ALLOWED_ORIGINS;
+    const res = mockRes();
+    await probe(
+      mockReqWithOrigin(
+        "Bearer ops-session",
+        "https://evil.example.com",
+        "new-preview-123.vercel.app",
+      ),
+      res,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: "Origin not allowed",
+    });
+  });
+
+  it("allows a cross-origin request whose origin is allowlisted", async () => {
+    process.env.DELIVERY_ALLOWED_ORIGINS = "https://app.example.com";
+    const res = mockRes();
+    await probe(
+      mockReqWithOrigin(
+        "Bearer ops-session",
+        "https://app.example.com",
+        "new-preview-123.vercel.app",
+      ),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    delete process.env.DELIVERY_ALLOWED_ORIGINS;
+  });
+});

@@ -101,6 +101,31 @@ export function corsHeadersFor(
   return null;
 }
 
+/**
+ * True when the request's Origin matches its own Host, i.e. the browser call
+ * is same-origin. Same-origin requests never need CORS permission — the
+ * DELIVERY_ALLOWED_ORIGINS allowlist only gates CROSS-origin callers.
+ * Without this exemption, every new preview deployment (new URL) gets
+ * 403 "Origin not allowed" on all operator API calls until someone manually
+ * adds the URL to the env var.
+ */
+export function isSameOrigin(
+  origin: string | string[] | undefined | null,
+  host: string | string[] | undefined,
+): boolean {
+  const originValue = Array.isArray(origin) ? origin[0] : origin;
+  const hostValue = Array.isArray(host) ? host[0] : host;
+  if (!originValue || !hostValue) return false;
+  try {
+    return (
+      new URL(originValue).hostname.toLowerCase() ===
+      hostValue.split(":")[0].toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
 export interface BaselineViolation {
   code:
     | "EMPTY_REQUIREMENTS"

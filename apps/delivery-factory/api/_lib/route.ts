@@ -2,6 +2,7 @@ import type { ServerResponse } from "node:http";
 import { createDeliveryDb, type DeliveryDb } from "./db.js";
 import {
   corsHeadersFor,
+  isSameOrigin,
   readIntakeEnv,
   type IntakeEnv,
 } from "./verify.js";
@@ -41,7 +42,16 @@ export function defineRoute(
 ): (req: ApiRequest, res: ServerResponse) => Promise<void> {
   return async function route(req: ApiRequest, res: ServerResponse) {
     const env = readIntakeEnv();
-    const cors = corsHeadersFor(req.headers.origin ?? null, env.allowedOrigins);
+    const origin = req.headers.origin ?? null;
+    let cors = corsHeadersFor(
+      Array.isArray(origin) ? origin[0] : origin,
+      env.allowedOrigins,
+    );
+    if (cors === null && isSameOrigin(origin, req.headers.host)) {
+      // Same-origin browser call: no CORS headers needed, and never
+      // forbidden — the allowlist only gates cross-origin callers.
+      cors = {};
+    }
     const method = (req.method ?? "GET").toUpperCase();
 
     if (method === "OPTIONS") {
