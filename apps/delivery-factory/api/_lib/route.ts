@@ -11,22 +11,24 @@ import {
   sendJson,
   type ApiRequest,
 } from "./http.js";
+import { requireOperator, type OperatorIdentity } from "./operator.js";
 
 /**
  * Shared wrapper for the operator project routes (everything except
- * /api/intake and /api/health): restricted CORS, method gating, service
- * wiring, and error mapping.
+ * /api/intake and /api/health): restricted CORS, method gating, operator
+ * authentication, service wiring, and error mapping.
  *
- * NOTE: these routes currently carry no operator authentication; they run
- * with the service-role database client. End-user auth is out of scope for
- * this phase (see the migration header) and must land before any
- * browser session is allowed to call mutating routes directly.
+ * Operator auth is a Neon Auth (better-auth) RS256 JWT verified against the
+ * Neon Auth JWKS, plus an email allowlist from OPERATOR_EMAILS. The
+ * allowlist is the real gate: any valid JWT whose email is not listed gets
+ * 403. Thrown OperatorAuthErrors map to 401/403 JSON responses via
+ * errorStatus() below.
  */
 
 type RouteHandler = (
   req: ApiRequest,
   res: ServerResponse,
-  ctx: { db: DeliveryDb; env: IntakeEnv },
+  ctx: { db: DeliveryDb; env: IntakeEnv; operator: OperatorIdentity },
 ) => Promise<void>;
 
 export function defineRoute(
@@ -57,7 +59,8 @@ export function defineRoute(
       return;
     }
     try {
-      await handler(req, res, { db: createDeliveryDb(), env });
+      const operator = await requireOperator(req);
+      await handler(req, res, { db: createDeliveryDb(), env, operator });
     } catch (error) {
       sendJson(res, errorStatus(error), cors, { error: errorMessage(error) });
     }
