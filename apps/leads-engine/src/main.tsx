@@ -25,6 +25,7 @@ import { Settings } from "./CriteriaSettings";
 import { JobLiveWindow } from "./JobLiveWindow";
 import "./styles.css";
 import "./functionality.css";
+import "./ux-fixes.css";
 
 type View =
   | "overview"
@@ -107,10 +108,18 @@ function SetupRequired() {
   );
 }
 
+function humanizeAuthError(message: string): string {
+  if (/invalid login credentials/i.test(message)) return "Email or password is incorrect. Try again or reset your password.";
+  if (/email.*already registered/i.test(message)) return "That email already has an account. Sign in instead.";
+  if (/password/i.test(message) && /length|weak|short/i.test(message)) return "Use a password with at least 8 characters.";
+  return "We could not complete that request. Check your details and try again.";
+}
+
 function SignIn({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -127,7 +136,7 @@ function SignIn({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
             options: { data: { workspace_name: "Raphah Lead Workspace" } },
           });
     setBusy(false);
-    if (result.error) setMessage(result.error.message);
+    if (result.error) setMessage(humanizeAuthError(result.error.message));
     else if (mode === "signup" && !result.data.session)
       setMessage("Check your email to confirm the account.");
     else {
@@ -165,16 +174,32 @@ function SignIn({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
               ? "Sign in"
               : "Create workspace"}
         </button>
+        {mode === "signin" ? (
+          <button
+            type="button"
+            className="text-button"
+            onClick={async () => {
+              const email = document.querySelector<HTMLInputElement>('input[name="email"]')?.value.trim() ?? "";
+              if (!email) {
+                setMessage("Enter your email above, then request a reset link.");
+                return;
+              }
+              const result = await neonClient!.auth.resetPasswordForEmail(email);
+              setMessage(result.error ? humanizeAuthError(result.error.message) : "Password reset link sent. Check your email.");
+              setResetSent(!result.error);
+            }}
+          >
+            {resetSent ? "Reset link sent" : "Forgot password?"}
+          </button>
+        ) : null}
         <button
           type="button"
           className="text-button"
           onClick={() => setMode(mode === "signin" ? "signup" : "signin")}
         >
-          {mode === "signin"
-            ? "Create a new account"
-            : "Use an existing account"}
+          {mode === "signin" ? "Create a new account" : "Use an existing account"}
         </button>
-        {message ? <p className="form-message">{message}</p> : null}
+        {message ? <p className="form-message" role="alert">{message}</p> : null}
       </form>
     </Centered>
   );
@@ -189,10 +214,11 @@ function Workspace({ session }: { session: Session }) {
     workspaceId ? cachedBootstrap(workspaceId, session.user.id) : null,
   );
   const [view, setView] = useState<View>("overview");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState(
-    "Connecting to the production data plane…",
-  );
+  const [notice, setNotice] = useState("Connecting to the production data plane…");
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
 
   useEffect(() => {
     void (async () => {
@@ -211,12 +237,12 @@ function Workspace({ session }: { session: Session }) {
         );
       }
       if (!bootstrap || bootstrap.error) {
-        setNotice(
-          bootstrap?.error?.message ??
-            "Workspace bootstrap failed after 3 attempts.",
-        );
+        const message = bootstrap?.error?.message ?? "Workspace bootstrap failed after 3 attempts.";
+        setBootstrapError(message);
+        setNotice("Workspace connection needs attention.");
         return;
       }
+      setBootstrapError(null);
       const result = await neonClient!
         .from("workspace_memberships")
         .select("workspace_id,role,workspaces(name)")
@@ -230,7 +256,7 @@ function Workspace({ session }: { session: Session }) {
       setMemberships(rows);
       setWorkspaceId((current) => current || rows[0]?.workspace_id || "");
     })();
-  }, [session.user.id]);
+  }, [session.user.id, bootstrapAttempt]);
 
   const refresh = useCallback(
     async (quiet = false) => {
@@ -288,13 +314,17 @@ function Workspace({ session }: { session: Session }) {
     }
   }
 
-  if (!memberships.length && !data)
+  if (bootstrapError && !memberships.length && !data)
     return (
-      <Centered
-        title="Workspace initializing"
-        detail="No active workspace membership was found. Confirm the Neon migration, Auth, and Data API are enabled."
-      />
+      <Centered title="Workspace connection needs attention" detail="We could not load your workspace. Your data has not been changed.">
+        <p className="error-detail">{bootstrapError}</p>
+        <button className="primary" onClick={() => { setBootstrapError(null); setBootstrapAttempt((value) => value + 1); }}>
+          Try again
+        </button>
+      </Centered>
     );
+  if (!memberships.length && !data)
+    return <Centered title="Workspace initializing" detail="Preparing your secure workspace and checking active membership." />;
   const activeMembership =
     memberships.find((item) => item.workspace_id === workspaceId) ??
     memberships[0];
@@ -313,7 +343,8 @@ function Workspace({ session }: { session: Session }) {
             <button
               key={item.id}
               className={view === item.id ? "nav-item active" : "nav-item"}
-              onClick={() => setView(item.id)}
+              aria-current={view === item.id ? "page" : undefined}
+              onClick={() => { setView(item.id); setMobileNavOpen(false); }}
             >
               <span>{item.label}</span>
               {item.id === "jobs" && data ? (
@@ -351,6 +382,10 @@ function Workspace({ session }: { session: Session }) {
       </aside>
       <main>
         <header className="topbar">
+          <div className="mobile-topbar-row">
+            <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(true)}>Menu</button>
+            <span className="mobile-view-label">{views.find((item) => item.id === view)?.label}</span>
+          </div>
           <div>
             <p className="eyebrow">Workspace / Automation intelligence</p>
             <h1>{views.find((item) => item.id === view)?.label}</h1>
@@ -365,7 +400,15 @@ function Workspace({ session }: { session: Session }) {
             </button>
           </div>
         </header>
-        <div className="status-bar" role="status">
+        {mobileNavOpen ? (
+          <div className="mobile-nav-backdrop" role="presentation" onClick={() => setMobileNavOpen(false)}>
+            <nav className="mobile-nav" aria-label="Workspace navigation" onClick={(event) => event.stopPropagation()}>
+              <div className="mobile-nav-head"><b>Navigate</b><button className="icon-button" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}>×</button></div>
+              {views.map((item) => <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMobileNavOpen(false); }}>{item.label}</button>)}
+            </nav>
+          </div>
+        ) : null}
+        <div className="status-bar" role="status" aria-live="polite">
           <span className="status-dot" />
           {notice}
         </div>
@@ -432,6 +475,16 @@ function DashboardView({
         </div>
         <HealthBadge data={data} />
       </section>
+      {data.sources.length === 0 || data.jobs.length === 0 ? (
+        <section className="setup-checklist panel" aria-labelledby="setup-heading">
+          <div><p className="eyebrow accent">Recommended next steps</p><h3 id="setup-heading">Set up your first evidence run</h3><p className="muted">Follow the controlled path from permitted source to reviewable lead.</p></div>
+          <div className="checklist-grid">
+            <button className={data.sources.length ? "checklist-step complete" : "checklist-step"} onClick={() => setView("sources")}><b>1. Add a source</b><span>{data.sources.length ? "Source registered" : "Register a permitted public source"}</span></button>
+            <button className={data.sources.some((source) => source.status === "active") ? "checklist-step complete" : "checklist-step"} onClick={() => setView("sources")}><b>2. Approve policy</b><span>{data.sources.some((source) => source.status === "active") ? "Policy active" : "Review before collection"}</span></button>
+            <button className={data.jobs.length ? "checklist-step complete" : "checklist-step"} onClick={() => setView("jobs")}><b>3. Queue a job</b><span>{data.jobs.length ? "Job history available" : "Run the first evidence job"}</span></button>
+          </div>
+        </section>
+      ) : null}
       <section className="metrics">
         <Metric
           label="Approved sources"
