@@ -259,6 +259,8 @@ function BuilderCanvas(props: {
   );
 
   const deleteSelected = useCallback(() => {
+    if (!selectedEdge && !selectedKey) return;
+    if (!window.confirm("Delete the selected workflow item? Connected edges will also be removed.")) return;
     if (selectedEdge) {
       onChange({
         ...workflow,
@@ -490,12 +492,19 @@ function BuilderCanvas(props: {
               }`}
               style={{ left: n.position_x, top: n.position_y }}
               onMouseDown={(ev) => onNodeMouseDown(ev, n)}
+              role="button"
+              tabIndex={0}
+              aria-label={`${n.label} workflow block`}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); setSelectedKey(n.node_key); setSelectedEdge(null); }
+              }}
             >
               <button
                 className={`wf-port wf-port-in${
                   connectFrom ? " awaiting" : ""
                 }`}
                 title="Input — click after choosing an output port"
+                aria-label={`Connect to ${n.label}`}
                 onClick={(ev) => onInputPortClick(ev, n)}
               />
               <div className="wf-node-head">
@@ -509,6 +518,7 @@ function BuilderCanvas(props: {
                   connectFrom?.nodeKey === n.node_key ? " active" : ""
                 }`}
                 title="Output — click, then click a target input port"
+                aria-label={`Connect from ${n.label}`}
                 onClick={(ev) => onOutputPortClick(ev, n)}
               />
               {portMenu === n.node_key && (

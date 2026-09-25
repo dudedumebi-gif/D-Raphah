@@ -1,0 +1,27 @@
+/* Cross-surface accessibility and responsive UX improvements. */
+:focus-visible { outline: 3px solid #a992f2; outline-offset: 3px; }
+.mobile-topbar-row { display: none; }
+.mobile-nav-backdrop { display: none; }
+.setup-checklist { margin: 0 42px 18px; padding: 20px; }
+.setup-checklist h2 { margin: 0 0 6px; font-size: 18px; }
+.checklist-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 18px; }
+.checklist-step { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; text-align: left; border: 1px solid #e1dcef; background: #faf9ff; color: #332d50; }
+.checklist-step:hover { border-color: #9e8de3; background: #f1eeff; }
+.checklist-step span { color: #77718b; font-size: 11px; font-weight: 500; }
+button:disabled { cursor: not-allowed; }
+.status-bar { flex-wrap: wrap; }
+.mon-url, code { overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .mobile-topbar-row { display: flex; align-items: center; gap: 12px; width: 100%; }
+  .mobile-menu-button { display: inline-flex; background: #49406a; color: #fff; padding: 8px 11px; }
+  .mobile-view-label { font: 600 12px "DM Mono", monospace; color: #625e74; }
+  .mobile-nav-backdrop { display: block; position: fixed; inset: 0; z-index: 20; background: rgba(29,25,45,.52); }
+  .mobile-nav { width: min(300px, 86vw); height: 100%; padding: 22px 16px; background: #29253b; box-shadow: 20px 0 50px rgba(0,0,0,.24); }
+  .mobile-nav-head { display: flex; justify-content: space-between; align-items: center; color: #fff; padding: 0 8px 18px; }
+  .mobile-nav .icon-button { color: #fff; }
+  .setup-checklist { margin: 0 16px 18px; }
+  .checklist-grid { grid-template-columns: 1fr; }
+  .status-bar .auth-email { margin-left: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .status-action { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
