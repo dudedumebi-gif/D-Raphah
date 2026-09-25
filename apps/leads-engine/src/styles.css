@@ -466,6 +466,20 @@ button {
   cursor: pointer;
 }
 
+.audit-run {
+  border-bottom: 1px solid var(--border, #e2e8f0);
+}
+
+.audit-run-head {
+  cursor: pointer;
+  background: var(--surface-2, #f8fafc);
+  font-weight: 600;
+}
+
+.audit-run-head:hover {
+  background: var(--surface-3, #f1f5f9);
+}
+
 .audit-chevron {
   color: var(--muted, #64748b);
   font-size: 0.9rem;

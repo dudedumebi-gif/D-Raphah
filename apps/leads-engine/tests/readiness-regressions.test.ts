@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CriteriaSchema,
   evaluateGeography,
+  isSuggestionSuppressed,
   suggestCriteriaAdjustment,
   evaluateCanarySoak,
 } from "../api/_lib/domain";
@@ -304,5 +305,29 @@ describe("scheduler authorization", () => {
     } finally {
       if (previous !== undefined) process.env.WORKER_SECRET = previous;
     }
+  });
+});
+
+describe("suggestion suppression", () => {
+  it("does not suppress when no suggestion was applied yet", () => {
+    expect(isSuggestionSuppressed(null, 0)).toBe(false);
+    expect(isSuggestionSuppressed({}, 0)).toBe(false);
+    expect(
+      isSuggestionSuppressed({ last_suggestion_at: null }, 0),
+    ).toBe(false);
+  });
+  it("suppresses while the observed count is unchanged", () => {
+    const campaign = {
+      last_suggestion_at: new Date().toISOString(),
+      last_suggestion_observed_count: 0,
+    };
+    expect(isSuggestionSuppressed(campaign, 0)).toBe(true);
+  });
+  it("releases suppression when new output arrives", () => {
+    const campaign = {
+      last_suggestion_at: new Date().toISOString(),
+      last_suggestion_observed_count: 0,
+    };
+    expect(isSuggestionSuppressed(campaign, 3)).toBe(false);
   });
 });

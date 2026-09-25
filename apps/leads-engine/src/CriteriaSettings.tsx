@@ -131,8 +131,7 @@ function CampaignSettings({
       {suggestion ? (
         <div
           className={`criteria-suggestion suggestion-${suggestion.direction}`}
-        >
-          <b>Output recommendation: {suggestion.direction}</b>
+        >          <b>Output recommendation: {suggestion.direction}</b>
           <span>
             {suggestion.observedQualifiedLeads}/
             {suggestion.targetQualifiedLeads} distinct qualified organizations
@@ -166,6 +165,14 @@ function CampaignSettings({
               </button>
             </div>
           ) : null}
+        </div>
+      ) : (campaign as { last_suggestion_at?: string | null })
+          .last_suggestion_at ? (
+        <div className="criteria-suggestion suggestion-hold">
+          <small>
+            Criteria reviewed — no new recommendation until fresh scrape output
+            arrives. Run a scrape job to get an updated recommendation.
+          </small>
         </div>
       ) : null}
       <form className="inline-form" onSubmit={(event) => void save(event)}>

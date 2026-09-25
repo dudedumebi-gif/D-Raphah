@@ -3,6 +3,7 @@ import {
   StrictMode,
   useCallback,
   useEffect,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
@@ -13,6 +14,7 @@ import {
   cachedBootstrap,
   isNeonConfigured,
   neonClient,
+  type AuditRecord,
   type BootstrapData,
   type JobRecord,
   type LeadRecord,
@@ -59,20 +61,24 @@ function workspaceName(membership: Membership): string {
 function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [checking, setChecking] = useState(true);
+  // Explicitly re-read the session (used after sign-in completes, since the
+  // auth-state event can lag behind the persisted session).
+  const refreshSession = useCallback(async () => {
+    if (!neonClient) return;
+    const { data } = await neonClient.auth.getSession();
+    setSession(data.session as Session | null);
+  }, []);
   useEffect(() => {
     if (!neonClient) {
       setChecking(false);
       return;
     }
-    void neonClient.auth.getSession().then(({ data }) => {
-      setSession(data.session as Session | null);
-      setChecking(false);
-    });
+    void refreshSession().finally(() => setChecking(false));
     const { data } = neonClient.auth.onAuthStateChange((_event, next) =>
       setSession(next as Session | null),
     );
     return () => data.subscription.unsubscribe();
-  }, []);
+  }, [refreshSession]);
   if (!isNeonConfigured) return <SetupRequired />;
   if (checking)
     return (
@@ -81,7 +87,7 @@ function App() {
         detail="Validating your secure session."
       />
     );
-  if (!session) return <SignIn />;
+  if (!session) return <SignIn onAuthenticated={refreshSession} />;
   return <Workspace key={session.user.id} session={session} />;
 }
 
@@ -101,7 +107,7 @@ function SetupRequired() {
   );
 }
 
-function SignIn() {
+function SignIn({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -124,6 +130,11 @@ function SignIn() {
     if (result.error) setMessage(result.error.message);
     else if (mode === "signup" && !result.data.session)
       setMessage("Check your email to confirm the account.");
+    else {
+      // Sign-in succeeded — explicitly pick up the session instead of waiting
+      // for the auth-state event, so the workspace loads without a refresh.
+      await onAuthenticated();
+    }
   }
   return (
     <Centered
@@ -978,8 +989,216 @@ function Operations({ data }: { data: BootstrapData }) {
   );
 }
 
+/** Hierarchical audit: group events into run buckets, then build a
+ * grandparent → parent → children tree within each bucket using the foreign
+ * keys captured in before_state/after_state by the audit triggers. */
+interface AuditNode {
+  event: AuditRecord;
+  children: AuditNode[];
+}
+interface AuditRun {
+  id: string;
+  title: string;
+  startedAt: string;
+  eventCount: number;
+  roots: AuditNode[];
+}
+
+function auditEventKey(event: AuditRecord): string {
+  return `${event.resource_type}:${event.resource_id ?? event.id}`;
+}
+
+function auditParentKey(event: AuditRecord): string | null {
+  const state = (event.after_state ?? event.before_state ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+  switch (event.resource_type) {
+    case "scrape_job_attempts":
+    case "evidence_artifacts": {
+      const jobId = str(state.job_id);
+      return jobId ? `scrape_jobs:${jobId}` : null;
+    }
+    case "signal_observations": {
+      const evidenceId = str(state.evidence_id);
+      if (evidenceId) return `evidence_artifacts:${evidenceId}`;
+      const jobId = str(state.job_id);
+      return jobId ? `scrape_jobs:${jobId}` : null;
+    }
+    case "maturity_assessments": {
+      const jobId = str(state.job_id);
+      if (jobId) return `scrape_jobs:${jobId}`;
+      const orgId = str(state.organization_id);
+      return orgId ? `organizations:${orgId}` : null;
+    }
+    case "opportunities": {
+      const assessmentId = str(state.assessment_id ?? state.maturity_assessment_id);
+      if (assessmentId) return `maturity_assessments:${assessmentId}`;
+      const orgId = str(state.organization_id);
+      return orgId ? `organizations:${orgId}` : null;
+    }
+    case "organizations":
+    case "scrape_jobs": {
+      // Created during a job run — link via job_id when present.
+      const jobId = str(state.job_id);
+      if (jobId && auditEventKey(event) !== `scrape_jobs:${jobId}`)
+        return `scrape_jobs:${jobId}`;
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+function buildAuditRuns(events: AuditRecord[]): AuditRun[] {
+  if (events.length === 0) return [];
+  const sorted = [...events].sort(
+    (a, b) =>
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  );
+  // Bucket into runs: a gap of more than 90 seconds starts a new run.
+  const RUN_GAP_MS = 90_000;
+  const buckets: AuditRecord[][] = [];
+  for (const event of sorted) {
+    const last = buckets[buckets.length - 1];
+    if (
+      !last ||
+      new Date(event.created_at).getTime() -
+        new Date(last[last.length - 1].created_at).getTime() >
+        RUN_GAP_MS
+    ) {
+      buckets.push([event]);
+    } else {
+      last.push(event);
+    }
+  }
+  return buckets.map((bucket, index) => {
+    const nodes = new Map<string, AuditNode>();
+    for (const event of bucket)
+      nodes.set(auditEventKey(event), { event, children: [] });
+    const roots: AuditNode[] = [];
+    for (const event of bucket) {
+      const node = nodes.get(auditEventKey(event))!;
+      const parentKey = auditParentKey(event);
+      const parent = parentKey ? nodes.get(parentKey) : undefined;
+      if (parent && parent !== node) parent.children.push(node);
+      else roots.push(node);
+    }
+    // Title from the most significant root (job > campaign > source).
+    const rootActions = roots.map((r) => r.event.action);
+    const jobRoot = roots.find((r) =>
+      r.event.resource_type.startsWith("scrape_job"),
+    );
+    const title = jobRoot
+      ? `Scrape run · ${jobRoot.event.resource_id?.slice(0, 8) ?? "job"}`
+      : rootActions[0]?.replace(/\./g, " ") ?? `Run ${index + 1}`;
+    return {
+      id: `run-${index}-${bucket[0].id}`,
+      title,
+      startedAt: bucket[0].created_at,
+      eventCount: bucket.length,
+      roots,
+    };
+  });
+}
+
 function Audit({ data }: { data: BootstrapData }) {
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const runs = useMemo(() => buildAuditRuns(data.audit), [data.audit]);
+
+  function renderNode(node: AuditNode, depth: number): ReactNode {
+    const { event } = node;
+    const expanded = expandedId === event.id;
+    const oma = interpretAuditEvent(event);
+    return (
+      <div key={event.id}>
+        <div
+          className="record-row audit-row"
+          style={{ paddingLeft: `${12 + depth * 20}px` }}
+          onClick={() => setExpandedId(expanded ? null : event.id)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setExpandedId(expanded ? null : event.id);
+            }
+          }}
+        >
+          <div>
+            <b>
+              {depth > 0 && (
+                <span aria-hidden="true" style={{ opacity: 0.5 }}>
+                  {"└ ".repeat(Math.min(depth, 1))}
+                </span>
+              )}
+              {event.action}
+            </b>
+            <small>
+              {event.resource_type} · {event.resource_id ?? "workspace"}
+              {node.children.length > 0 &&
+                ` · ${node.children.length} linked record${node.children.length === 1 ? "" : "s"}`}
+            </small>
+          </div>
+          <Status value={event.outcome} />
+          <time>{new Date(event.created_at).toLocaleString()}</time>
+          <span className="audit-chevron" aria-hidden="true">
+            {expanded ? "▾" : "▸"}
+          </span>
+        </div>
+        {expanded && (
+          <div
+            className="audit-detail"
+            style={{ marginLeft: `${depth * 20}px` }}
+          >
+            <div className="audit-oma">
+              <h4>Business interpretation</h4>
+              <div className="oma-grid">
+                <div className="oma-item">
+                  <span className="oma-label">Observation</span>
+                  <p>{oma.observation}</p>
+                </div>
+                <div className="oma-item">
+                  <span className="oma-label">Metric</span>
+                  <p>{oma.metric}</p>
+                </div>
+                <div className="oma-item">
+                  <span className="oma-label">Action</span>
+                  <p>{oma.action}</p>
+                </div>
+              </div>
+            </div>
+            <div className="audit-technical">
+              <h4>Technical view</h4>
+              <pre>
+                {JSON.stringify(
+                  {
+                    id: event.id,
+                    action: event.action,
+                    resource_type: event.resource_type,
+                    resource_id: event.resource_id,
+                    outcome: event.outcome,
+                    reason: event.reason,
+                    actor_id: event.actor_id,
+                    correlation_id: event.correlation_id,
+                    created_at: event.created_at,
+                    before_state: event.before_state,
+                    after_state: event.after_state,
+                  },
+                  null,
+                  2,
+                )}
+              </pre>
+            </div>
+          </div>
+        )}
+        {node.children.map((child) => renderNode(child, depth + 1))}
+      </div>
+    );
+  }
+
   return (
     <div className="content">
       <section className="panel">
@@ -987,84 +1206,48 @@ function Audit({ data }: { data: BootstrapData }) {
           <div>
             <h3>Immutable application audit trail</h3>
             <p>
-              Every persisted state change is captured by database triggers.
-              Click any entry to inspect it.
+              Events are bucketed into runs — expand a run to walk its
+              grandparent → parent → children tree. Click any entry to inspect
+              it.
             </p>
           </div>
         </div>
         <div className="record-list">
-          {data.audit.map((event) => {
-            const expanded = expandedId === event.id;
-            const oma = interpretAuditEvent(event);
+          {runs.map((run) => {
+            const expanded = expandedRunId === run.id;
             return (
-              <div key={event.id}>
+              <div key={run.id} className="audit-run">
                 <div
-                  className="record-row audit-row"
-                  onClick={() => setExpandedId(expanded ? null : event.id)}
+                  className="record-row audit-run-head"
+                  onClick={() =>
+                    setExpandedRunId(expanded ? null : run.id)
+                  }
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      setExpandedId(expanded ? null : event.id);
+                      setExpandedRunId(expanded ? null : run.id);
                     }
                   }}
                 >
                   <div>
-                    <b>{event.action}</b>
+                    <b>{run.title}</b>
                     <small>
-                      {event.resource_type} · {event.resource_id ?? "workspace"}
+                      {run.eventCount} record{run.eventCount === 1 ? "" : "s"}{" "}
+                      · {run.roots.length} top-level entr
+                      {run.roots.length === 1 ? "y" : "ies"}
                     </small>
                   </div>
-                  <Status value={event.outcome} />
-                  <time>{new Date(event.created_at).toLocaleString()}</time>
+                  <time>
+                    {new Date(run.startedAt).toLocaleString()}
+                  </time>
                   <span className="audit-chevron" aria-hidden="true">
                     {expanded ? "▾" : "▸"}
                   </span>
                 </div>
-                {expanded && (
-                  <div className="audit-detail">
-                    <div className="audit-oma">
-                      <h4>Business interpretation</h4>
-                      <div className="oma-grid">
-                        <div className="oma-item">
-                          <span className="oma-label">Observation</span>
-                          <p>{oma.observation}</p>
-                        </div>
-                        <div className="oma-item">
-                          <span className="oma-label">Metric</span>
-                          <p>{oma.metric}</p>
-                        </div>
-                        <div className="oma-item">
-                          <span className="oma-label">Action</span>
-                          <p>{oma.action}</p>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="audit-technical">
-                      <h4>Technical view</h4>
-                      <pre>
-                        {JSON.stringify(
-                          {
-                            id: event.id,
-                            action: event.action,
-                            resource_type: event.resource_type,
-                            resource_id: event.resource_id,
-                            outcome: event.outcome,
-                            reason: event.reason,
-                            actor_id: event.actor_id,
-                            correlation_id: event.correlation_id,
-                            created_at: event.created_at,
-                            before_state: event.before_state,
-                            after_state: event.after_state,
-                          },
-                          null,
-                          2,
-                        )}
-                      </pre>
-                    </div>
-                  </div>
-                )}
+                {expanded &&
+                  run.roots.map((root) => renderNode(root, 0))}
               </div>
             );
           })}

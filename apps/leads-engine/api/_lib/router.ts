@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CriteriaSchema,
   evaluateCanarySoak,
+  isSuggestionSuppressed,
   mergeSuggestionChanges,
   percentile95,
   suggestCriteriaAdjustment,
@@ -405,17 +406,19 @@ async function authenticatedRoutes(
       workspaceId,
       memberships: memberships.data,
       sources: sources.data,
-      campaigns: (campaigns.data ?? []).map((campaign: any) => ({
-        ...campaign,
-        criteria_suggestion: suggestCriteriaAdjustment(
-          campaign.criteria,
-          Number(
-            recentLeads.data?.find(
-              (row: { campaign_id: string }) => row.campaign_id === campaign.id,
-            )?.qualified_count ?? 0,
-          ),
-        ),
-      })),
+      campaigns: (campaigns.data ?? []).map((campaign: any) => {
+        const observed = Number(
+          recentLeads.data?.find(
+            (row: { campaign_id: string }) => row.campaign_id === campaign.id,
+          )?.qualified_count ?? 0,
+        );
+        return {
+          ...campaign,
+          criteria_suggestion: isSuggestionSuppressed(campaign, observed)
+            ? null
+            : suggestCriteriaAdjustment(campaign.criteria, observed),
+        };
+      }),
       jobs: jobs.data,
       leads: leads.data,
       audit: audit.data,
@@ -530,10 +533,25 @@ async function authenticatedRoutes(
       })
       .parse(await bodyJson(request));
     const scheduleEnabled = input.scheduleEnabled;
+    // Capture the current observed count so the suggestion stays suppressed
+    // until fresh scrape output changes it.
+    const { data: counts } = await client.rpc("campaign_qualified_counts", {
+      p_workspace_id: workspaceId,
+    });
+    const observed = Number(
+      (counts as Array<{ campaign_id: string; qualified_count: number }> | null)?.find(
+        (row) => row.campaign_id === campaignCriteria[1],
+      )?.qualified_count ?? 0,
+    );
     const updates: Record<string, unknown> = {
       criteria: input.criteria,
       criteria_version: new Date().toISOString(),
       updated_by: context.user.id,
+      // Manual save also suppresses the current suggestion cycle; a new
+      // suggestion appears only when fresh scrape output arrives.
+      last_suggestion_at: new Date().toISOString(),
+      last_suggestion_observed_count: observed,
+      last_suggestion_direction: "manual",
     };
     if (scheduleEnabled !== undefined)
       updates.schedule_enabled = scheduleEnabled;
@@ -631,6 +649,12 @@ async function authenticatedRoutes(
         criteria: merged,
         criteria_version: new Date().toISOString(),
         updated_by: context.user.id,
+        // Suppress further suggestions until the observed qualified count
+        // changes (new scrape data), so the Criteria page doesn't immediately
+        // re-suggest against the same output.
+        last_suggestion_at: new Date().toISOString(),
+        last_suggestion_observed_count: observed,
+        last_suggestion_direction: suggestion.direction,
       })
       .eq("workspace_id", workspaceId)
       .eq("id", campaignId)

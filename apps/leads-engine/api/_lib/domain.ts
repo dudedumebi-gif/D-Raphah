@@ -478,6 +478,21 @@ export function evaluateGeography(
   };
 }
 
+export function isSuggestionSuppressed(
+  campaign: {
+    last_suggestion_at?: string | null;
+    last_suggestion_observed_count?: number | null;
+  } | null,
+  observedQualifiedLeads: number,
+): boolean {
+  // After the operator applies a suggestion or saves criteria, don't generate
+  // a new suggestion until the observed qualified count changes (i.e. new
+  // scrape data arrived). This stops the Criteria page filling with back-to-
+  // back "loosen further" recommendations against an unchanged 0/20 output.
+  if (!campaign?.last_suggestion_at) return false;
+  return campaign.last_suggestion_observed_count === observedQualifiedLeads;
+}
+
 export function suggestCriteriaAdjustment(
   criteriaInput: unknown,
   observedQualifiedLeads: number,
