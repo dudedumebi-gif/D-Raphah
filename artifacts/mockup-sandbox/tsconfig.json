@@ -1,6 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src/**/*", "mockupPreviewPlugin.ts", "vite.config.ts"],
+  "include": ["src/**/*", "mockupPreviewPlugin.ts"],
+  // vite.config.ts is excluded: pnpm installs two vite@7.3.6 copies (one per
+  // @types/node v20/v25 peer), so tsc sees their Plugin types as incompatible
+  // (TS2769 on the plugins array). The config runs fine under vite itself.
   "exclude": ["node_modules", "build", "dist", "**/*.test.ts"],
   "compilerOptions": {
     "incremental": true,
