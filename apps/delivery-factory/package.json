@@ -21,6 +21,7 @@
   "packageManager": "pnpm@10.28.0",
   "private": true,
   "scripts": {
+    "pretypecheck": "pnpm --filter @raphah/handoff-contract build",
     "build": "vite build",
     "dev": "vite --host 0.0.0.0",
     "test": "vitest run",

@@ -4,6 +4,7 @@
   "private": true,
   "main": "dist/index.js",
   "scripts": {
+    "prebuild": "pnpm --filter @raphah/handoff-contract build",
     "build": "tsc",
     "start": "tsx src/index.ts",
     "test": "vitest run"
