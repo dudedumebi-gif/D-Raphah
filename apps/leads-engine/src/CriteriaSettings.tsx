@@ -30,9 +30,11 @@ type EditableCriteria = {
 function CampaignSettings({
   campaign,
   mutate,
+  onApplied,
 }: {
   campaign: CampaignRecord;
   mutate: Mutate;
+  onApplied: () => void;
 }) {
   const criteria = campaign.criteria as EditableCriteria;
   const [mode, setMode] = useState(criteria.geography?.mode ?? "regions");
@@ -48,11 +50,14 @@ function CampaignSettings({
   async function applySuggestion() {
     setApplying(true);
     try {
-      await mutate(
+      const result = await mutate(
         `/api/v1/criteria/${campaign.id}/apply-suggestion`,
         { method: "POST" },
         `Suggestion applied to ${campaign.name}.`,
       );
+      // On success, return to the scrape queue — the user asked to land
+      // back where the work happens, not stay on the criteria page.
+      if (result !== null) onApplied();
     } finally {
       setApplying(false);
     }
@@ -139,8 +144,14 @@ function CampaignSettings({
               Suggested values: maturity ≤{" "}
               {suggestion.changes.automationMaturityMax}, opportunity ≥{" "}
               {suggestion.changes.opportunityPotentialMin}, confidence ≥{" "}
-              {Math.round(suggestion.changes.confidenceMin * 100)}%. Review and
-              enter below to apply.
+              {suggestion.changes.confidenceMin != null
+                ? `${Math.round(suggestion.changes.confidenceMin * 100)}%`
+                : "—"}
+              {suggestion.changes.geography?.centreLatitude != null &&
+              suggestion.changes.geography?.centreLongitude != null
+                ? `, centre (${suggestion.changes.geography.centreLatitude}, ${suggestion.changes.geography.centreLongitude})`
+                : ""}
+              . Review and enter below to apply.
             </small>
           ) : null}
           {hasSuggestedChanges ? (
@@ -334,9 +345,11 @@ function CampaignSettings({
 export function Settings({
   data,
   mutate,
+  onApplied,
 }: {
   data: BootstrapData;
   mutate: Mutate;
+  onApplied: () => void;
 }) {
   return (
     <div className="content settings-grid">
@@ -346,6 +359,7 @@ export function Settings({
             key={`${campaign.id}:${JSON.stringify(campaign.criteria)}:${campaign.schedule_enabled}:${campaign.interval_minutes}`}
             campaign={campaign}
             mutate={mutate}
+            onApplied={onApplied}
           />
         ))
       ) : (

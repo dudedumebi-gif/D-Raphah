@@ -366,6 +366,7 @@ function Workspace({ session }: { session: Session }) {
         ) : (
           <DashboardView
             view={view}
+            setView={setView}
             data={data}
             mutate={mutate}
             session={session}
@@ -379,12 +380,14 @@ function Workspace({ session }: { session: Session }) {
 
 function DashboardView({
   view,
+  setView,
   data,
   mutate,
   session,
   workspaceId,
 }: {
   view: View;
+  setView: (view: View) => void;
   data: BootstrapData;
   mutate: Mutate;
   session: Session;
@@ -398,7 +401,8 @@ function DashboardView({
   if (view === "leads") return <Leads data={data} mutate={mutate} />;
   if (view === "operations") return <Operations data={data} />;
   if (view === "audit") return <Audit data={data} />;
-  if (view === "settings") return <Settings data={data} mutate={mutate} />;
+  if (view === "settings")
+    return <Settings data={data} mutate={mutate} onApplied={() => setView("jobs")} />;
   if (view === "help") return <HelpGuide />;
   const complete = data.jobs.filter((job) => job.status === "completed").length;
   const active = data.jobs.filter((job) =>

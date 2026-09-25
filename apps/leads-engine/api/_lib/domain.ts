@@ -86,6 +86,7 @@ export interface CriteriaSuggestion {
       | "opportunityPotentialMin"
       | "confidenceMin"
       | "minimumEvidenceCategories"
+      | "geography"
     >
   >;
   rationale: string[];
@@ -483,6 +484,12 @@ export function suggestCriteriaAdjustment(
 ): CriteriaSuggestion {
   const criteria = CriteriaSchema.parse(criteriaInput);
   const target = criteria.targetQualifiedLeadsPerWeek;
+  // Complete the geography when the campaign names cities but has no
+  // centre point — without coordinates, radius qualification silently
+  // excludes everything. Included in every non-hold suggestion so that
+  // "Apply suggestion" fills all fields in one click.
+  const geographyCentre = suggestGeographyCentre(criteria);
+  const geographyChange = geographyCentre ? { geography: geographyCentre } : {};
   if (observedQualifiedLeads < target * 0.8) {
     return {
       direction: "loosen",
@@ -503,10 +510,16 @@ export function suggestCriteriaAdjustment(
             Math.max(0.5, criteria.confidenceMin - 0.05),
           ).toFixed(2),
         ),
+        ...geographyChange,
       },
       rationale: [
         `Only ${observedQualifiedLeads} qualified leads were observed against a weekly target of ${target}.`,
-        "Widen the scoring window one controlled step; keep source policy and geography unchanged.",
+        "Widen the scoring window one controlled step; keep source policy unchanged.",
+        ...(geographyCentre
+          ? [
+              `Centre coordinates were missing — suggesting ${criteria.geography.cities[0]} (${geographyCentre.centreLatitude}, ${geographyCentre.centreLongitude}) so radius qualification can work.`,
+            ]
+          : []),
       ],
       autoApply: false,
     };
@@ -531,10 +544,16 @@ export function suggestCriteriaAdjustment(
             Math.min(0.9, criteria.confidenceMin + 0.05),
           ).toFixed(2),
         ),
+        ...geographyChange,
       },
       rationale: [
         `${observedQualifiedLeads} qualified leads exceed 150% of the weekly target of ${target}.`,
         "Tighten score and confidence gates to prioritize the strongest manual-process opportunities.",
+        ...(geographyCentre
+          ? [
+              `Centre coordinates were missing — suggesting ${criteria.geography.cities[0]} (${geographyCentre.centreLatitude}, ${geographyCentre.centreLongitude}) so radius qualification can work.`,
+            ]
+          : []),
       ],
       autoApply: false,
     };
@@ -552,6 +571,52 @@ export function suggestCriteriaAdjustment(
 }
 
 // --- Lead-vision gap 3: apply suggestion + opt-in auto-apply. ---
+
+/**
+ * Approximate centre coordinates for known Canadian markets. Used to
+ * complete a suggestion's geography when the campaign has named cities
+ * but no centre point — radius qualification requires coordinates.
+ */
+const MARKET_CENTRES: Record<string, { lat: number; lng: number }> = {
+  toronto: { lat: 43.6532, lng: -79.3832 },
+  ottawa: { lat: 45.4215, lng: -75.6972 },
+  montreal: { lat: 45.5017, lng: -73.5673 },
+  vancouver: { lat: 49.2827, lng: -123.1207 },
+  calgary: { lat: 51.0447, lng: -114.0719 },
+  edmonton: { lat: 53.5461, lng: -113.4938 },
+  winnipeg: { lat: 49.8951, lng: -97.1384 },
+  "quebec city": { lat: 46.8139, lng: -71.208 },
+  hamilton: { lat: 43.2557, lng: -79.8711 },
+  kitchener: { lat: 43.4516, lng: -80.4925 },
+};
+
+/**
+ * When a campaign names cities but has no centre coordinates, resolve the
+ * centre from the first recognized city so radius qualification can work.
+ * Returns null when coordinates are already set or no city is recognized.
+ */
+export function suggestGeographyCentre(
+  criteriaInput: unknown,
+): LeadCriteria["geography"] | null {
+  const criteria = CriteriaSchema.parse(criteriaInput);
+  if (
+    criteria.geography.centreLatitude != null &&
+    criteria.geography.centreLongitude != null
+  ) {
+    return null;
+  }
+  for (const city of criteria.geography.cities) {
+    const centre = MARKET_CENTRES[city.trim().toLowerCase()];
+    if (centre) {
+      return {
+        ...criteria.geography,
+        centreLatitude: centre.lat,
+        centreLongitude: centre.lng,
+      };
+    }
+  }
+  return null;
+}
 
 /**
  * Maximum single-step movement per auto-apply evaluation, per criterion.

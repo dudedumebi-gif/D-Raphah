@@ -133,7 +133,12 @@ export interface CampaignRecord {
     direction: "loosen" | "hold" | "tighten";
     observedQualifiedLeads: number;
     targetQualifiedLeads: number;
-    changes: Record<string, number>;
+    changes: Record<string, number> & {
+      geography?: {
+        centreLatitude?: number | null;
+        centreLongitude?: number | null;
+      };
+    };
     rationale: string[];
     autoApply: false;
   };
