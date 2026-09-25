@@ -178,6 +178,8 @@ export interface AuditRecord {
   reason: string | null;
   actor_id: string | null;
   correlation_id: string | null;
+  before_state: Record<string, unknown> | null;
+  after_state: Record<string, unknown> | null;
   created_at: string;
 }
 

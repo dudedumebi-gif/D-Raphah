@@ -368,7 +368,7 @@ async function authenticatedRoutes(
         client
           .from("audit_events")
           .select(
-            "id,action,resource_type,resource_id,outcome,reason,actor_id,correlation_id,created_at",
+            "id,action,resource_type,resource_id,outcome,reason,actor_id,correlation_id,before_state,after_state,created_at",
           )
           .eq("workspace_id", workspaceId)
           .order("created_at", { ascending: false })

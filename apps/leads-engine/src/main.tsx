@@ -975,6 +975,7 @@ function Operations({ data }: { data: BootstrapData }) {
 }
 
 function Audit({ data }: { data: BootstrapData }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   return (
     <div className="content">
       <section className="panel">
@@ -983,26 +984,226 @@ function Audit({ data }: { data: BootstrapData }) {
             <h3>Immutable application audit trail</h3>
             <p>
               Every persisted state change is captured by database triggers.
+              Click any entry to inspect it.
             </p>
           </div>
         </div>
         <div className="record-list">
-          {data.audit.map((event) => (
-            <div className="record-row" key={event.id}>
-              <div>
-                <b>{event.action}</b>
-                <small>
-                  {event.resource_type} · {event.resource_id ?? "workspace"}
-                </small>
+          {data.audit.map((event) => {
+            const expanded = expandedId === event.id;
+            const oma = interpretAuditEvent(event);
+            return (
+              <div key={event.id}>
+                <div
+                  className="record-row audit-row"
+                  onClick={() => setExpandedId(expanded ? null : event.id)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setExpandedId(expanded ? null : event.id);
+                    }
+                  }}
+                >
+                  <div>
+                    <b>{event.action}</b>
+                    <small>
+                      {event.resource_type} · {event.resource_id ?? "workspace"}
+                    </small>
+                  </div>
+                  <Status value={event.outcome} />
+                  <time>{new Date(event.created_at).toLocaleString()}</time>
+                  <span className="audit-chevron" aria-hidden="true">
+                    {expanded ? "▾" : "▸"}
+                  </span>
+                </div>
+                {expanded && (
+                  <div className="audit-detail">
+                    <div className="audit-oma">
+                      <h4>Business interpretation</h4>
+                      <div className="oma-grid">
+                        <div className="oma-item">
+                          <span className="oma-label">Observation</span>
+                          <p>{oma.observation}</p>
+                        </div>
+                        <div className="oma-item">
+                          <span className="oma-label">Metric</span>
+                          <p>{oma.metric}</p>
+                        </div>
+                        <div className="oma-item">
+                          <span className="oma-label">Action</span>
+                          <p>{oma.action}</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="audit-technical">
+                      <h4>Technical view</h4>
+                      <pre>
+                        {JSON.stringify(
+                          {
+                            id: event.id,
+                            action: event.action,
+                            resource_type: event.resource_type,
+                            resource_id: event.resource_id,
+                            outcome: event.outcome,
+                            reason: event.reason,
+                            actor_id: event.actor_id,
+                            correlation_id: event.correlation_id,
+                            created_at: event.created_at,
+                            before_state: event.before_state,
+                            after_state: event.after_state,
+                          },
+                          null,
+                          2,
+                        )}
+                      </pre>
+                    </div>
+                  </div>
+                )}
               </div>
-              <Status value={event.outcome} />
-              <time>{new Date(event.created_at).toLocaleString()}</time>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
     </div>
   );
+}
+
+/** OMA Framework: Observation, Metric, Action — business interpretation of an audit event. */
+function interpretAuditEvent(event: {
+  action: string;
+  resource_type: string;
+  outcome: string;
+  reason: string | null;
+  before_state: Record<string, unknown> | null;
+  after_state: Record<string, unknown> | null;
+}): { observation: string; metric: string; action: string } {
+  const before = event.before_state ?? {};
+  const after = event.after_state ?? {};
+  const action = event.action.toLowerCase();
+
+  // Source lifecycle
+  if (action === "source_definitions.insert") {
+    return {
+      observation: `A new lead source "${String(after.name ?? after.base_url ?? "unknown")}" was submitted for policy approval.`,
+      metric: `Status: ${String(after.status ?? "pending_approval")} · Collection method: ${String(after.collection_method ?? "—")}`,
+      action: "Review the source's policy (allowed domains, rate limits, budgets), then approve it so it becomes available for scraping.",
+    };
+  }
+  if (action === "source_definitions.update") {
+    const from = String(before.status ?? "—");
+    const to = String(after.status ?? "—");
+    if (from !== to) {
+      return {
+        observation: `Source "${String(after.name ?? after.base_url ?? "unknown")}" moved from ${from} to ${to}.`,
+        metric: `Status transition: ${from} → ${to}`,
+        action:
+          to === "active"
+            ? "The source is now live — queue a scrape job against it to start collecting evidence."
+            : "No action needed unless the change was unexpected; check the technical view for who made it.",
+      };
+    }
+    return {
+      observation: `Source "${String(after.name ?? after.base_url ?? "unknown")}" settings were edited.`,
+      metric: "Configuration updated (see technical view for changed fields).",
+      action: "Verify the edited values are correct; budgets and rate limits remain versioned by design.",
+    };
+  }
+
+  // Scrape jobs
+  if (action === "scrape_jobs.insert") {
+    return {
+      observation: `A new scrape job was queued for ${String(after.target_url ?? "a target URL")}.`,
+      metric: `Initial status: ${String(after.status ?? "queued")} · Attempt 0 of ${String(after.max_attempts ?? 3)}`,
+      action: "Watch the job on the Scrape jobs page — the worker picks it up within minutes.",
+    };
+  }
+  if (action === "scrape_jobs.update") {
+    const from = String(before.status ?? "—");
+    const to = String(after.status ?? "—");
+    const attempts = `${String(after.attempts ?? "?")}/${String(after.max_attempts ?? "?")}`;
+    if (to === "completed") {
+      return {
+        observation: `Scrape job for ${String(after.target_url ?? "the target")} completed successfully.`,
+        metric: `Attempts used: ${attempts} · Duration and evidence counts in technical view.`,
+        action: "Check Qualified leads — newly scored businesses appear there once the criteria thresholds are applied.",
+      };
+    }
+    if (to === "dead_letter") {
+      return {
+        observation: `Scrape job for ${String(after.target_url ?? "the target")} exhausted all retries and was dead-lettered.`,
+        metric: `Attempts used: ${attempts} · Last error: ${String(after.last_error ?? before.last_error ?? "see attempt records")}`,
+        action: "Inspect the failure reason (robots.txt denial, 404, timeout). Fix the target or source policy, then retry the job.",
+      };
+    }
+    return {
+      observation: `Scrape job for ${String(after.target_url ?? "the target")} moved from ${from} to ${to}.`,
+      metric: `Status transition: ${from} → ${to} · Attempts: ${attempts}`,
+      action: to === "leased" ? "A worker has picked up the job — no action needed." : "Monitor the job; it will retry automatically on transient failures.",
+    };
+  }
+  if (action === "scrape_job_attempts.insert") {
+    return {
+      observation: "A worker started a new collection attempt for a scrape job.",
+      metric: `Attempt ${String(after.attempt_number ?? "?")} began at ${String(after.started_at ?? "—")}`,
+      action: "No action needed — the attempt runs automatically.",
+    };
+  }
+  if (action === "scrape_job_attempts.update") {
+    const ok = after.success === true || String(after.status ?? "").toLowerCase().includes("success");
+    return {
+      observation: ok
+        ? "A collection attempt finished successfully and its evidence was stored."
+        : `A collection attempt failed: ${String(after.error ?? after.failure_reason ?? "see technical view")}.`,
+      metric: `Finished at ${String(after.finished_at ?? "—")} · HTTP ${String(after.http_status ?? "—")}`,
+      action: ok
+        ? "No action needed — evidence flows into scoring automatically."
+        : "If retries also fail, the job dead-letters; check the target URL and the source's robots policy.",
+    };
+  }
+
+  // Scoring & leads
+  if (action === "maturity_assessments.insert") {
+    return {
+      observation: "A business was scored for automation maturity.",
+      metric: `Maturity score: ${String(after.maturity_score ?? "—")} · Confidence: ${String(after.confidence ?? "—")}`,
+      action: "Scores feed the qualification thresholds — check Qualified leads for businesses that met the bar.",
+    };
+  }
+  if (action === "opportunities.insert") {
+    return {
+      observation: `A new qualified lead was created: ${String(after.business_name ?? after.organization_id ?? "a business")}.`,
+      metric: `Opportunity score: ${String(after.opportunity_potential_score ?? after.score ?? "—")}`,
+      action: "Review the lead in Qualified leads and export it when ready for outreach planning.",
+    };
+  }
+
+  // Criteria
+  if (action === "criteria.suggestion_applied" || action.includes("suggestion_applied")) {
+    return {
+      observation: "The engine's threshold suggestion was applied to the discovery campaign.",
+      metric: event.reason ?? "Thresholds adjusted (see technical view for before/after).",
+      action: "Watch qualified-lead output over the next cycle to confirm the adjustment had the intended effect.",
+    };
+  }
+  if (action === "criteria.auto_apply_changed" || action.includes("auto_apply")) {
+    return {
+      observation: `Automatic threshold application was ${after.auto_apply_criteria ? "enabled" : "disabled"}.`,
+      metric: `auto_apply_criteria: ${String(before.auto_apply_criteria ?? "—")} → ${String(after.auto_apply_criteria ?? "—")}`,
+      action: after.auto_apply_criteria
+        ? "Future suggestions will apply themselves — review the audit trail periodically."
+        : "Suggestions will now wait for manual approval on the Criteria & schedule page.",
+    };
+  }
+
+  // Fallback
+  const friendly = event.action.replace(/[._]/g, " ");
+  return {
+    observation: `Recorded change: ${friendly} on ${event.resource_type}.`,
+    metric: event.reason ?? `Outcome: ${event.outcome}. See the technical view for before/after state.`,
+    action: "Expand the technical view to inspect exactly what changed.",
+  };
 }
 
 function Metric({
