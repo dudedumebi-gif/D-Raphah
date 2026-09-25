@@ -441,6 +441,11 @@ button {
   border: 1px solid var(--border, #e2e8f0);
 }
 
+.help-content {
+  padding: 24px 28px;
+  max-width: 900px;
+}
+
 .help-content h4 {
   margin-top: 24px;
   margin-bottom: 8px;
