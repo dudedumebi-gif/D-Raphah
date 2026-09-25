@@ -32,6 +32,8 @@ export type NodeKind =
   | "lead_handoff"
   // actions
   | "send_email"
+  | "send_sms"
+  | "ai_assist"
   | "http_request"
   | "log_database"
   | "slack_notify"
@@ -174,6 +176,26 @@ export const NODE_CATALOG: NodeSpec[] = [
       { key: "subject", label: "Subject line", kind: "text", placeholder: "Enter your subject here" },
       { key: "body", label: "Email body (HTML)", kind: "textarea", placeholder: "<p>Hello {{lead.name}}</p>" },
       { key: "encryptSensitive", label: "Encrypt sensitive data", kind: "toggle" },
+    ],
+  },
+  {
+    kind: "send_sms", type: "action", label: "Send SMS", icon: "📱",
+    description: "Send (or draft) an SMS via the configured provider. With no provider, records the draft for human approval per the no-automated-outreach rule.",
+    defaultConfig: { to: "", message: "" },
+    configSchema: [
+      { key: "to", label: "Recipient phone", kind: "text", placeholder: "+14165550123" },
+      { key: "message", label: "Message", kind: "textarea", placeholder: "Hi {{lead.name}}, thanks for contacting us…" },
+    ],
+  },
+  {
+    kind: "ai_assist", type: "action", label: "AI Assist", icon: "🤖",
+    description: "Draft content with an AI model (summaries, replies, content). Output lands in the run context for a human to review — never sent automatically.",
+    defaultConfig: { model: "gpt-4o-mini", systemPrompt: "", userPrompt: "", maxTokens: 500 },
+    configSchema: [
+      { key: "model", label: "Model", kind: "text", placeholder: "gpt-4o-mini" },
+      { key: "systemPrompt", label: "System prompt", kind: "textarea", placeholder: "You are a helpful assistant drafting…" },
+      { key: "userPrompt", label: "User prompt", kind: "textarea", placeholder: "Draft a reply to: {{lead.message}}" },
+      { key: "maxTokens", label: "Max tokens", kind: "number", placeholder: "500" },
     ],
   },
   {
@@ -616,6 +638,12 @@ export interface ExecutionHooks {
   sendEmail?: (args: {
     to: string; subject: string; body: string; encryptSensitive: boolean;
   }) => Promise<Record<string, unknown>>;
+  sendSms?: (args: {
+    to: string; message: string;
+  }) => Promise<Record<string, unknown>>;
+  aiAssist?: (args: {
+    model: string; systemPrompt: string; userPrompt: string; maxTokens: number;
+  }) => Promise<Record<string, unknown>>;
   httpRequest?: (args: {
     method: string; url: string;
     headers: Record<string, string>; body: unknown;
@@ -721,6 +749,37 @@ export async function executeWorkflow(
         if (hooks.sendEmail) return hooks.sendEmail(args);
         // No provider configured: record intent, mark delivered=false.
         return { delivered: false, queued: true, ...args };
+      }
+      case "send_sms": {
+        const args = {
+          to: String(cfg.to ?? ""),
+          message: String(cfg.message ?? ""),
+        };
+        if (!args.to) throw new Error("send_sms: 'to' is required");
+        if (!args.message) throw new Error("send_sms: 'message' is required");
+        if (hooks.sendSms) return hooks.sendSms(args);
+        // No provider configured: record the draft for human approval.
+        // House rule: no automated outreach sending in MVP — a human
+        // approves and sends drafted messages.
+        return { delivered: false, queued: true, draft: true, ...args };
+      }
+      case "ai_assist": {
+        const args = {
+          model: String(cfg.model ?? "gpt-4o-mini"),
+          systemPrompt: String(cfg.systemPrompt ?? ""),
+          userPrompt: String(cfg.userPrompt ?? ""),
+          maxTokens: Math.min(Math.max(Number(cfg.maxTokens ?? 500), 1), 4000),
+        };
+        if (!args.userPrompt) throw new Error("ai_assist: 'userPrompt' is required");
+        if (hooks.aiAssist) return hooks.aiAssist(args);
+        // No AI provider configured: record the request as a draft stub so
+        // the run stays auditable; a human completes it before anything sends.
+        return {
+          delivered: false, draft: true,
+          model: args.model,
+          prompt: args.userPrompt,
+          output: `[draft stub — no AI provider configured] ${args.userPrompt.slice(0, 200)}`,
+        };
       }
       case "http_request": {
         const method = String(cfg.method ?? "POST").toUpperCase();

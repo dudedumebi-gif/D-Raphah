@@ -204,25 +204,113 @@ describe("workflow engine", () => {
     expect(steps.find((s) => s.node_key === "a1")?.status).toBe("failed");
   });
 
-  it("blocks synthetic project fabrication unless explicitly enabled", async () => {
+  it("send_sms records a draft when no provider is configured", async () => {
     const wf: Workflow = {
       ...demoWorkflow,
       nodes: [
         { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
-        { node_key: "a1", type: "action", kind: "create_project", label: "Create project", position_x: 0, position_y: 0, config: { name: "Synthetic" }, enabled: true },
+        { node_key: "a1", type: "action", kind: "send_sms", label: "SMS", position_x: 0, position_y: 0, config: { to: "+14165550123", message: "Hi {{trigger.lead.name}}, we got your request." }, enabled: true },
       ],
       edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
     };
-    const prev = process.env.WORKFLOW_SYNTHETIC_PROJECTS;
-    delete process.env.WORKFLOW_SYNTHETIC_PROJECTS;
-    try {
-      const { db } = makeFakeDb(wf);
-      const run = await executeWorkflow(db, wf.id, {});
-      expect(run.status).toBe("failed");
-      expect(run.error).toContain("verified handoff context");
-    } finally {
-      if (prev === undefined) delete process.env.WORKFLOW_SYNTHETIC_PROJECTS;
-      else process.env.WORKFLOW_SYNTHETIC_PROJECTS = prev;
-    }
+    const { db, steps } = makeFakeDb(wf);
+    const run = await executeWorkflow(db, wf.id, { lead: { name: "Acme Corp" } });
+    expect(run.status).toBe("completed");
+    const sms = steps.find((s) => s.node_key === "a1");
+    expect(sms?.status).toBe("success");
+    // Template rendered, but nothing sent without a provider (MVP outreach rule)
+    expect(sms?.output).toMatchObject({
+      delivered: false, queued: true, draft: true,
+      to: "+14165550123",
+      message: "Hi Acme Corp, we got your request.",
+    });
+  });
+
+  it("send_sms uses the provider hook when configured", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "send_sms", label: "SMS", position_x: 0, position_y: 0, config: { to: "+14165550123", message: "Hello" }, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db, steps } = makeFakeDb(wf);
+    const seen: Array<Record<string, unknown>> = [];
+    const run = await executeWorkflow(
+      db, wf.id, {},
+      { sendSms: async (args) => { seen.push(args); return { delivered: true, sid: "SM123" }; } },
+    );
+    expect(run.status).toBe("completed");
+    expect(seen).toEqual([{ to: "+14165550123", message: "Hello" }]);
+    expect(steps.find((s) => s.node_key === "a1")?.output).toMatchObject({ delivered: true, sid: "SM123" });
+  });
+
+  it("send_sms requires to and message", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "send_sms", label: "SMS", position_x: 0, position_y: 0, config: { message: "no recipient" }, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db } = makeFakeDb(wf);
+    const run = await executeWorkflow(db, wf.id, {});
+    expect(run.status).toBe("failed");
+    expect(run.error).toContain("'to' is required");
+  });
+
+  it("ai_assist records a draft stub when no AI provider is configured", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "ai_assist", label: "Draft reply", position_x: 0, position_y: 0, config: { model: "gpt-4o-mini", systemPrompt: "Be brief.", userPrompt: "Reply to: {{trigger.lead.message}}", maxTokens: 200 }, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db, steps } = makeFakeDb(wf);
+    const run = await executeWorkflow(db, wf.id, { lead: { message: "leaky faucet" } });
+    expect(run.status).toBe("completed");
+    const ai = steps.find((s) => s.node_key === "a1");
+    expect(ai?.status).toBe("success");
+    expect(ai?.output).toMatchObject({ delivered: false, draft: true, model: "gpt-4o-mini" });
+    expect(String((ai?.output as Record<string, unknown>).prompt)).toContain("leaky faucet");
+  });
+
+  it("ai_assist uses the provider hook when configured", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "ai_assist", label: "Draft reply", position_x: 0, position_y: 0, config: { userPrompt: "Say hi" }, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db, steps } = makeFakeDb(wf);
+    const seen: Array<Record<string, unknown>> = [];
+    const run = await executeWorkflow(
+      db, wf.id, {},
+      { aiAssist: async (args) => { seen.push(args); return { delivered: true, output: "Hi there!" }; } },
+    );
+    expect(run.status).toBe("completed");
+    expect(seen[0]).toMatchObject({ model: "gpt-4o-mini", userPrompt: "Say hi" });
+    expect(steps.find((s) => s.node_key === "a1")?.output).toMatchObject({ delivered: true, output: "Hi there!" });
+  });
+
+  it("ai_assist requires a user prompt", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "ai_assist", label: "Draft", position_x: 0, position_y: 0, config: {}, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db } = makeFakeDb(wf);
+    const run = await executeWorkflow(db, wf.id, {});
+    expect(run.status).toBe("failed");
+    expect(run.error).toContain("'userPrompt' is required");
   });
 });
