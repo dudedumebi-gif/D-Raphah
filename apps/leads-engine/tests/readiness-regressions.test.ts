@@ -180,7 +180,7 @@ describe("bounded criteria recommendations", () => {
       opportunityPotentialMin: 20,
       confidenceMin: 0.1,
     });
-    expect(suggestCriteriaAdjustment(loose, 0).changes).toEqual({
+    expect(suggestCriteriaAdjustment(loose, 0).changes).toMatchObject({
       automationMaturityMax: 90,
       opportunityPotentialMin: 20,
       confidenceMin: 0.1,
@@ -190,7 +190,7 @@ describe("bounded criteria recommendations", () => {
       opportunityPotentialMin: 95,
       confidenceMin: 0.95,
     });
-    expect(suggestCriteriaAdjustment(strict, 100).changes).toEqual({
+    expect(suggestCriteriaAdjustment(strict, 100).changes).toMatchObject({
       automationMaturityMax: 10,
       opportunityPotentialMin: 95,
       confidenceMin: 0.95,

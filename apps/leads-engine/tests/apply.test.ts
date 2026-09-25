@@ -38,7 +38,9 @@ describe("mergeSuggestionChanges", () => {
     const suggestion = loosenSuggestion();
     const merged = mergeSuggestionChanges(BASE_CRITERIA, suggestion.changes);
     for (const [key, value] of Object.entries(suggestion.changes))
-      expect(merged[key as keyof typeof merged]).toBe(value);
+      // Geography arrives as a nested object — deep-compare it, since the
+      // schema parse creates a new object identity on merge.
+      expect(merged[key as keyof typeof merged]).toEqual(value);
   });
 });
 
@@ -117,6 +119,9 @@ describe("evaluateAutoApply", () => {
     });
     expect(next).not.toBeNull();
     for (const [key, target] of Object.entries(suggestion.changes)) {
+      // Auto-apply only moves numeric criteria; geography completion is a
+      // human decision and is skipped by evaluateAutoApply itself.
+      if (typeof target !== "number") continue;
       const moved = (next as Record<string, number>)[key];
       const current = (BASE_CRITERIA as Record<string, number>)[key];
       const maxMove =
