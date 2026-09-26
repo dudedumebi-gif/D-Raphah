@@ -101,6 +101,19 @@
   color: #48692b;
   font-size: 10px;
 }
+.row-action.active {
+  background: #48692b;
+  color: #fff;
+}
+.range-buttons {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+.audit-day-head {
+  background: #f6f9f8;
+}
 .record-list {
   border-top: 1px solid #edf1f0;
 }

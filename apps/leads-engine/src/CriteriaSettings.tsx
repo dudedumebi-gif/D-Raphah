@@ -31,10 +31,14 @@ function CampaignSettings({
   campaign,
   mutate,
   onApplied,
+  open,
+  onToggle,
 }: {
   campaign: CampaignRecord;
   mutate: Mutate;
   onApplied: () => void;
+  open: boolean;
+  onToggle: () => void;
 }) {
   const criteria = campaign.criteria as EditableCriteria;
   const [mode, setMode] = useState(criteria.geography?.mode ?? "regions");
@@ -47,6 +51,14 @@ function CampaignSettings({
   const usesRadius = mode === "radius" || mode === "hybrid";
   const hasSuggestedChanges =
     suggestion != null && Object.keys(suggestion.changes).length > 0;
+  const lastSuggestionAt = (
+    campaign as { last_suggestion_at?: string | null }
+  ).last_suggestion_at;
+  const summaryLine = suggestion
+    ? `Output recommendation: ${suggestion.direction} — ${suggestion.observedQualifiedLeads}/${suggestion.targetQualifiedLeads} distinct qualified organizations this week`
+    : lastSuggestionAt
+      ? "Criteria reviewed — no new recommendation until fresh scrape output arrives."
+      : "No recommendation yet — run a scrape job to generate one.";
   async function applySuggestion() {
     setApplying(true);
     try {
@@ -120,14 +132,29 @@ function CampaignSettings({
   }
   return (
     <section className="panel form-panel">
-      <div className="panel-head">
+      <div
+        className="panel-head criteria-toggle"
+        onClick={onToggle}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onToggle();
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        title={open ? "Collapse" : "Expand"}
+      >
         <div>
-          <h3>{campaign.name}</h3>
-          <p>
-            Review suggested thresholds, location scope, and refresh cadence.
-          </p>
+          <h3>
+            <span aria-hidden="true">{open ? "▾" : "▸"}</span> {campaign.name}
+          </h3>
+          <p>{summaryLine}</p>
         </div>
       </div>
+      {open ? (
+        <>
       {suggestion ? (
         <div
           className={`criteria-suggestion suggestion-${suggestion.direction}`}
@@ -166,8 +193,7 @@ function CampaignSettings({
             </div>
           ) : null}
         </div>
-      ) : (campaign as { last_suggestion_at?: string | null })
-          .last_suggestion_at ? (
+      ) : lastSuggestionAt ? (
         <div className="criteria-suggestion suggestion-hold">
           <small>
             Criteria reviewed — no new recommendation until fresh scrape output
@@ -345,6 +371,8 @@ function CampaignSettings({
           </button>
         </fieldset>
       </form>
+      </>
+      ) : null}
     </section>
   );
 }
@@ -358,15 +386,24 @@ export function Settings({
   mutate: Mutate;
   onApplied: () => void;
 }) {
+  // Accordion state: null follows the default (first campaign expanded,
+  // the rest collapsed); a campaign id pins it open, "" pins all closed.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const campaigns = data.campaigns;
+  const effectiveOpenId = openId ?? campaigns[0]?.id ?? null;
   return (
     <div className="content settings-grid">
-      {data.campaigns.length ? (
-        data.campaigns.map((campaign) => (
+      {campaigns.length ? (
+        campaigns.map((campaign) => (
           <CampaignSettings
             key={`${campaign.id}:${JSON.stringify(campaign.criteria)}:${campaign.schedule_enabled}:${campaign.interval_minutes}`}
             campaign={campaign}
             mutate={mutate}
             onApplied={onApplied}
+            open={effectiveOpenId === campaign.id}
+            onToggle={() =>
+              setOpenId(effectiveOpenId === campaign.id ? "" : campaign.id)
+            }
           />
         ))
       ) : (

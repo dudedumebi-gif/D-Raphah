@@ -24,6 +24,11 @@ import {
   type SqlClient,
 } from "./handoff.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
+import {
+  dedupeRows,
+  mapRowToSourceInput,
+  normalizeSourceUrl,
+} from "./source-import.js";
 import { enqueueCanary, runWorkerTick } from "./worker.js";
 import {
   DiscoveryGeoInputSchema,
@@ -58,6 +63,24 @@ const ManualJobSchema = z.object({
   sourceId: z.string().uuid(),
   targetUrl: z.string().url(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
+});
+
+const SourceImportBodySchema = z.object({
+  rows: z
+    .array(
+      z.object({
+        name: z.string(),
+        website: z.string(),
+        collectionMethod: z
+          .enum(["api", "rss", "sitemap", "static_html"])
+          .optional(),
+        businessPurpose: z.string().optional(),
+      }),
+    )
+    .min(1)
+    .max(200),
+  contactEmail: z.string().email(),
+  approveAll: z.boolean().optional().default(false),
 });
 
 const DiscoverySourceInputSchema = z.object({
@@ -434,6 +457,93 @@ async function authenticatedRoutes(
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
     return json({ data });
+  }
+  if (pathname === "/api/v1/audit" && request.method === "GET") {
+    // Any active workspace member may read the audit trail; no elevated
+    // role required. The bootstrap's embedded 100-event fetch is untouched.
+    const params = new URL(request.url).searchParams;
+    const days = Math.min(
+      Math.max(Number.parseInt(params.get("days") ?? "7", 10) || 7, 1),
+      30,
+    );
+    const limit = Math.min(
+      Math.max(Number.parseInt(params.get("limit") ?? "500", 10) || 500, 1),
+      2000,
+    );
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+    const { data, error } = await client
+      .from("audit_events")
+      .select(
+        "id,action,resource_type,resource_id,outcome,reason,actor_id,correlation_id,before_state,after_state,created_at",
+      )
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+  if (pathname === "/api/v1/sources/import" && request.method === "POST") {
+    const body = SourceImportBodySchema.parse(await bodyJson(request));
+    requireRole(
+      context,
+      body.approveAll
+        ? ["owner", "administrator"]
+        : ["owner", "administrator", "analyst"],
+    );
+    const { data: existingRows, error: existingError } = await client
+      .from("source_definitions")
+      .select("base_url")
+      .eq("workspace_id", workspaceId);
+    if (existingError) throw new Error(existingError.message);
+    const existingUrls = new Set<string>();
+    for (const row of (existingRows ?? []) as Array<{ base_url: string }>) {
+      try {
+        existingUrls.add(normalizeSourceUrl(row.base_url));
+      } catch {
+        // Legacy rows that no longer normalize cannot collide; ignore them.
+      }
+    }
+    const indexed = body.rows.map((row, index) => ({ index, row }));
+    const { unique, skipped } = dedupeRows(indexed, existingUrls);
+    const created: Array<{ id: string; name: string }> = [];
+    const errors: Array<{ index: number; name: string; error: string }> = [];
+    let approved = 0;
+    for (const { index, row } of unique) {
+      const label = row.name?.trim() || `row ${index + 1}`;
+      try {
+        const input = SourceInputSchema.parse(
+          mapRowToSourceInput(row, body.contactEmail),
+        );
+        const { data, error } = await client.rpc("create_source_with_policy", {
+          p_workspace_id: workspaceId,
+          p_input: input,
+        });
+        if (error) throw new Error(error.message);
+        const sourceId = (data as { sourceId?: string } | null)?.sourceId;
+        if (!sourceId) throw new Error("Source creation returned no id");
+        if (body.approveAll) {
+          const { error: approveError } = await client.rpc(
+            "approve_source_policy",
+            {
+              p_workspace_id: workspaceId,
+              p_source_id: sourceId,
+              p_reason: "Bulk-approved on CSV import.",
+            },
+          );
+          if (approveError) throw new Error(approveError.message);
+          approved += 1;
+        }
+        created.push({ id: sourceId, name: input.name });
+      } catch (error) {
+        errors.push({
+          index,
+          name: label,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return json({ data: { created, skipped, errors, approved } }, 201);
   }
   if (pathname === "/api/v1/sources" && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);

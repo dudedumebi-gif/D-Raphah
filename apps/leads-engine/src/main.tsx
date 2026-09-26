@@ -5,6 +5,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  type ChangeEvent,
   type ReactNode,
 } from "react";
 import { createRoot } from "react-dom/client";
@@ -23,6 +24,11 @@ import {
 } from "./api";
 import { Settings } from "./CriteriaSettings";
 import { JobLiveWindow } from "./JobLiveWindow";
+import {
+  normalizeSourceUrl,
+  parseSourceCsv,
+  type SourceImportRow,
+} from "../api/_lib/source-import";
 import "./styles.css";
 import "./functionality.css";
 import "./ux-fixes.css";
@@ -381,36 +387,38 @@ function Workspace({ session }: { session: Session }) {
         </div>
       </aside>
       <main>
-        <header className="topbar">
-          <div className="mobile-topbar-row">
-            <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(true)}>Menu</button>
-            <span className="mobile-view-label">{views.find((item) => item.id === view)?.label}</span>
+        <div className="sticky-header">
+          <header className="topbar">
+            <div className="mobile-topbar-row">
+              <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(true)}>Menu</button>
+              <span className="mobile-view-label">{views.find((item) => item.id === view)?.label}</span>
+            </div>
+            <div>
+              <p className="eyebrow">Workspace / Automation intelligence</p>
+              <h1>{views.find((item) => item.id === view)?.label}</h1>
+            </div>
+            <div className="top-actions">
+              <button
+                className="quiet"
+                disabled={busy}
+                onClick={() => void refresh()}
+              >
+                {busy ? "Working…" : "Refresh"}
+              </button>
+            </div>
+          </header>
+          {mobileNavOpen ? (
+            <div className="mobile-nav-backdrop" role="presentation" onClick={() => setMobileNavOpen(false)}>
+              <nav className="mobile-nav" aria-label="Workspace navigation" onClick={(event) => event.stopPropagation()}>
+                <div className="mobile-nav-head"><b>Navigate</b><button className="icon-button" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}>×</button></div>
+                {views.map((item) => <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMobileNavOpen(false); }}>{item.label}</button>)}
+              </nav>
+            </div>
+          ) : null}
+          <div className="status-bar" role="status" aria-live="polite">
+            <span className="status-dot" />
+            {notice}
           </div>
-          <div>
-            <p className="eyebrow">Workspace / Automation intelligence</p>
-            <h1>{views.find((item) => item.id === view)?.label}</h1>
-          </div>
-          <div className="top-actions">
-            <button
-              className="quiet"
-              disabled={busy}
-              onClick={() => void refresh()}
-            >
-              {busy ? "Working…" : "Refresh"}
-            </button>
-          </div>
-        </header>
-        {mobileNavOpen ? (
-          <div className="mobile-nav-backdrop" role="presentation" onClick={() => setMobileNavOpen(false)}>
-            <nav className="mobile-nav" aria-label="Workspace navigation" onClick={(event) => event.stopPropagation()}>
-              <div className="mobile-nav-head"><b>Navigate</b><button className="icon-button" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}>×</button></div>
-              {views.map((item) => <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMobileNavOpen(false); }}>{item.label}</button>)}
-            </nav>
-          </div>
-        ) : null}
-        <div className="status-bar" role="status" aria-live="polite">
-          <span className="status-dot" />
-          {notice}
         </div>
         {!data ? (
           <Centered
@@ -454,7 +462,8 @@ function DashboardView({
     );
   if (view === "leads") return <Leads data={data} mutate={mutate} />;
   if (view === "operations") return <Operations data={data} />;
-  if (view === "audit") return <Audit data={data} />;
+  if (view === "audit")
+    return <Audit data={data} session={session} workspaceId={workspaceId} />;
   if (view === "settings")
     return <Settings data={data} mutate={mutate} onApplied={() => setView("jobs")} />;
   if (view === "help") return <HelpGuide />;
@@ -526,6 +535,282 @@ function DashboardView({
   );
 }
 
+const SOURCE_IMPORT_TEMPLATE =
+  "name,website,collection_method,business_purpose\n" +
+  '"Example Business",https://example.com,static_html,"Identify public evidence of manual processes and automation opportunity."\n';
+
+const MAX_IMPORT_ROWS = 200;
+
+type ImportPreviewStatus = "new" | "duplicate" | "invalid";
+
+interface ImportPreviewRow {
+  key: number;
+  name: string;
+  website: string;
+  domain: string;
+  status: ImportPreviewStatus;
+  detail: string;
+}
+
+interface ImportSummary {
+  created: number;
+  skipped: number;
+  errors: number;
+  approved: number;
+}
+
+function ImportSources({
+  data,
+  mutate,
+}: {
+  data: BootstrapData;
+  mutate: Mutate;
+}) {
+  const [fileName, setFileName] = useState("");
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [rows, setRows] = useState<SourceImportRow[]>([]);
+  const [contactEmail, setContactEmail] = useState(data.actor.email ?? "");
+  const [approveAll, setApproveAll] = useState(false);
+  const [summary, setSummary] = useState<ImportSummary | null>(null);
+
+  const existingUrls = useMemo(() => {
+    const urls = new Set<string>();
+    for (const source of data.sources) {
+      try {
+        urls.add(normalizeSourceUrl(source.base_url));
+      } catch {
+        // Legacy rows that no longer normalize cannot collide.
+      }
+    }
+    return urls;
+  }, [data.sources]);
+
+  const preview = useMemo<ImportPreviewRow[]>(() => {
+    const seen = new Set<string>();
+    return rows.map((row, key) => {
+      const name = row.name.trim();
+      const website = row.website.trim();
+      const label = name || `Row ${key + 1}`;
+      try {
+        const normalized = normalizeSourceUrl(website);
+        const domain = new URL(normalized).hostname;
+        if (!name) {
+          return {
+            key,
+            name: label,
+            website,
+            domain,
+            status: "invalid",
+            detail: "Name is required.",
+          };
+        }
+        if (existingUrls.has(normalized)) {
+          return {
+            key,
+            name,
+            website,
+            domain,
+            status: "duplicate",
+            detail: "A source with this website already exists.",
+          };
+        }
+        if (seen.has(normalized)) {
+          return {
+            key,
+            name,
+            website,
+            domain,
+            status: "duplicate",
+            detail: "Website is repeated in this file.",
+          };
+        }
+        seen.add(normalized);
+        return {
+          key,
+          name,
+          website,
+          domain,
+          status: "new",
+          detail: "Will be created.",
+        };
+      } catch {
+        return {
+          key,
+          name: label,
+          website,
+          domain: "—",
+          status: "invalid",
+          detail: "Website is not a valid HTTP(S) URL.",
+        };
+      }
+    });
+  }, [rows, existingUrls]);
+
+  const newRows = preview.filter((row) => row.status === "new");
+
+  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setSummary(null);
+    setFileName(file.name);
+    const parsed = parseSourceCsv(await file.text());
+    if (parsed.error) {
+      setParseError(parsed.error);
+      setRows([]);
+      return;
+    }
+    if (parsed.rows.length > MAX_IMPORT_ROWS) {
+      setParseError(
+        `The file has ${parsed.rows.length} rows; the import limit is ${MAX_IMPORT_ROWS}. Split it and import in batches.`,
+      );
+      setRows([]);
+      return;
+    }
+    setParseError(null);
+    setRows(parsed.rows);
+  }
+
+  function downloadTemplate() {
+    const blob = new Blob([SOURCE_IMPORT_TEMPLATE], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "source-import-template.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleImport() {
+    const payload = {
+      rows: newRows.map(({ key }) => rows[key]),
+      contactEmail,
+      approveAll,
+    };
+    const result = await mutate<{
+      data: {
+        created: Array<{ id: string; name: string }>;
+        skipped: Array<{ name: string; website: string; reason: string }>;
+        errors: Array<{ index: number; name: string; error: string }>;
+        approved: number;
+      };
+    }>(
+      "/api/v1/sources/import",
+      { method: "POST", body: JSON.stringify(payload) },
+      "Source import finished.",
+    );
+    if (result?.data) {
+      setSummary({
+        created: result.data.created.length,
+        skipped: result.data.skipped.length,
+        errors: result.data.errors.length,
+        approved: result.data.approved,
+      });
+      setRows([]);
+      setFileName("");
+    }
+  }
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <div>
+          <h3>Import sources</h3>
+          <p>
+            Bulk-add sources from a CSV lead list. Each row becomes one source
+            with its own policy.
+          </p>
+        </div>
+        <button type="button" className="row-action" onClick={downloadTemplate}>
+          Download CSV template
+        </button>
+      </div>
+      <form className="inline-form" onSubmit={(event) => event.preventDefault()}>
+        <label>
+          CSV file
+          <input type="file" accept=".csv" onChange={handleFile} />
+          {fileName ? (
+            <small>
+              {fileName} · {rows.length} data rows
+            </small>
+          ) : null}
+        </label>
+        <label>
+          Contact email
+          <input
+            type="email"
+            required
+            value={contactEmail}
+            onChange={(event) => setContactEmail(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>
+            <input
+              type="checkbox"
+              checked={approveAll}
+              onChange={(event) => setApproveAll(event.target.checked)}
+            />{" "}
+            Approve all on import
+          </span>
+          <small>
+            Approved sources become active immediately and appear in the Scrape
+            jobs dropdown.
+          </small>
+        </label>
+      </form>
+      {parseError ? (
+        <p style={{ color: "#b3261e", padding: "0 20px" }}>{parseError}</p>
+      ) : null}
+      {preview.length > 0 ? (
+        <div>
+          <div className="table-head">
+            <span>Name</span>
+            <span>Website</span>
+            <span>Domain</span>
+            <span>Status</span>
+          </div>
+          {preview.map((row) => (
+            <div className="table-row" key={row.key}>
+              <span>
+                <b>{row.name}</b>
+              </span>
+              <span>
+                <small>{row.website}</small>
+              </span>
+              <span>
+                <small>{row.domain}</small>
+              </span>
+              <span>
+                <Status value={row.status} /> <small>{row.detail}</small>
+              </span>
+            </div>
+          ))}
+          <div style={{ padding: "16px 20px" }}>
+            <button
+              type="button"
+              className="primary"
+              onClick={handleImport}
+              disabled={newRows.length === 0 || !contactEmail}
+            >
+              Import {newRows.length} source{newRows.length === 1 ? "" : "s"}
+            </button>{" "}
+            {summary ? (
+              <small>
+                Last import: {summary.created} created · {summary.skipped}{" "}
+                skipped · {summary.errors} errors · {summary.approved} approved.
+              </small>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -561,11 +846,12 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
     if (result) formElement.reset();
   }
   return (
-    <div className="content split-layout">
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h3>Permitted sources</h3>
+    <>
+      <div className="content split-layout">
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h3>Permitted sources</h3>
             <p>No collection begins before explicit policy approval.</p>
           </div>
         </div>
@@ -720,8 +1006,12 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
           </label>
           <button className="primary">Create source policy</button>
         </form>
-      </section>
-    </div>
+        </section>
+      </div>
+      <div className="content">
+        <ImportSources data={data} mutate={mutate} />
+      </div>
+    </>
   );
 }
 
@@ -1156,10 +1446,81 @@ function buildAuditRuns(events: AuditRecord[]): AuditRun[] {
   });
 }
 
-function Audit({ data }: { data: BootstrapData }) {
+interface AuditDay {
+  key: string;
+  label: string;
+  events: AuditRecord[];
+  runs: AuditRun[];
+}
+
+const AUDIT_RANGES = [
+  { days: 1, label: "24h" },
+  { days: 3, label: "3d" },
+  { days: 7, label: "7d" },
+];
+
+function Audit({
+  data,
+  session,
+  workspaceId,
+}: {
+  data: BootstrapData;
+  session: Session;
+  workspaceId: string;
+}) {
+  const [expandedDayKey, setExpandedDayKey] = useState<string | null>(null);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const runs = useMemo(() => buildAuditRuns(data.audit), [data.audit]);
+  const [days, setDays] = useState(7);
+  const [events, setEvents] = useState<AuditRecord[]>(data.audit);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    apiRequest<{ data: AuditRecord[] }>(
+      session,
+      workspaceId,
+      `/api/v1/audit?days=${days}`,
+    )
+      .then((result) => {
+        if (cancelled) return;
+        setEvents(result.data ?? []);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [days, session, workspaceId]);
+
+  const dayBuckets = useMemo<AuditDay[]>(() => {
+    const byDay = new Map<string, AuditRecord[]>();
+    for (const event of events) {
+      const at = new Date(event.created_at);
+      const key = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, "0")}-${String(at.getDate()).padStart(2, "0")}`;
+      const list = byDay.get(key);
+      if (list) list.push(event);
+      else byDay.set(key, [event]);
+    }
+    return [...byDay.entries()]
+      .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+      .map(([key, dayEvents]) => ({
+        key,
+        label: new Date(`${key}T12:00:00`).toLocaleDateString(undefined, {
+          weekday: "long",
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+        }),
+        events: dayEvents,
+        runs: buildAuditRuns(dayEvents),
+      }));
+  }, [events]);
+  // null follows the default: the most recent day starts expanded.
+  const effectiveDayKey = expandedDayKey ?? dayBuckets[0]?.key ?? null;
 
   function renderNode(node: AuditNode, depth: number): ReactNode {
     const { event } = node;
@@ -1252,6 +1613,44 @@ function Audit({ data }: { data: BootstrapData }) {
     );
   }
 
+  function renderRun(run: AuditRun): ReactNode {
+    const expanded = expandedRunId === run.id;
+    return (
+      <div key={run.id} className="audit-run">
+        <div
+          className="record-row audit-run-head"
+          onClick={() => setExpandedRunId(expanded ? null : run.id)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setExpandedRunId(expanded ? null : run.id);
+            }
+          }}
+        >
+          <div>
+            <b>{run.title}</b>
+            <small>
+              {run.eventCount} record{run.eventCount === 1 ? "" : "s"} ·{" "}
+              {run.roots.length} top-level entr
+              {run.roots.length === 1 ? "y" : "ies"}
+            </small>
+          </div>
+          <time>{new Date(run.startedAt).toLocaleString()}</time>
+          <span className="audit-chevron" aria-hidden="true">
+            {expanded ? "▾" : "▸"}
+          </span>
+        </div>
+        {expanded && run.roots.map((root) => renderNode(root, 0))}
+      </div>
+    );
+  }
+
+  function toggleDay(key: string, dayExpanded: boolean) {
+    setExpandedDayKey(dayExpanded ? "" : key);
+  }
+
   return (
     <div className="content">
       <section className="panel">
@@ -1259,51 +1658,71 @@ function Audit({ data }: { data: BootstrapData }) {
           <div>
             <h3>Immutable application audit trail</h3>
             <p>
-              Events are bucketed into runs — expand a run to walk its
-              grandparent → parent → children tree. Click any entry to inspect
-              it.
+              Events are grouped by day, then bucketed into runs — expand a
+              day, then a run, to walk its grandparent → parent → children
+              tree. Click any entry to inspect it.
             </p>
           </div>
+          <div
+            className="range-buttons"
+            role="group"
+            aria-label="Audit history range"
+          >
+            {AUDIT_RANGES.map((range) => (
+              <button
+                key={range.days}
+                type="button"
+                className={
+                  days === range.days ? "row-action active" : "row-action"
+                }
+                onClick={() => setDays(range.days)}
+              >
+                {range.label}
+              </button>
+            ))}
+          </div>
         </div>
+        {loading ? (
+          <p style={{ padding: "4px 20px" }}>Loading audit history…</p>
+        ) : null}
         <div className="record-list">
-          {runs.map((run) => {
-            const expanded = expandedRunId === run.id;
+          {dayBuckets.map((day) => {
+            const dayExpanded = effectiveDayKey === day.key;
             return (
-              <div key={run.id} className="audit-run">
+              <div key={day.key} className="audit-day">
                 <div
-                  className="record-row audit-run-head"
-                  onClick={() =>
-                    setExpandedRunId(expanded ? null : run.id)
-                  }
+                  className="record-row audit-day-head"
+                  onClick={() => toggleDay(day.key, dayExpanded)}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      setExpandedRunId(expanded ? null : run.id);
+                      toggleDay(day.key, dayExpanded);
                     }
                   }}
                 >
                   <div>
-                    <b>{run.title}</b>
+                    <b>{day.label}</b>
                     <small>
-                      {run.eventCount} record{run.eventCount === 1 ? "" : "s"}{" "}
-                      · {run.roots.length} top-level entr
-                      {run.roots.length === 1 ? "y" : "ies"}
+                      {day.runs.length} run{day.runs.length === 1 ? "" : "s"}{" "}
+                      · {day.events.length} record
+                      {day.events.length === 1 ? "" : "s"}
                     </small>
                   </div>
-                  <time>
-                    {new Date(run.startedAt).toLocaleString()}
-                  </time>
                   <span className="audit-chevron" aria-hidden="true">
-                    {expanded ? "▾" : "▸"}
+                    {dayExpanded ? "▾" : "▸"}
                   </span>
                 </div>
-                {expanded &&
-                  run.roots.map((root) => renderNode(root, 0))}
+                {dayExpanded && day.runs.map((run) => renderRun(run))}
               </div>
             );
           })}
+          {!loading && dayBuckets.length === 0 ? (
+            <p style={{ padding: "4px 20px" }}>
+              No audit events in this range yet.
+            </p>
+          ) : null}
         </div>
       </section>
     </div>
@@ -1537,6 +1956,15 @@ function HelpGuide() {
             <b>Why the gate?</b> The Lead Engine only collects public evidence
             for a stated business purpose. The approval step is your record
             that a human reviewed and permitted the collection.
+          </p>
+          <p>
+            <b>Bulk import:</b> the <b>Import sources</b> panel below the
+            source list accepts a CSV with <b>name</b> and <b>website</b>
+            columns (a template is downloadable from the panel). Each row
+            becomes one source with its own policy, duplicates are skipped,
+            and nothing is collected until you approve each source — or tick
+            <b>Approve all on import</b> (owners and administrators only) to
+            activate them immediately.
           </p>
 
           <h4>3. Criteria &amp; schedule — what counts as a lead</h4>

@@ -13,10 +13,14 @@ body {
 }
 .app-shell {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 .sidebar {
   width: 252px;
+  flex-shrink: 0;
+  height: 100vh;
+  overflow-y: auto;
   background: #12232b;
   color: #dbe8e8;
   padding: 28px 18px 18px;
@@ -122,6 +126,21 @@ body {
 main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+.sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: #fff;
+}
+.criteria-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+.criteria-toggle:hover {
+  background: #f8fbfb;
 }
 .topbar {
   height: 106px;
