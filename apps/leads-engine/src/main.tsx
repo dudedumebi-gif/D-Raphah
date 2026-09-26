@@ -17,6 +17,8 @@ import {
   neonClient,
   type AuditRecord,
   type BootstrapData,
+  type DiscoveryRunRecord,
+  type DiscoverySourceRecord,
   type JobRecord,
   type LeadRecord,
   type Membership,
@@ -31,11 +33,11 @@ import {
 } from "../api/_lib/source-import";
 import "./styles.css";
 import "./functionality.css";
-import "./ux-fixes.css";
 
 type View =
   | "overview"
   | "sources"
+  | "discovery"
   | "jobs"
   | "leads"
   | "operations"
@@ -50,6 +52,7 @@ type Mutate = <T>(
 const views: Array<{ id: View; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "sources", label: "Sources & policies" },
+  { id: "discovery", label: "Discovery" },
   { id: "jobs", label: "Scrape jobs" },
   { id: "leads", label: "Qualified leads" },
   { id: "operations", label: "Operations" },
@@ -114,18 +117,10 @@ function SetupRequired() {
   );
 }
 
-function humanizeAuthError(message: string): string {
-  if (/invalid login credentials/i.test(message)) return "Email or password is incorrect. Try again or reset your password.";
-  if (/email.*already registered/i.test(message)) return "That email already has an account. Sign in instead.";
-  if (/password/i.test(message) && /length|weak|short/i.test(message)) return "Use a password with at least 8 characters.";
-  return "We could not complete that request. Check your details and try again.";
-}
-
 function SignIn({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [resetSent, setResetSent] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -142,7 +137,7 @@ function SignIn({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
             options: { data: { workspace_name: "Raphah Lead Workspace" } },
           });
     setBusy(false);
-    if (result.error) setMessage(humanizeAuthError(result.error.message));
+    if (result.error) setMessage(result.error.message);
     else if (mode === "signup" && !result.data.session)
       setMessage("Check your email to confirm the account.");
     else {
@@ -180,32 +175,16 @@ function SignIn({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
               ? "Sign in"
               : "Create workspace"}
         </button>
-        {mode === "signin" ? (
-          <button
-            type="button"
-            className="text-button"
-            onClick={async () => {
-              const email = document.querySelector<HTMLInputElement>('input[name="email"]')?.value.trim() ?? "";
-              if (!email) {
-                setMessage("Enter your email above, then request a reset link.");
-                return;
-              }
-              const result = await neonClient!.auth.resetPasswordForEmail(email);
-              setMessage(result.error ? humanizeAuthError(result.error.message) : "Password reset link sent. Check your email.");
-              setResetSent(!result.error);
-            }}
-          >
-            {resetSent ? "Reset link sent" : "Forgot password?"}
-          </button>
-        ) : null}
         <button
           type="button"
           className="text-button"
           onClick={() => setMode(mode === "signin" ? "signup" : "signin")}
         >
-          {mode === "signin" ? "Create a new account" : "Use an existing account"}
+          {mode === "signin"
+            ? "Create a new account"
+            : "Use an existing account"}
         </button>
-        {message ? <p className="form-message" role="alert">{message}</p> : null}
+        {message ? <p className="form-message">{message}</p> : null}
       </form>
     </Centered>
   );
@@ -220,11 +199,10 @@ function Workspace({ session }: { session: Session }) {
     workspaceId ? cachedBootstrap(workspaceId, session.user.id) : null,
   );
   const [view, setView] = useState<View>("overview");
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("Connecting to the production data plane…");
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
-  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const [notice, setNotice] = useState(
+    "Connecting to the production data plane…",
+  );
 
   useEffect(() => {
     void (async () => {
@@ -243,12 +221,12 @@ function Workspace({ session }: { session: Session }) {
         );
       }
       if (!bootstrap || bootstrap.error) {
-        const message = bootstrap?.error?.message ?? "Workspace bootstrap failed after 3 attempts.";
-        setBootstrapError(message);
-        setNotice("Workspace connection needs attention.");
+        setNotice(
+          bootstrap?.error?.message ??
+            "Workspace bootstrap failed after 3 attempts.",
+        );
         return;
       }
-      setBootstrapError(null);
       const result = await neonClient!
         .from("workspace_memberships")
         .select("workspace_id,role,workspaces(name)")
@@ -262,7 +240,7 @@ function Workspace({ session }: { session: Session }) {
       setMemberships(rows);
       setWorkspaceId((current) => current || rows[0]?.workspace_id || "");
     })();
-  }, [session.user.id, bootstrapAttempt]);
+  }, [session.user.id]);
 
   const refresh = useCallback(
     async (quiet = false) => {
@@ -320,17 +298,13 @@ function Workspace({ session }: { session: Session }) {
     }
   }
 
-  if (bootstrapError && !memberships.length && !data)
-    return (
-      <Centered title="Workspace connection needs attention" detail="We could not load your workspace. Your data has not been changed.">
-        <p className="error-detail">{bootstrapError}</p>
-        <button className="primary" onClick={() => { setBootstrapError(null); setBootstrapAttempt((value) => value + 1); }}>
-          Try again
-        </button>
-      </Centered>
-    );
   if (!memberships.length && !data)
-    return <Centered title="Workspace initializing" detail="Preparing your secure workspace and checking active membership." />;
+    return (
+      <Centered
+        title="Workspace initializing"
+        detail="No active workspace membership was found. Confirm the Neon migration, Auth, and Data API are enabled."
+      />
+    );
   const activeMembership =
     memberships.find((item) => item.workspace_id === workspaceId) ??
     memberships[0];
@@ -349,8 +323,7 @@ function Workspace({ session }: { session: Session }) {
             <button
               key={item.id}
               className={view === item.id ? "nav-item active" : "nav-item"}
-              aria-current={view === item.id ? "page" : undefined}
-              onClick={() => { setView(item.id); setMobileNavOpen(false); }}
+              onClick={() => setView(item.id)}
             >
               <span>{item.label}</span>
               {item.id === "jobs" && data ? (
@@ -389,10 +362,6 @@ function Workspace({ session }: { session: Session }) {
       <main>
         <div className="sticky-header">
           <header className="topbar">
-            <div className="mobile-topbar-row">
-              <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(true)}>Menu</button>
-              <span className="mobile-view-label">{views.find((item) => item.id === view)?.label}</span>
-            </div>
             <div>
               <p className="eyebrow">Workspace / Automation intelligence</p>
               <h1>{views.find((item) => item.id === view)?.label}</h1>
@@ -407,15 +376,7 @@ function Workspace({ session }: { session: Session }) {
               </button>
             </div>
           </header>
-          {mobileNavOpen ? (
-            <div className="mobile-nav-backdrop" role="presentation" onClick={() => setMobileNavOpen(false)}>
-              <nav className="mobile-nav" aria-label="Workspace navigation" onClick={(event) => event.stopPropagation()}>
-                <div className="mobile-nav-head"><b>Navigate</b><button className="icon-button" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}>×</button></div>
-                {views.map((item) => <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMobileNavOpen(false); }}>{item.label}</button>)}
-              </nav>
-            </div>
-          ) : null}
-          <div className="status-bar" role="status" aria-live="polite">
+          <div className="status-bar" role="status">
             <span className="status-dot" />
             {notice}
           </div>
@@ -456,11 +417,23 @@ function DashboardView({
   workspaceId: string;
 }) {
   if (view === "sources") return <Sources data={data} mutate={mutate} />;
+  if (view === "discovery")
+    return (
+      <Discovery
+        data={data}
+        mutate={mutate}
+        session={session}
+        workspaceId={workspaceId}
+      />
+    );
   if (view === "jobs")
     return (
       <Jobs data={data} mutate={mutate} session={session} workspaceId={workspaceId} />
     );
-  if (view === "leads") return <Leads data={data} mutate={mutate} />;
+  if (view === "leads")
+    return (
+      <Leads data={data} mutate={mutate} session={session} workspaceId={workspaceId} />
+    );
   if (view === "operations") return <Operations data={data} />;
   if (view === "audit")
     return <Audit data={data} session={session} workspaceId={workspaceId} />;
@@ -484,16 +457,6 @@ function DashboardView({
         </div>
         <HealthBadge data={data} />
       </section>
-      {data.sources.length === 0 || data.jobs.length === 0 ? (
-        <section className="setup-checklist panel" aria-labelledby="setup-heading">
-          <div><p className="eyebrow accent">Recommended next steps</p><h3 id="setup-heading">Set up your first evidence run</h3><p className="muted">Follow the controlled path from permitted source to reviewable lead.</p></div>
-          <div className="checklist-grid">
-            <button className={data.sources.length ? "checklist-step complete" : "checklist-step"} onClick={() => setView("sources")}><b>1. Add a source</b><span>{data.sources.length ? "Source registered" : "Register a permitted public source"}</span></button>
-            <button className={data.sources.some((source) => source.status === "active") ? "checklist-step complete" : "checklist-step"} onClick={() => setView("sources")}><b>2. Approve policy</b><span>{data.sources.some((source) => source.status === "active") ? "Policy active" : "Review before collection"}</span></button>
-            <button className={data.jobs.length ? "checklist-step complete" : "checklist-step"} onClick={() => setView("jobs")}><b>3. Queue a job</b><span>{data.jobs.length ? "Job history available" : "Run the first evidence job"}</span></button>
-          </div>
-        </section>
-      ) : null}
       <section className="metrics">
         <Metric
           label="Approved sources"
@@ -1015,6 +978,296 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
   );
 }
 
+const DISCOVERY_CITIES = ["Toronto", "Ottawa", "Montreal", "Custom"];
+
+function geoSummary(geo: DiscoverySourceRecord["geo_params"]): string {
+  if (!geo) return "—";
+  const parts = [geo.city ?? "Custom area"];
+  if (geo.radiusKm) parts.push(`${geo.radiusKm} km radius`);
+  if (geo.centreLatitude !== undefined && geo.centreLongitude !== undefined)
+    parts.push(
+      `${geo.centreLatitude.toFixed(3)}, ${geo.centreLongitude.toFixed(3)}`,
+    );
+  return parts.join(" · ");
+}
+
+export function Discovery({
+  data,
+  mutate,
+  session,
+  workspaceId,
+}: {
+  data: BootstrapData;
+  mutate: Mutate;
+  session: Session;
+  workspaceId: string;
+}) {
+  const [sources, setSources] = useState<DiscoverySourceRecord[] | null>(null);
+  const [runs, setRuns] = useState<DiscoveryRunRecord[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [city, setCity] = useState("Toronto");
+  const [runningId, setRunningId] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [sourceResult, runResult] = await Promise.all([
+        apiRequest<{ data: DiscoverySourceRecord[] }>(
+          session,
+          workspaceId,
+          "/api/v1/discovery/sources",
+        ),
+        apiRequest<{ data: DiscoveryRunRecord[] }>(
+          session,
+          workspaceId,
+          "/api/v1/discovery/runs",
+        ),
+      ]);
+      setSources(sourceResult.data);
+      setRuns(runResult.data);
+    } catch {
+      // mutate() surfaces request errors; the lists simply stay stale.
+    } finally {
+      setLoading(false);
+    }
+  }, [session, workspaceId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const approvedSources = data.sources.filter((s) => s.status === "active");
+  const sourceName = (id: string) =>
+    sources?.find((s) => s.id === id)?.name ?? id.slice(0, 8);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const cityValue = String(form.get("city"));
+    const custom = cityValue === "Custom";
+    const geo: Record<string, unknown> = {
+      city: custom ? String(form.get("customCity") || "Custom") : cityValue,
+      radiusKm: Number(form.get("radiusKm")) || 50,
+    };
+    if (custom) {
+      geo.centreLatitude = Number(form.get("latitude"));
+      geo.centreLongitude = Number(form.get("longitude"));
+    }
+    const campaignId = String(form.get("campaignId") ?? "");
+    const result = await mutate(
+      "/api/v1/discovery/sources",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: form.get("name"),
+          adapterId: "overpass",
+          geo,
+          sourceId: form.get("sourceId"),
+          ...(campaignId ? { campaignId } : {}),
+        }),
+      },
+      "Discovery source registered.",
+    );
+    if (result) {
+      formElement.reset();
+      setCity("Toronto");
+      await refresh();
+    }
+  }
+
+  async function runSource(id: string, name: string) {
+    setRunningId(id);
+    await mutate(
+      `/api/v1/discovery/sources/${id}/run`,
+      { method: "POST" },
+      `Discovery run finished for ${name}.`,
+    );
+    setRunningId(null);
+    await refresh();
+  }
+
+  return (
+    <>
+      <div className="content split-layout">
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h3>Discovery sources</h3>
+              <p>
+                Business discovery over OpenStreetMap. Discovered websites are
+                enqueued as scrape jobs under the linked collection source, so
+                its approved policy governs collection.
+              </p>
+            </div>
+          </div>
+          {loading ? (
+            <p className="muted">Loading discovery sources…</p>
+          ) : (
+            <div className="record-list">
+              {(sources ?? []).map((source) => (
+                <div className="record-row" key={source.id}>
+                  <div>
+                    <b>{source.name}</b>
+                    <small>
+                      {geoSummary(source.geo_params)} ·{" "}
+                      {source.active ? "active" : "paused"}
+                    </small>
+                  </div>
+                  <button
+                    className="row-action"
+                    disabled={runningId !== null}
+                    onClick={() => void runSource(source.id, source.name)}
+                  >
+                    {runningId === source.id ? "Running…" : "Run now"}
+                  </button>
+                </div>
+              ))}
+              {(sources ?? []).length === 0 ? (
+                <p className="muted">
+                  No discovery sources yet — register one to start finding
+                  businesses.
+                </p>
+              ) : null}
+            </div>
+          )}
+        </section>
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h3>Register discovery source</h3>
+              <p>Free Overpass adapter — no API key required.</p>
+            </div>
+          </div>
+          <form className="inline-form" onSubmit={(e) => void submit(e)}>
+            <label>
+              Name
+              <input name="name" minLength={2} maxLength={160} required />
+            </label>
+            <label>
+              City
+              <select
+                name="city"
+                value={city}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                  setCity(event.target.value)
+                }
+              >
+                {DISCOVERY_CITIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {city === "Custom" ? (
+              <>
+                <label>
+                  Area label
+                  <input name="customCity" placeholder="e.g. Downtown core" />
+                </label>
+                <label>
+                  Centre latitude
+                  <input
+                    name="latitude"
+                    type="number"
+                    step="0.0001"
+                    min={-90}
+                    max={90}
+                    required
+                  />
+                </label>
+                <label>
+                  Centre longitude
+                  <input
+                    name="longitude"
+                    type="number"
+                    step="0.0001"
+                    min={-180}
+                    max={180}
+                    required
+                  />
+                </label>
+              </>
+            ) : null}
+            <label>
+              Radius (km)
+              <input
+                name="radiusKm"
+                type="number"
+                min={1}
+                max={500}
+                defaultValue={50}
+                required
+              />
+            </label>
+            <label>
+              Collection source (approved)
+              <select name="sourceId" required>
+                {approvedSources.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Campaign (optional)
+              <select name="campaignId" defaultValue="">
+                <option value="">None</option>
+                {data.campaigns.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className="primary">Register source</button>
+          </form>
+        </section>
+      </div>
+      <div className="content">
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h3>Discovery runs</h3>
+              <p>Most recent passes first, deduplicated by website URL.</p>
+            </div>
+          </div>
+          <div className="table discovery-runs-table">
+            <div className="table-head">
+              <span>Started</span>
+              <span>Source</span>
+              <span>Status</span>
+              <span>Candidates</span>
+              <span>Enqueued</span>
+            </div>
+            {(runs ?? []).map((run) => (
+              <div className="table-row" key={run.id}>
+                <span>{new Date(run.started_at).toLocaleString()}</span>
+                <span>{sourceName(run.discovery_source_id)}</span>
+                <span>
+                  {run.status}
+                  {run.error ? (
+                    <>
+                      <br />
+                      <small className="muted">{run.error}</small>
+                    </>
+                  ) : null}
+                </span>
+                <span>{run.candidates_found ?? "—"}</span>
+                <span>{run.candidates_enqueued ?? "—"}</span>
+              </div>
+            ))}
+          </div>
+          {(runs ?? []).length === 0 && !loading ? (
+            <p className="muted">No discovery runs yet.</p>
+          ) : null}
+        </section>
+      </div>
+    </>
+  );
+}
+
 function Jobs({
   data,
   mutate,
@@ -1172,7 +1425,19 @@ async function jobAction(
   );
 }
 
-function Leads({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
+export function Leads({
+  data,
+  mutate,
+  session,
+  workspaceId,
+}: {
+  data: BootstrapData;
+  mutate: Mutate;
+  session: Session;
+  workspaceId: string;
+}) {
+  const [exporting, setExporting] = useState<"csv" | "json" | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   async function feedback(lead: LeadRecord, decision: "accepted" | "rejected") {
     await mutate(
       `/api/v1/leads/${lead.id}/feedback`,
@@ -1190,6 +1455,51 @@ function Leads({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
       `${lead.title} marked ${decision}.`,
     );
   }
+  async function handoff(lead: LeadRecord) {
+    await mutate(
+      "/api/v1/handoffs",
+      {
+        method: "POST",
+        body: JSON.stringify({ opportunityId: lead.id }),
+      },
+      `Handoff package for ${lead.title} queued for the Delivery Factory.`,
+    );
+  }
+  async function exportLeads(format: "csv" | "json") {
+    setExporting(format);
+    setExportError(null);
+    try {
+      const headers = new Headers();
+      headers.set("authorization", `Bearer ${session.access_token}`);
+      headers.set("x-workspace-id", workspaceId);
+      headers.set("x-correlation-id", crypto.randomUUID());
+      const response = await fetch(`/api/v1/leads/export?format=${format}`, {
+        headers,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(
+          (payload as { error?: { message?: string } }).error?.message ??
+            `Export failed (${response.status})`,
+        );
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `leads-export.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError(
+        error instanceof Error ? error.message : "Export failed.",
+      );
+    } finally {
+      setExporting(null);
+    }
+  }
   return (
     <div className="content">
       <section className="panel">
@@ -1198,7 +1508,24 @@ function Leads({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
             <h3>Automation opportunity pipeline</h3>
             <p>Each lead is backed by stored evidence and a versioned score.</p>
           </div>
+          <div className="top-actions">
+            <button
+              className="row-action"
+              disabled={exporting !== null || data.leads.length === 0}
+              onClick={() => void exportLeads("csv")}
+            >
+              {exporting === "csv" ? "Exporting…" : "Export CSV"}
+            </button>
+            <button
+              className="row-action"
+              disabled={exporting !== null || data.leads.length === 0}
+              onClick={() => void exportLeads("json")}
+            >
+              {exporting === "json" ? "Exporting…" : "Export JSON"}
+            </button>
+          </div>
         </div>
+        {exportError ? <p className="error-text">{exportError}</p> : null}
         <LeadTable
           leads={data.leads}
           actions={(lead) => (
@@ -1214,6 +1541,13 @@ function Leads({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
                 onClick={() => void feedback(lead, "rejected")}
               >
                 Reject
+              </button>
+              <button
+                className="row-action"
+                title="Build a signed handoff package and queue it for the Delivery Factory"
+                onClick={() => void handoff(lead)}
+              >
+                Send to DF
               </button>
             </>
           )}

@@ -279,6 +279,7 @@
 .job-table .table-head, .job-table .table-row { grid-template-columns: 1.6fr .55fr .55fr 1.25fr; }
 .job-table .table-row > span { display: flex; flex-direction: column; gap: 5px; }
 .job-table time { color: #71878a; font-size: 10px; }
+.discovery-runs-table .table-head, .discovery-runs-table .table-row { grid-template-columns: 1.3fr 1.2fr 1fr .5fr .5fr; }
 .danger { color: #9a3f3f; background: #fbeeee; }
 .badge { text-transform: capitalize; white-space: nowrap; }
 .status-active, .status-completed, .status-success, .status-idle { background: #e4f3df; color: #39703c; }

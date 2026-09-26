@@ -174,6 +174,34 @@ export interface LeadRecord {
     | null;
 }
 
+export interface DiscoverySourceRecord {
+  id: string;
+  name: string;
+  adapter_id: string;
+  geo_params: {
+    city?: string;
+    region?: string;
+    centreLatitude?: number;
+    centreLongitude?: number;
+    radiusKm?: number;
+  } | null;
+  source_id: string;
+  campaign_id: string | null;
+  active: boolean;
+  created_at: string;
+}
+
+export interface DiscoveryRunRecord {
+  id: string;
+  discovery_source_id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  candidates_found: number | null;
+  candidates_enqueued: number | null;
+  error: string | null;
+}
+
 export interface AuditRecord {
   id: string;
   action: string;
