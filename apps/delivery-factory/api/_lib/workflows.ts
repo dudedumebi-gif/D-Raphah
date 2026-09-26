@@ -317,14 +317,16 @@ function q(db: NeonClient) {
 }
 
 /* ── Template rendering ──────────────────────────────────────────────────
-   {{path.to.value}} is resolved against the run context. */
+   {{path.to.value}} is resolved against the run context. Path segments may
+   contain hyphens so node outputs are reachable via {{node_<node_key>...}}
+   (seeded templates use hyphenated keys like "action-1"). */
 
 export function renderTemplate(
   template: unknown,
   context: Record<string, unknown>,
 ): unknown {
   if (typeof template === "string") {
-    return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, path: string) => {
+    return template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_m, path: string) => {
       const value = path.split(".").reduce<unknown>(
         (acc, key) => (acc != null && typeof acc === "object"
           ? (acc as Record<string, unknown>)[key]
