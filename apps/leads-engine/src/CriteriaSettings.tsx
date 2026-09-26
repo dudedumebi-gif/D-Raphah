@@ -30,13 +30,13 @@ type EditableCriteria = {
 function CampaignSettings({
   campaign,
   mutate,
-  onApplied,
+  sourceStatus,
   open,
   onToggle,
 }: {
   campaign: CampaignRecord;
   mutate: Mutate;
-  onApplied: () => void;
+  sourceStatus: string | null;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -44,6 +44,7 @@ function CampaignSettings({
   const [mode, setMode] = useState(criteria.geography?.mode ?? "regions");
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [requeuing, setRequeuing] = useState(false);
   const [autoApply, setAutoApply] = useState(
     (campaign as CampaignWithAutoApply).auto_apply_criteria === true,
   );
@@ -62,16 +63,29 @@ function CampaignSettings({
   async function applySuggestion() {
     setApplying(true);
     try {
-      const result = await mutate(
+      await mutate(
         `/api/v1/criteria/${campaign.id}/apply-suggestion`,
         { method: "POST" },
         `Suggestion applied to ${campaign.name}.`,
       );
-      // On success, return to the scrape queue — the user asked to land
-      // back where the work happens, not stay on the criteria page.
-      if (result !== null) onApplied();
     } finally {
       setApplying(false);
+    }
+  }
+  async function requeue() {
+    setRequeuing(true);
+    try {
+      await mutate(
+        "/api/v1/scrape-jobs",
+        {
+          method: "POST",
+          headers: { "idempotency-key": crypto.randomUUID() },
+          body: JSON.stringify({ sourceId: campaign.source_id }),
+        },
+        `Scrape job queued for ${campaign.name} with the current criteria. Watch it in the Scrape jobs view.`,
+      );
+    } finally {
+      setRequeuing(false);
     }
   }
   async function toggleAutoApply(next: boolean) {
@@ -371,6 +385,23 @@ function CampaignSettings({
           </button>
         </fieldset>
       </form>
+      {sourceStatus === "active" ? (
+        <div className="requeue-row">
+          <p className="muted">
+            Re-run this source&apos;s scrape with the current criteria — for
+            example right after applying a suggestion or saving reviewed
+            criteria. The job runs with whatever criteria are saved, so save
+            first if you changed anything.
+          </p>
+          <button
+            type="button"
+            disabled={busy || applying || requeuing}
+            onClick={() => void requeue()}
+          >
+            {requeuing ? "Queueing…" : "Re-queue scrape"}
+          </button>
+        </div>
+      ) : null}
       </>
       ) : null}
     </section>
@@ -380,11 +411,9 @@ function CampaignSettings({
 export function Settings({
   data,
   mutate,
-  onApplied,
 }: {
   data: BootstrapData;
   mutate: Mutate;
-  onApplied: () => void;
 }) {
   // Accordion state: null follows the default (first campaign expanded,
   // the rest collapsed); a campaign id pins it open, "" pins all closed.
@@ -399,7 +428,10 @@ export function Settings({
             key={`${campaign.id}:${JSON.stringify(campaign.criteria)}:${campaign.schedule_enabled}:${campaign.interval_minutes}`}
             campaign={campaign}
             mutate={mutate}
-            onApplied={onApplied}
+            sourceStatus={
+              data.sources.find((source) => source.id === campaign.source_id)
+                ?.status ?? null
+            }
             open={effectiveOpenId === campaign.id}
             onToggle={() =>
               setOpenId(effectiveOpenId === campaign.id ? "" : campaign.id)

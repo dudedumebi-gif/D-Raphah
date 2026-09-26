@@ -438,7 +438,7 @@ function DashboardView({
   if (view === "audit")
     return <Audit data={data} session={session} workspaceId={workspaceId} />;
   if (view === "settings")
-    return <Settings data={data} mutate={mutate} onApplied={() => setView("jobs")} />;
+    return <Settings data={data} mutate={mutate} />;
   if (view === "help") return <HelpGuide />;
   const complete = data.jobs.filter((job) => job.status === "completed").length;
   const active = data.jobs.filter((job) =>
