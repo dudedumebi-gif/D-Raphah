@@ -1126,9 +1126,11 @@ export function Discovery({
   const [city, setCity] = useState("Toronto");
   const [runningId, setRunningId] = useState<string | null>(null);
 
+  const [termsAccepted, setTermsAccepted] = useState<boolean | null>(null);
+
   const refresh = useCallback(async () => {
     try {
-      const [sourceResult, runResult] = await Promise.all([
+      const [sourceResult, runResult, termsResult] = await Promise.all([
         apiRequest<{ data: DiscoverySourceRecord[] }>(
           session,
           workspaceId,
@@ -1139,9 +1141,17 @@ export function Discovery({
           workspaceId,
           "/api/v1/discovery/runs",
         ),
+        apiRequest<{ data: Array<{ terms_id: string }> }>(
+          session,
+          workspaceId,
+          "/api/v1/terms",
+        ),
       ]);
       setSources(sourceResult.data);
       setRuns(runResult.data);
+      setTermsAccepted(
+        termsResult.data.some((t) => t.terms_id === "overpass-osm"),
+      );
     } catch {
       // mutate() surfaces request errors; the lists simply stay stale.
     } finally {
@@ -1152,6 +1162,18 @@ export function Discovery({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const role = data.actor.role ?? "";
+  const canAcceptTerms = role === "owner" || role === "administrator";
+
+  async function acceptTerms() {
+    await mutate(
+      "/api/v1/terms/accept",
+      { method: "POST", body: JSON.stringify({ termsId: "overpass-osm" }) },
+      "Overpass/OSM terms accepted — discovery runs are unblocked.",
+    );
+    await refresh();
+  }
 
   const approvedSources = data.sources.filter((s) => s.status === "active");
   const sourceName = (id: string) =>
@@ -1218,6 +1240,27 @@ export function Discovery({
               </p>
             </div>
           </div>
+          {termsAccepted === false ? (
+            <div className="notice">
+              <div>
+                <b>Overpass/OSM terms not yet accepted.</b>{" "}
+                <span className="muted">
+                  Discovery runs are blocked until an owner or administrator
+                  accepts the Overpass API usage policy and OpenStreetMap
+                  attribution (ODbL) terms for this workspace.
+                </span>
+              </div>
+              {canAcceptTerms ? (
+                <button className="row-action" onClick={() => void acceptTerms()}>
+                  Accept terms
+                </button>
+              ) : (
+                <span className="muted">
+                  Ask a workspace owner to accept them.
+                </span>
+              )}
+            </div>
+          ) : null}
           {loading ? (
             <p className="muted">Loading discovery sources…</p>
           ) : (

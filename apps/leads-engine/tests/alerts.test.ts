@@ -4,6 +4,7 @@ import {
   checkDeadLetterAlerts,
   deadLetterThreshold,
   emitAlert,
+  formatSlackAlert,
   type AlertInput,
   type AlertSqlClient,
 } from "../api/_lib/alerts";
@@ -88,8 +89,43 @@ describe("emitAlert", () => {
     expect(body.at).toBeTruthy();
   });
 
-  it("survives a failed webhook without throwing", async () => {
-    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
+  it("wraps the payload as Slack text for hooks.slack.com URLs", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = makeClient({
+      "insert into public.alert_log": () => [{ id: "alert-1" }],
+      "insert into public.audit_events": () => [],
+    });
+    process.env = {
+      ...OLD_ENV,
+      LEAD_ENGINE_ALERT_WEBHOOK_URL:
+        "https://hooks.slack.com/services/T000/B000/xxx",
+    };
+    const created = await emitAlert(
+      client,
+      alertInput({ type: "dead_letter_threshold", reason: "too many" }),
+    );
+    expect(created).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("hooks.slack.com");
+    const body = JSON.parse(String(init.body));
+    expect(typeof body.text).toBe("string");
+    expect(body.text).toContain("dead-letter threshold");
+    expect(body.text).toContain("too many");
+    expect(body.type).toBeUndefined();
+  });
+
+  it("formatSlackAlert renders the canary variant", () => {
+    const text = formatSlackAlert(
+      alertInput({ type: "canary_failed", reason: "boom" }),
+      "2026-09-27T00:00:00Z",
+    );
+    expect(text).toContain("canary failed");
+    expect(text).toContain("boom");
+  });
+
+  it("survives a failed webhook without throwing", async () => {    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
     vi.stubGlobal("fetch", fetchMock);
     const client = makeClient({
       "insert into public.alert_log": () => [{ id: "alert-1" }],

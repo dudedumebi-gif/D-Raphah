@@ -69,19 +69,46 @@ export function deadLetterThreshold(): number {
     : DEFAULT_DEAD_LETTER_THRESHOLD;
 }
 
+/** Slack incoming webhooks require a `text` field; raw alert JSON is rejected. */
+function isSlackWebhook(url: string): boolean {
+  try {
+    return new URL(url).hostname === "hooks.slack.com";
+  } catch {
+    return false;
+  }
+}
+
+/** Human-readable Slack message for an alert; keeps the raw fields attached. */
+export function formatSlackAlert(alert: AlertInput, at: string): string {
+  const title =
+    alert.type === "canary_failed"
+      ? ":rotating_light: Lead Engine canary failed"
+      : ":warning: Lead Engine dead-letter threshold breached";
+  return [
+    title,
+    `*Reason:* ${alert.reason}`,
+    `*Resource:* ${alert.resourceType} \`${alert.resourceId}\``,
+    `*Workspace:* \`${alert.workspaceId}\``,
+    `*At:* ${at}`,
+  ].join("\n");
+}
+
 async function postWebhook(alert: AlertInput): Promise<void> {
   const url = webhookUrl();
   if (!url) return;
-  const body = JSON.stringify({
-    type: alert.type,
-    workspaceId: alert.workspaceId,
-    resourceType: alert.resourceType,
-    resourceId: alert.resourceId,
-    reason: alert.reason,
-    payload: alert.payload ?? {},
-    at: new Date().toISOString(),
-    service: "lead-engine",
-  });
+  const at = new Date().toISOString();
+  const body = isSlackWebhook(url)
+    ? JSON.stringify({ text: formatSlackAlert(alert, at) })
+    : JSON.stringify({
+        type: alert.type,
+        workspaceId: alert.workspaceId,
+        resourceType: alert.resourceType,
+        resourceId: alert.resourceId,
+        reason: alert.reason,
+        payload: alert.payload ?? {},
+        at,
+        service: "lead-engine",
+      });
   try {
     const response = await fetch(url, {
       method: "POST",
