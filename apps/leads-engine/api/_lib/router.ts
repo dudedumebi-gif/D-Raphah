@@ -21,6 +21,7 @@ import { log, reportError, requestContext } from "./telemetry.js";
 import {
   buildHandoffPackage,
   enqueueHandoffOutbox,
+  tryImmediateDispatch,
   type SqlClient,
 } from "./handoff.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
@@ -40,6 +41,20 @@ import {
   type DiscoverySourceRow,
   type DiscoveryStore,
 } from "./discovery/run.js";
+import {
+  OVERPASS_OSM_TERMS_ID,
+  OVERPASS_OSM_TERMS_VERSION,
+  requireTermsAcceptance,
+} from "./discovery/terms.js";
+import { runScheduledDiscovery } from "./discovery/schedule.js";
+
+const ConsentInputSchema = z.object({
+  organizationId: z.string().uuid().optional(),
+  opportunityId: z.string().uuid().optional(),
+  basisType: z.enum(["consent", "existing_relationship", "inquiry"]),
+  evidenceReference: z.string().min(1).max(500).optional(),
+  notes: z.string().max(2_000).optional(),
+});
 
 const SourceInputSchema = z.object({
   name: z.string().min(2).max(160),
@@ -1074,6 +1089,14 @@ async function authenticatedRoutes(
         signature,
       },
     );
+    // Best-effort immediate dispatch (handoff gap 1): the 5-minute worker
+    // tick stays the durable fallback, but an accepted lead should reach DF
+    // in seconds, not minutes. tryImmediateDispatch never rejects, so the
+    // 201 enqueue response below is unaffected by dispatch failures.
+    await tryImmediateDispatch(
+      createAdminClient() as unknown as SqlClient,
+      enqueued.id,
+    );
     return json(
       {
         id: enqueued.id,
@@ -1084,8 +1107,167 @@ async function authenticatedRoutes(
     );
   }
 
-  if (pathname === "/api/v1/audit-events" && request.method === "GET") {
+  // CASL consent records (audit gap 1): what outreach basis exists for an
+  // organization/opportunity, who recorded it, and what evidence supports
+  // it. The outreach checklist gates on these rows; the handoff package
+  // carries the latest basis to the Delivery Factory.
+  if (pathname === "/api/v1/consent" && request.method === "GET") {
+    const url = new URL(request.url);
+    const organizationId = url.searchParams.get("organizationId");
+    const opportunityId = url.searchParams.get("opportunityId");
+    let query = client
+      .from("consent_records")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .order("recorded_at", { ascending: false })
+      .limit(200);
+    if (organizationId) query = query.eq("organization_id", organizationId);
+    if (opportunityId) query = query.eq("opportunity_id", opportunityId);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+  if (pathname === "/api/v1/consent" && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const input = ConsentInputSchema.parse(await bodyJson(request));
+    if (!input.organizationId && !input.opportunityId)
+      throw Object.assign(
+        new Error("organizationId or opportunityId is required"),
+        { statusCode: 400 },
+      );
+    if (input.organizationId) {
+      const { data: org, error: orgError } = await client
+        .from("organizations")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("id", input.organizationId)
+        .single();
+      if (orgError || !org)
+        throw Object.assign(new Error("Organization not found"), {
+          statusCode: 404,
+        });
+    }
+    if (input.opportunityId) {
+      const { data: opp, error: oppError } = await client
+        .from("opportunities")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("id", input.opportunityId)
+        .single();
+      if (oppError || !opp)
+        throw Object.assign(new Error("Opportunity not found"), {
+          statusCode: 404,
+        });
+    }
     const { data, error } = await client
+      .from("consent_records")
+      .insert({
+        workspace_id: workspaceId,
+        organization_id: input.organizationId ?? null,
+        opportunity_id: input.opportunityId ?? null,
+        basis_type: input.basisType,
+        evidence_reference: input.evidenceReference ?? null,
+        recorded_by: context.user.email ?? context.user.id,
+        notes: input.notes ?? null,
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return json({ data }, 201);
+  }
+
+  // Third-party terms acceptance (audit gap 2). Owners/administrators only.
+  if (pathname === "/api/v1/terms/accept" && request.method === "POST") {
+    requireRole(context, ["owner", "administrator"]);
+    const input = z
+      .object({
+        termsId: z.string().min(1).max(80),
+        notes: z.string().max(2_000).optional(),
+      })
+      .parse(await bodyJson(request));
+    if (input.termsId !== OVERPASS_OSM_TERMS_ID)
+      throw Object.assign(new Error(`Unknown terms id: ${input.termsId}`), {
+        statusCode: 422,
+      });
+    const { error } = await client.from("terms_acceptances").upsert(
+      {
+        workspace_id: workspaceId,
+        terms_id: input.termsId,
+        terms_version: OVERPASS_OSM_TERMS_VERSION,
+        accepted_by: context.user.email ?? context.user.id,
+        notes: input.notes ?? null,
+      },
+      { onConflict: "workspace_id,terms_id" },
+    );
+    if (error) throw new Error(error.message);
+    return json(
+      {
+        data: {
+          termsId: OVERPASS_OSM_TERMS_ID,
+          termsVersion: OVERPASS_OSM_TERMS_VERSION,
+          acceptedBy: context.user.email ?? context.user.id,
+        },
+      },
+      201,
+    );
+  }
+  if (pathname === "/api/v1/terms" && request.method === "GET") {
+    const { data, error } = await client
+      .from("terms_acceptances")
+      .select("*")
+      .eq("workspace_id", workspaceId);
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+
+  // Pipeline funnel width (audit fix): one number per stage so the funnel
+  // is visible before the first qualified lead ever appears.
+  if (pathname === "/api/v1/funnel" && request.method === "GET") {
+    const url = new URL(request.url);
+    const windowDays = Math.min(
+      365,
+      Math.max(1, Number(url.searchParams.get("windowDays")) || 30),
+    );
+    const since = new Date(
+      Date.now() - windowDays * 86_400_000,
+    ).toISOString();
+    const { count: activeSources, error: sourcesError } = await client
+      .from("source_definitions")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("status", "active");
+    if (sourcesError) throw new Error(sourcesError.message);
+    const { count: candidatesEvaluated, error: evaluatedError } = await client
+      .from("maturity_assessments")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("evaluated_at", since);
+    if (evaluatedError) throw new Error(evaluatedError.message);
+    const { count: scored, error: scoredError } = await client
+      .from("opportunities")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since);
+    if (scoredError) throw new Error(scoredError.message);
+    const { count: qualified, error: qualifiedError } = await client
+      .from("opportunities")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since)
+      .eq("stage", "qualified");
+    if (qualifiedError) throw new Error(qualifiedError.message);
+    return json({
+      data: {
+        activeSources: activeSources ?? 0,
+        candidatesEvaluated: candidatesEvaluated ?? 0,
+        scored: scored ?? 0,
+        qualified: qualified ?? 0,
+        windowDays,
+      },
+    });
+  }
+
+  if (pathname === "/api/v1/audit-events" && request.method === "GET") {    const { data, error } = await client
       .from("audit_events")
       .select("*")
       .eq("workspace_id", workspaceId)
@@ -1173,6 +1355,24 @@ async function authenticatedRoutes(
   );
   if (discoveryRun && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
+    // Terms gate (audit gap 2): the Overpass API usage policy and OSM
+    // attribution terms are accepted per workspace before any discovery
+    // run executes.
+    await requireTermsAcceptance(
+      {
+        hasAccepted: async (wsId: string, termsId: string) => {
+          const { data, error } = await client
+            .from("terms_acceptances")
+            .select("terms_id")
+            .eq("workspace_id", wsId)
+            .eq("terms_id", termsId)
+            .maybeSingle();
+          if (error) throw new Error(error.message);
+          return data !== null;
+        },
+      },
+      workspaceId,
+    );
     const store: DiscoveryStore = {
       getSource: async (discoverySourceId: string) => {
         const { data, error } = await client
@@ -1321,6 +1521,20 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     ) {
       await requireScheduler(request);
       response = json({ data: await enqueueCanary() }, 202);
+    } else if (
+      pathname === "/api/v1/discovery/scheduled-run" &&
+      (request.method === "GET" || request.method === "POST")
+    ) {
+      // Daily QStash schedule (audit fix 1): each active discovery source
+      // runs at most once per 24h. Scheduler-signed like the worker tick.
+      await requireScheduler(request);
+      response = json({
+        data: await runScheduledDiscovery(
+          createAdminClient() as unknown as Parameters<
+            typeof runScheduledDiscovery
+          >[0],
+        ),
+      });
     } else if (
       pathname === "/api/v1/feedback/events" &&
       request.method === "POST"

@@ -373,6 +373,12 @@ function CampaignSettings({
             />{" "}
             Auto-apply future suggestions (one bounded step per evaluation)
           </label>
+          <p className="muted">
+            Automatic (low-risk): bounded nudges to maximum maturity (±5),
+            minimum opportunity (±5), confidence (±5 pts), and evidence
+            categories (±1). Always manual: geography changes, factor weights,
+            and qualifying signals.
+          </p>
           {autoApply ? (
             <p className="muted">
               Auto-apply is on: scheduled evaluations move at most one bounded

@@ -34,6 +34,14 @@ export const FeatureCandidateSchema = z.object({
   exclusionReason: z.string().optional(),
 });
 
+export const ConsentBasisSchema = z.object({
+  basisType: z.enum(["consent", "existing_relationship", "inquiry"]),
+  evidenceReference: z.string().min(1).optional(),
+  recordedAt: z.string().datetime(),
+  recordedBy: z.string().min(1),
+  notes: z.string().optional(),
+});
+
 export const LeadEngineHandoffPackageV1Schema = z.object({
   schemaVersion: z.literal(HANDOFF_SCHEMA_VERSION),
   packageId: z.string().uuid(),
@@ -107,6 +115,14 @@ export const LeadEngineHandoffPackageV1Schema = z.object({
   ),
   approvedBy: z.string().min(1),
   approvedAt: z.string().datetime(),
+  /**
+   * CASL outreach basis (audit gap 1). Optional so v1 packages minted
+   * before consent_records existed still validate; when present, the
+   * Delivery Factory can verify outreach readiness as a query instead of
+   * a memory. Recording a basis here never authorizes sending — DF
+   * outreach nodes remain draft-first with human approval.
+   */
+  consentBasis: ConsentBasisSchema.optional(),
   manifestChecksum: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
@@ -117,3 +133,4 @@ export type LeadEngineHandoffPackageV1 = z.infer<
 export type LeadEngineHandoffPackage = LeadEngineHandoffPackageV1;
 export type HandoffRequirement = z.infer<typeof RequirementSchema>;
 export type HandoffFeatureCandidate = z.infer<typeof FeatureCandidateSchema>;
+export type HandoffConsentBasis = z.infer<typeof ConsentBasisSchema>;

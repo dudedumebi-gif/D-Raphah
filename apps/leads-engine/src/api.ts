@@ -158,6 +158,16 @@ export interface JobRecord {
   created_at: string;
 }
 
+/** Discovery-funnel rollup served by GET /api/v1/funnel (see §4.2 of the
+ * PRD audit: funnel width before threshold changes). */
+export interface FunnelStats {
+  activeSources: number;
+  candidatesEvaluated: number;
+  scored: number;
+  qualified: number;
+  windowDays: number;
+}
+
 export interface LeadRecord {
   id: string;
   title: string;

@@ -19,6 +19,7 @@ import {
   type BootstrapData,
   type DiscoveryRunRecord,
   type DiscoverySourceRecord,
+  type FunnelStats,
   type JobRecord,
   type LeadRecord,
   type Membership,
@@ -401,6 +402,122 @@ function Workspace({ session }: { session: Session }) {
   );
 }
 
+function funnelDiagnosis(stats: FunnelStats): string | null {
+  if (stats.candidatesEvaluated === 0)
+    return "Volume check: nothing entered the funnel in this window — register a discovery source or queue scrapes.";
+  if (stats.qualified === 0 && stats.scored > 0)
+    return `Calibration check: ${stats.scored} scored but 0 qualified — the bar may be tighter than the market supports. Review the score distribution before loosening anything.`;
+  if (stats.qualified === 0)
+    return "No qualified leads yet — widen the top of the funnel before touching thresholds.";
+  return null;
+}
+
+/** Discovery-funnel strip: active sources → candidates evaluated → scored →
+ * qualified. Answers the operator's key diagnostic — is zero leads a volume
+ * problem or a calibration problem — before any threshold is touched.
+ * Prefers GET /api/v1/funnel; falls back to bootstrap job history (7-day
+ * window, completed jobs ≈ scored since each completed job yields exactly
+ * one maturity assessment) when the endpoint is not present. */
+function FunnelStrip({
+  data,
+  session,
+  workspaceId,
+}: {
+  data: BootstrapData;
+  session: Session;
+  workspaceId: string;
+}) {
+  const [live, setLive] = useState<FunnelStats | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    apiRequest<{ data?: FunnelStats }>(session, workspaceId, "/api/v1/funnel")
+      .then((payload) => {
+        if (cancelled) return;
+        const stats = payload?.data;
+        if (stats && typeof stats.activeSources === "number") setLive(stats);
+      })
+      .catch(() => {
+        // Endpoint not present — the bootstrap fallback below takes over.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session, workspaceId]);
+
+  const stats: FunnelStats = live ?? fallbackFunnelStats(data);
+  const stages = [
+    {
+      label: "Active sources",
+      value: stats.activeSources,
+      detail: "approved & collecting",
+    },
+    {
+      label: "Candidates evaluated",
+      value: stats.candidatesEvaluated,
+      detail: `scrape jobs · ${stats.windowDays}d`,
+    },
+    { label: "Scored", value: stats.scored, detail: "maturity assessed" },
+    { label: "Qualified", value: stats.qualified, detail: "met criteria" },
+  ];
+  const nodes: ReactNode[] = [];
+  stages.forEach((stage, index) => {
+    if (index > 0)
+      nodes.push(
+        <span key={`arrow-${index}`} className="funnel-arrow" aria-hidden="true">
+          →
+        </span>,
+      );
+    nodes.push(
+      <div key={stage.label} className="metric funnel-stage">
+        <p>{stage.label}</p>
+        <strong>{stage.value}</strong>
+        <small>{stage.detail}</small>
+      </div>,
+    );
+  });
+  const diagnosis = funnelDiagnosis(stats);
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <div>
+          <h3>Discovery funnel</h3>
+          <p>
+            Last {stats.windowDays} days
+            {live ? "" : " · estimated from job history"} — volume vs
+            calibration at a glance
+          </p>
+        </div>
+      </div>
+      <div className="funnel-strip">{nodes}</div>
+      {diagnosis ? (
+        <p className="muted funnel-diagnosis">{diagnosis}</p>
+      ) : null}
+    </section>
+  );
+}
+
+function fallbackFunnelStats(data: BootstrapData): FunnelStats {
+  const windowDays = 7;
+  const cutoff = Date.now() - windowDays * 24 * 3600 * 1000;
+  const recentCompleted = data.jobs.filter(
+    (job) =>
+      job.status === "completed" &&
+      new Date(job.created_at).getTime() >= cutoff,
+  ).length;
+  const recentQualified = data.leads.filter(
+    (lead) => new Date(lead.last_refreshed_at).getTime() >= cutoff,
+  ).length;
+  return {
+    activeSources: data.sources.filter((s) => s.status === "active").length,
+    candidatesEvaluated: recentCompleted,
+    // Each completed scrape job yields exactly one maturity assessment, so
+    // completed jobs ≈ scored candidates in the fallback.
+    scored: recentCompleted,
+    qualified: recentQualified,
+    windowDays,
+  };
+}
+
 function DashboardView({
   view,
   setView,
@@ -485,6 +602,7 @@ function DashboardView({
           }
         />
       </section>
+      <FunnelStrip data={data} session={session} workspaceId={workspaceId} />
       <section className="panel">
         <div className="panel-head">
           <div>
@@ -1135,7 +1253,11 @@ export function Discovery({
           <div className="panel-head">
             <div>
               <h3>Register discovery source</h3>
-              <p>Free Overpass adapter — no API key required.</p>
+              <p>
+                Free Overpass adapter — no API key required. Use is subject to
+                the Overpass API usage policy and OpenStreetMap attribution
+                (ODbL) terms.
+              </p>
             </div>
           </div>
           <form className="inline-form" onSubmit={(e) => void submit(e)}>
@@ -1636,6 +1758,55 @@ function Operations({ data }: { data: BootstrapData }) {
           value={String(operations.workers.length)}
           detail={operations.workers[0]?.status ?? "No heartbeat"}
         />
+      </section>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Spend gate</h3>
+            <p>Infrastructure budget: CAD 150/month until CAD 1,000 MRR</p>
+          </div>
+        </div>
+        <div className="help-content">
+          <p>
+            The operating-economics gate is a hard target: total infrastructure
+            spend across <b>Neon</b>, <b>Vercel</b>, and <b>QStash</b> stays
+            under <b>CAD 150/month</b> until the business reaches CAD 1,000
+            MRR. Billing alerts are the enforcement mechanism — set them up
+            per the runbook before introducing any per-candidate LLM spend.
+          </p>
+          <ul>
+            <li>
+              Runbook:{" "}
+              <code>docs/runbooks/spend-gate-billing-alerts.md</code>
+            </li>
+            <li>
+              <a
+                href="https://console.neon.tech"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Neon console
+              </a>{" "}
+              — billing in project / organization settings
+            </li>
+            <li>
+              <a href="https://vercel.com/dashboard" target="_blank" rel="noreferrer">
+                Vercel dashboard
+              </a>{" "}
+              — billing tab
+            </li>
+            <li>
+              <a
+                href="https://console.upstash.com"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Upstash console
+              </a>{" "}
+              — QStash billing
+            </li>
+          </ul>
+        </div>
       </section>
       <section className="panel">
         <div className="panel-head">
@@ -2299,6 +2470,14 @@ function HelpGuide() {
             and nothing is collected until you approve each source — or tick
             <b>Approve all on import</b> (owners and administrators only) to
             activate them immediately.
+          </p>
+
+          <p>
+            <b>Discovery sources</b> (the <b>Discovery</b> view) find candidate
+            businesses via the OpenStreetMap/Overpass engine. Use is subject
+            to the Overpass API usage policy and OpenStreetMap attribution
+            (ODbL) terms — see Compliance References in the product
+            documentation.
           </p>
 
           <h4>3. Criteria &amp; schedule — what counts as a lead</h4>

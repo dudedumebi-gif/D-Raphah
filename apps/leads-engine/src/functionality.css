@@ -280,6 +280,10 @@
 .job-table .table-row > span { display: flex; flex-direction: column; gap: 5px; }
 .job-table time { color: #71878a; font-size: 10px; }
 .discovery-runs-table .table-head, .discovery-runs-table .table-row { grid-template-columns: 1.3fr 1.2fr 1fr .5fr .5fr; }
+.funnel-strip { display: flex; align-items: stretch; padding: 6px 20px 8px; }
+.funnel-stage { flex: 1; min-width: 0; }
+.funnel-arrow { align-self: center; padding: 0 10px; color: #9fb3b5; font-size: 18px; }
+.funnel-diagnosis { padding: 0 20px 18px; margin: 0; }
 .danger { color: #9a3f3f; background: #fbeeee; }
 .badge { text-transform: capitalize; white-space: nowrap; }
 .status-active, .status-completed, .status-success, .status-idle { background: #e4f3df; color: #39703c; }

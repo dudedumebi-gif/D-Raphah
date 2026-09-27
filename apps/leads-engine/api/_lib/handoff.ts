@@ -58,6 +58,7 @@ interface OpportunityRow {
   confidence: number;
   latest_assessment_id: string | null;
   primary_evidence_id: string | null;
+  organization_id: string;
   org_name: string;
   org_domain: string;
 }
@@ -130,6 +131,7 @@ export async function buildHandoffPackage(
   const opportunityRows = (await client`
     select o.id, o.title, o.opportunity_potential_score, o.automation_maturity_score,
            o.confidence, o.latest_assessment_id, o.primary_evidence_id,
+           o.organization_id,
            org.name as org_name, org.normalized_domain as org_domain
     from public.opportunities o
     join public.organizations org on org.id = o.organization_id
@@ -180,6 +182,26 @@ export async function buildHandoffPackage(
     `(confidence ${Number(opportunity.confidence).toFixed(2)}).` +
     (summary ? ` ${summary}` : "");
 
+  // Latest CASL basis for the opportunity (or its organization) is carried
+  // in the package so DF can verify outreach readiness as a query. Absent
+  // means unrecorded — DF must treat it as not-ready, never as authorized.
+  const consentRows = (await client`
+    select basis_type, evidence_reference, recorded_at, recorded_by, notes
+    from public.consent_records
+    where workspace_id = ${input.workspaceId}::uuid
+      and (opportunity_id = ${input.opportunityId}::uuid
+        or organization_id = ${opportunity.organization_id}::uuid)
+    order by recorded_at desc
+    limit 1
+  `) as unknown as Array<{
+    basis_type: string;
+    evidence_reference: string | null;
+    recorded_at: string;
+    recorded_by: string;
+    notes: string | null;
+  }>;
+  const consentRow = consentRows[0];
+
   const base = {
     schemaVersion: HANDOFF_SCHEMA_VERSION,
     packageId: randomUUID(),
@@ -221,6 +243,18 @@ export async function buildHandoffPackage(
     openItems: [],
     approvedBy: input.approvedBy,
     approvedAt: new Date().toISOString(),
+    consentBasis: consentRow
+      ? {
+          basisType: consentRow.basis_type as
+            | "consent"
+            | "existing_relationship"
+            | "inquiry",
+          evidenceReference: consentRow.evidence_reference ?? undefined,
+          recordedAt: consentRow.recorded_at,
+          recordedBy: consentRow.recorded_by,
+          notes: consentRow.notes ?? undefined,
+        }
+      : undefined,
   };
 
   const { privateKeyPem } = loadKeysFromEnv("HANDOFF_SIGNING");
@@ -282,6 +316,73 @@ interface OutboxRow {
 }
 
 /**
+ * POSTs one already-claimed outbox row to the Delivery Factory intake and
+ * marks it sent, or records a backoff retry / terminal failure on the row.
+ * Never throws: every failure path is recorded on the row itself, which the
+ * scheduled worker tick retries. Returns the per-row outcome.
+ */
+async function sendClaimedRow(
+  client: SqlClient,
+  row: OutboxRow,
+  intakeUrl: string,
+): Promise<{ dispatched: number; failed: number }> {
+  const outcome = { dispatched: 0, failed: 0 };
+  try {
+    const body = canonicalJsonStringify(row.package);
+    const timestamp = new Date().toISOString();
+    const nonce = randomUUID();
+    const contentSha256 = createHash("sha256")
+      .update(body, "utf8")
+      .digest("hex");
+    const response = await fetch(intakeUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-raphah-signature": row.signature,
+        "idempotency-key": row.idempotency_key,
+        "x-raphah-timestamp": timestamp,
+        "x-raphah-nonce": nonce,
+        "content-sha256": contentSha256,
+      },
+      body,
+      signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Delivery intake responded with status ${response.status}`,
+      );
+    }
+    await client`
+      update public.handoff_outbox
+      set status = 'sent', dispatched_at = now(), last_error = null,
+          updated_at = now()
+      where id = ${row.id}::uuid
+    `;
+    outcome.dispatched += 1;
+  } catch (error) {
+    const attempts = row.attempts + 1;
+    const exhausted = attempts >= MAX_DISPATCH_ATTEMPTS;
+    const cappedBackoffMinutes = Math.min(2 ** attempts, MAX_BACKOFF_MINUTES);
+    // Equal jitter: half the capped backoff plus a uniform random half, so
+    // rows that fail together spread their retries instead of stampeding.
+    const backoffMinutes =
+      cappedBackoffMinutes / 2 + Math.random() * (cappedBackoffMinutes / 2);
+    const message = error instanceof Error ? error.message : String(error);
+    await client`
+      update public.handoff_outbox
+      set status = ${exhausted ? "failed" : "pending"},
+          attempts = ${attempts},
+          next_attempt_at = now() + (${backoffMinutes}::double precision * interval '1 minute'),
+          last_error = ${message.slice(0, 2000)},
+          updated_at = now()
+      where id = ${row.id}::uuid
+    `;
+    outcome.failed += 1;
+  }
+  return outcome;
+}
+
+/**
  * Drains due handoff_outbox rows and POSTs each signed package to the
  * Delivery Factory intake. Never throws: per-row failures are retried with
  * exponential backoff (2^attempts minutes, capped at 6h, plus equal jitter)
@@ -309,65 +410,59 @@ export async function dispatchDueHandoffs(
   `) as unknown as OutboxRow[];
 
   for (const row of rows) {
-    try {
-      await client`
-        update public.handoff_outbox
-        set status = 'dispatching', updated_at = now()
-        where id = ${row.id}::uuid
-      `;
-      const body = canonicalJsonStringify(row.package);
-      const timestamp = new Date().toISOString();
-      const nonce = randomUUID();
-      const contentSha256 = createHash("sha256")
-        .update(body, "utf8")
-        .digest("hex");
-      const response = await fetch(intakeUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-raphah-signature": row.signature,
-          "idempotency-key": row.idempotency_key,
-          "x-raphah-timestamp": timestamp,
-          "x-raphah-nonce": nonce,
-          "content-sha256": contentSha256,
-        },
-        body,
-        signal: AbortSignal.timeout(DISPATCH_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        throw new Error(
-          `Delivery intake responded with status ${response.status}`,
-        );
-      }
-      await client`
-        update public.handoff_outbox
-        set status = 'sent', dispatched_at = now(), last_error = null,
-            updated_at = now()
-        where id = ${row.id}::uuid
-      `;
-      outcome.dispatched += 1;
-    } catch (error) {
-      const attempts = row.attempts + 1;
-      const exhausted = attempts >= MAX_DISPATCH_ATTEMPTS;
-      const cappedBackoffMinutes = Math.min(2 ** attempts, MAX_BACKOFF_MINUTES);
-      // Equal jitter: half the capped backoff plus a uniform random half, so
-      // rows that fail together spread their retries instead of stampeding.
-      const backoffMinutes =
-        cappedBackoffMinutes / 2 +
-        Math.random() * (cappedBackoffMinutes / 2);
-      const message =
-        error instanceof Error ? error.message : String(error);
-      await client`
-        update public.handoff_outbox
-        set status = ${exhausted ? "failed" : "pending"},
-            attempts = ${attempts},
-            next_attempt_at = now() + (${backoffMinutes}::double precision * interval '1 minute'),
-            last_error = ${message.slice(0, 2000)},
-            updated_at = now()
-        where id = ${row.id}::uuid
-      `;
-      outcome.failed += 1;
-    }
+    await client`
+      update public.handoff_outbox
+      set status = 'dispatching', updated_at = now()
+      where id = ${row.id}::uuid
+    `;
+    const result = await sendClaimedRow(client, row, intakeUrl);
+    outcome.dispatched += result.dispatched;
+    outcome.failed += result.failed;
   }
   return outcome;
+}
+
+/**
+ * Best-effort immediate dispatch of one freshly-enqueued outbox row,
+ * bypassing the 5-minute worker tick so a lead reaches DF in seconds.
+ *
+ * The claim is conditional on `status = 'pending'`: when the scheduled tick
+ * (or a duplicate request) already claimed the row, this is a no-op instead
+ * of a double send — and the receiver dedupes on `idempotency-key` anyway.
+ * Returns true when a dispatch attempt was made. Never throws: the outbox
+ * row plus the scheduled tick remain the durable fallback.
+ */
+export async function dispatchHandoffById(
+  client: SqlClient,
+  outboxId: string,
+): Promise<boolean> {
+  const intakeUrl = process.env.DELIVERY_INTAKE_URL;
+  if (!intakeUrl) return false;
+  const claimed = (await client`
+    update public.handoff_outbox
+    set status = 'dispatching', updated_at = now()
+    where id = ${outboxId}::uuid and status = 'pending'
+    returning id, workspace_id, idempotency_key, package, manifest_checksum,
+              signature, attempts
+  `) as unknown as OutboxRow[];
+  const row = claimed[0];
+  if (!row) return false;
+  await sendClaimedRow(client, row, intakeUrl);
+  return true;
+}
+
+/**
+ * Immediate-dispatch wrapper for the POST /api/v1/handoffs route. Resolves
+ * (never rejects) so a dispatch failure can never turn a successful enqueue
+ * into a non-201 response.
+ */
+export async function tryImmediateDispatch(
+  client: SqlClient,
+  outboxId: string,
+): Promise<boolean> {
+  try {
+    return await dispatchHandoffById(client, outboxId);
+  } catch {
+    return false;
+  }
 }

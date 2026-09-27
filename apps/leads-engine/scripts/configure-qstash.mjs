@@ -22,6 +22,14 @@ const schedules = [
     cron: "0 * * * *",
     label: "lead-engine-canary",
   },
+  {
+    scheduleId: "raphah-lead-discovery-v1",
+    destination: `${baseUrl}/api/v1/discovery/scheduled-run`,
+    // Daily at 06:10 UTC, after the canary window — each active discovery
+    // source runs at most once per 24h, guarded inside the scheduler.
+    cron: "10 6 * * *",
+    label: "lead-engine-discovery",
+  },
 ];
 
 for (const schedule of schedules) {

@@ -13,6 +13,7 @@ import {
 import { truncateToByteLength } from "@raphah/handoff-contract";
 import { createAdminClient } from "./neon.js";
 import { dispatchDueHandoffs, type SqlClient } from "./handoff.js";
+import { checkCanaryAlerts, checkDeadLetterAlerts } from "./alerts.js";
 import { log, reportError } from "./telemetry.js";
 
 type DatabaseClient = ReturnType<typeof createAdminClient>;
@@ -66,6 +67,7 @@ export interface WorkerTickResult {
   handoffsDispatched: number;
   handoffsFailed: number;
   autoApplied: number;
+  alertsEmitted: number;
 }
 
 function collectionPolicy(row: PolicyRow): CollectionPolicy {
@@ -297,6 +299,7 @@ export async function runWorkerTick(
     handoffsDispatched: 0,
     handoffsFailed: 0,
     autoApplied: 0,
+    alertsEmitted: 0,
   };
   const now = new Date().toISOString();
   const deploymentId =
@@ -371,12 +374,21 @@ export async function runWorkerTick(
         where id = ${campaign.id}::uuid
       `;
       // humanValidatorId = campaign owner-of-record (updated_by).
+      // NOTE: log_workspace_event() requires a human JWT session
+      // (is_workspace_member), so the service-role worker cannot use it —
+      // write the audit row by direct insert with actor_id = null (system),
+      // the same pattern as alerts.ts.
       await client`
-        select public.log_workspace_event(
+        insert into public.audit_events(
+          workspace_id, actor_id, action, resource_type, resource_id,
+          outcome, reason, before_state, after_state
+        ) values (
           ${campaign.workspace_id}::uuid,
+          null,
           'criteria.auto_applied',
           'scrape_campaigns',
           ${campaign.id}::text,
+          'success',
           ${`Auto-applied one bounded ${suggestion.direction} step (validator: ${campaign.updated_by ?? "unknown"})`}::text,
           ${JSON.stringify(campaign.criteria)}::jsonb,
           ${JSON.stringify(next)}::jsonb
@@ -412,6 +424,20 @@ export async function runWorkerTick(
     log("error", "handoff_dispatch_tick_failed", { workerId });
     await reportError(error, { workerId });
     result.handoffsFailed += 1;
+  }
+  // Operator alerting (audit gap 4): canary failures and dead-letter
+  // breaches must reach the operator without dashboard-watching. Alerting
+  // is failure-isolated and deduped inside the alert module, so it can
+  // never fail the tick or spam on repeat ticks.
+  try {
+    const sql = client as unknown as Parameters<
+      typeof checkCanaryAlerts
+    >[0];
+    result.alertsEmitted =
+      (await checkCanaryAlerts(sql)) + (await checkDeadLetterAlerts(sql));
+  } catch (error) {
+    log("error", "alert_tick_failed", { workerId });
+    await reportError(error, { workerId });
   }
   await client`
     update public.worker_nodes

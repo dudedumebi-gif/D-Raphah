@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
-import { createDeliveryDb } from "./_lib/db.js";
+import { createDeliveryDb, getDb } from "./_lib/db.js";
+import { triggerLeadHandoffWorkflows } from "./_lib/handoff-triggers.js";
 import {
   corsHeadersFor,
   handleIntake,
@@ -57,6 +58,13 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
     toIntakeRequest(req, rawBody),
     createDeliveryDb(),
     env,
+    // Freshly-accepted handoffs immediately trigger published lead_handoff
+    // workflows (failure-isolated inside handleIntake; replays never
+    // re-execute). Draft-first: the engine runs with no provider hooks, so
+    // outreach nodes record drafts for human approval — nothing sends.
+    {
+      onHandoffAccepted: (pkg) => triggerLeadHandoffWorkflows(getDb(), pkg),
+    },
   );
   sendJson(res, result.status, result.headers, result.body);
 }

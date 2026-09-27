@@ -12,6 +12,7 @@
  */
 
 import type { NeonClient } from "./db.js";
+import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
 
@@ -401,11 +402,68 @@ export async function listWorkflows(db: NeonClient): Promise<Workflow[]> {
   }));
 }
 
+export interface TriggerableWorkflow {
+  id: string;
+  name: string;
+  trigger_config: Record<string, unknown> | null;
+}
+
+/**
+ * Published workflows subscribed to a trigger type (e.g. 'lead_handoff').
+ * Trigger matching reuses the workflows table's own trigger_type column —
+ * there is no second trigger registry.
+ */
+export async function listPublishedWorkflowsByTrigger(
+  db: NeonClient,
+  triggerType: string,
+): Promise<TriggerableWorkflow[]> {
+  const rows = await q(db)`
+    select id, name, trigger_config
+    from public.workflows
+    where trigger_type = ${triggerType} and status = 'published'
+    order by created_at asc`;
+  return rows.map((r) => ({
+    id: r.id as string,
+    name: r.name as string,
+    trigger_config: (r.trigger_config ?? null) as Record<string, unknown> | null,
+  }));
+}
+
+export interface LeadHandoffTriggerPayload {
+  lead: { name: string; phone?: string; score?: number };
+  organization_name: string;
+  /** The full accepted package, for templates that need more than the lead summary. */
+  package: LeadEngineHandoffPackage;
+}
+
+/**
+ * Shapes an accepted handoff package into the trigger payload that
+ * 'lead_handoff' templates reference ({{trigger.lead.name}},
+ * {{trigger.lead.phone}}, {{trigger.lead.score}}, {{trigger.organization_name}}).
+ *
+ * The v1 contract carries no phone number and no numeric lead score, so both
+ * are undefined here — renderTemplate substitutes "" for missing values and
+ * templates must tolerate their absence. Recording a basis here never
+ * authorizes sending: DF outreach nodes stay draft-first with human approval.
+ */
+export function buildLeadHandoffTriggerPayload(
+  pkg: LeadEngineHandoffPackage,
+): LeadHandoffTriggerPayload {
+  return {
+    lead: {
+      name: pkg.stakeholders[0]?.name ?? pkg.organization.name,
+      phone: undefined,
+      score: undefined,
+    },
+    organization_name: pkg.organization.name,
+    package: pkg,
+  };
+}
+
 export async function getWorkflow(
   db: NeonClient,
   id: string,
-): Promise<Workflow | null> {
-  const rows = await q(db)`
+): Promise<Workflow | null> {  const rows = await q(db)`
     select id, name, description, status, trigger_type, trigger_config,
            created_by, created_at, updated_at, published_at
     from public.workflows where id = ${id}`;
