@@ -16,7 +16,7 @@ Build the Lead Engine as a compliant business development operating system. It d
 
 **What changed in v2:** the v1 skeleton described intent; v2 documents what was actually built and shipped to production. The Lead Engine is now a live multi-workspace product with a source approval gate, durable scrape-job lifecycle, automation-maturity scoring, qualified-lead export, a criteria feedback loop, and a signed handoff into the Delivery Factory for fulfillment. Outreach remains draft-only in the MVP: the system drafts, a human approves and sends.
 
-**What changed in v2.1:** an independent audit's "genuinely missing" items were implemented and the document synced to the code: numeric retry/dead-letter policy (§8.2), handoff outbox idempotency and retry design (§12–§13), CASL consent records (§11.1, §12), Overpass/OSM terms acceptance gate (§8.1, §20), scheduled Overpass discovery (§7), funnel-width diagnostics on Overview (§6), operator alerting and backup/restore + spend-gate runbooks (§14), and a Delivery Factory appendix (§22). The Vercel Hobby-tier commercial-use question is recorded as a pending owner decision (§18).
+**What changed in v2.1:** an independent audit's "genuinely missing" items were implemented and the document synced to the code: numeric retry/dead-letter policy (§8.2), handoff outbox idempotency and retry design (§12–§13), CASL consent records (§11.1, §12), Overpass/OSM terms acceptance gate (§8.1, §20), scheduled Overpass discovery (§7), funnel-width diagnostics on Overview (§6), operator alerting and backup/restore + spend-gate runbooks (§14), and a Delivery Factory appendix (§22). The Vercel Hobby-tier commercial-use question was resolved 2026-09-27 (stay on Hobby through the pre-revenue canary; Pro at sign-off or first revenue, §18).
 
 ## 1 Executive Summary
 
@@ -344,7 +344,7 @@ Until the business has produced at least CAD 1,000 in recurring monthly revenue,
 - [x] CASL consent records in the data model, wired to the handoff package
 - [ ] 72-hour canary: clock starts on first successful canary run; no final sign-off before it completes
 - [ ] First real qualified lead reviewed by the operator
-- [ ] Vercel plan decision: confirm Hobby-tier commercial use is an acceptable time-boxed exception or budget a paid plan (owner decision, before canary sign-off)
+- [x] Vercel plan decision: stay on Hobby through the pre-revenue canary; upgrade to Pro ($20/seat/mo) at canary sign-off or first revenue, whichever comes first (owner decision 2026-09-27)
 
 Bulk-release policy: changes ship in batched releases to conserve the Vercel API deployment quota; UI look-and-feel is verified locally before release.
 
@@ -377,11 +377,12 @@ Bulk-release policy: changes ship in batched releases to conserve the Vercel API
 - CASL consent basis is a structured `consent_records` row carried in the handoff package; required before first outreach (2026-09-26).
 - Overpass/OSM terms acceptance is a workspace-level gate on discovery runs (2026-09-26).
 - Scheduled discovery runs daily per active source; auto-apply stays limited to bounded numeric nudges (2026-09-26).
+- Vercel Hobby tier for pre-revenue production: stay on Hobby through the 72-hour canary, upgrade to Pro ($20/seat/month) at canary sign-off or first revenue, whichever comes first (owner decision 2026-09-27). Hobby's Fair Use policy restricts it to non-commercial use, so this is a bounded pre-revenue window, not a permanent posture.
 
 **Open:**
 
 - SMS/AI provider selection and cost envelope for Delivery Factory automation at scale.
-- **Vercel plan for commercial production use (Gap 7):** Hobby-tier terms are generally intended for non-commercial projects; production use for a revenue-generating advisory business needs an explicit owner decision — either document Hobby use as a time-boxed, reviewed exception under the CAD 150/month gate, or budget a paid plan. Review trigger: before 72-hour canary sign-off, since the canary certifies production readiness. This is not asserted as a terms violation here; it is a diligence item for the owner.
+**Resolved (2026-09-27):** stay on Hobby through the pre-revenue 72-hour canary; upgrade to Vercel Pro ($20/seat/month) at canary sign-off or first revenue, whichever comes first. Rationale: Hobby's Fair Use policy ("intended for personal, non-commercial use") prohibits commercial production workloads and Vercel suspends without warning, so the compliant posture at revenue is Pro. Trigger owner: Chidumebi. Reminder: re-check at canary verdict.
 - Whether the product ever becomes a multi-tenant SaaS, and on what pricing.
 - Additional source categories pending terms review (procurement APIs, review platforms).
 
@@ -389,7 +390,7 @@ Bulk-release policy: changes ship in batched releases to conserve the Vercel API
 
 Shipped (Phase 0–3): production stack, source approval gate, durable scrape jobs, maturity scoring, qualified-lead queue, criteria suggestions, hierarchical audit log, lead export (CSV/JSON) with Send-to-DF, signed LE→DF handoff with outbox idempotency and bounded retry, DF workflow automation (15 node kinds), DF automation templates, in-app help, operator auth, Overpass discovery layer (sources, runs, register form, Run now, daily scheduled runs, terms-acceptance gate), discovery-funnel width metric, re-queue scrape from Criteria & schedule, DF lead follow-up (SMS, draft-first) demo workflow, operator alerting (canary failure, dead-letter threshold) via webhook, CASL consent records, backup/restore and spend-gate runbooks.
 
-Next: 72-hour canary completion, first real qualified lead, SMS/AI provider wiring, multi-day drip orchestration, rollback/credential-rotation runbooks, backup/restore drill execution, Vercel plan decision (before canary sign-off), multi-ICP parallel campaign scoring, PIPEDA access/deletion runbook once personal data accumulates, North Star instrumentation once volume exists.
+Next: 72-hour canary completion, first real qualified lead, SMS/AI provider wiring, multi-day drip orchestration, rollback/credential-rotation runbooks, backup/restore drill execution, Vercel Pro upgrade at canary sign-off or first revenue (decided 2026-09-27), multi-ICP parallel campaign scoring, PIPEDA access/deletion runbook once personal data accumulates, North Star instrumentation once volume exists.
 
 ## 20 Compliance References
 
