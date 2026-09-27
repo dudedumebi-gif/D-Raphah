@@ -33,6 +33,13 @@ const schedules = [
 ];
 
 for (const schedule of schedules) {
+  // Idempotent: delete-then-create so re-runs converge on the current
+  // cron/destination instead of 409ing on the stable scheduleId.
+  try {
+    await client.schedules.delete(schedule.scheduleId);
+  } catch {
+    // Absent schedule: nothing to delete.
+  }
   const result = await client.schedules.create({
     ...schedule,
     method: "POST",
