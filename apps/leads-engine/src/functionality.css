@@ -273,6 +273,11 @@
 .split-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(320px, .75fr); gap: 18px; }
 .form-panel { padding-bottom: 22px; }
 .form-panel .inline-form { padding: 0 20px; margin-top: 0; }
+/* Plain .panel cards never gave their body content the card gutter: forms
+   and direct-child paragraphs sat flush against the card edges. */
+.panel .inline-form:not(.edit-form) { padding: 0 20px; }
+.panel > p,
+.record-list > p { padding-left: 20px; padding-right: 20px; }
 .form-strip { margin-bottom: 18px; padding: 17px 20px; }
 .horizontal-form { display: grid; grid-template-columns: minmax(210px, .7fr) minmax(300px, 1.5fr) auto; gap: 12px; align-items: end; }
 .horizontal-form input, .horizontal-form select { width: 100%; }
