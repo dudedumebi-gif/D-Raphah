@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   CriteriaSchema,
+  detectSignals,
   evaluateGeography,
+  isSuggestionSuppressed,
   suggestCriteriaAdjustment,
   evaluateCanarySoak,
 } from "../api/_lib/domain";
@@ -180,7 +183,7 @@ describe("bounded criteria recommendations", () => {
       opportunityPotentialMin: 20,
       confidenceMin: 0.1,
     });
-    expect(suggestCriteriaAdjustment(loose, 0).changes).toEqual({
+    expect(suggestCriteriaAdjustment(loose, 0).changes).toMatchObject({
       automationMaturityMax: 90,
       opportunityPotentialMin: 20,
       confidenceMin: 0.1,
@@ -190,7 +193,7 @@ describe("bounded criteria recommendations", () => {
       opportunityPotentialMin: 95,
       confidenceMin: 0.95,
     });
-    expect(suggestCriteriaAdjustment(strict, 100).changes).toEqual({
+    expect(suggestCriteriaAdjustment(strict, 100).changes).toMatchObject({
       automationMaturityMax: 10,
       opportunityPotentialMin: 95,
       confidenceMin: 0.95,
@@ -304,5 +307,71 @@ describe("scheduler authorization", () => {
     } finally {
       if (previous !== undefined) process.env.WORKER_SECRET = previous;
     }
+  });
+});
+
+describe("suggestion suppression", () => {
+  it("does not suppress when no suggestion was applied yet", () => {
+    expect(isSuggestionSuppressed(null, 0)).toBe(false);
+    expect(isSuggestionSuppressed({}, 0)).toBe(false);
+    expect(isSuggestionSuppressed({ last_suggestion_at: null }, 0)).toBe(false);
+  });
+  it("suppresses while the observed count is unchanged", () => {
+    const campaign = {
+      last_suggestion_at: new Date().toISOString(),
+      last_suggestion_observed_count: 0,
+    };
+    expect(isSuggestionSuppressed(campaign, 0)).toBe(true);
+  });
+  it("releases suppression when new output arrives", () => {
+    const campaign = {
+      last_suggestion_at: new Date().toISOString(),
+      last_suggestion_observed_count: 0,
+    };
+    expect(isSuggestionSuppressed(campaign, 3)).toBe(false);
+  });
+});
+
+describe("production-readiness implementation", () => {
+  const migration = readFileSync(
+    new URL(
+      "../neon/migrations/202609270001_source_budget_and_audit.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const worker = readFileSync(
+    new URL("../api/_lib/worker.ts", import.meta.url),
+    "utf8",
+  );
+  const fixture = readFileSync(
+    new URL("../public/canary-source.html", import.meta.url),
+    "utf8",
+  );
+
+  it("enforces budgets, source pacing, audit coverage, and retention in durable SQL", () => {
+    expect(migration).toContain("source_collection_reservations");
+    expect(migration).toContain("reserve_source_collection");
+    expect(migration).toContain("daily_budget");
+    expect(migration).toContain("monthly_budget");
+    expect(migration).toContain("prune_operational_history");
+    expect(migration).toContain("handoff_outbox");
+  });
+
+  it("reserves persistent capacity before network collection", () => {
+    expect(worker.indexOf("reserve_source_collection")).toBeGreaterThan(-1);
+    expect(worker.indexOf("reserve_source_collection")).toBeLessThan(
+      worker.indexOf("collectUrl("),
+    );
+  });
+
+  it("keeps the owned canary deterministic and evidence-backed", () => {
+    const signals = detectSignals(fixture);
+    expect(signals.some((signal) => signal.polarity === "manual")).toBe(true);
+    expect(signals.some((signal) => signal.polarity === "commercial")).toBe(
+      true,
+    );
+    expect(fixture).toContain("43.6532");
+    expect(fixture).toContain("noindex,nofollow");
   });
 });

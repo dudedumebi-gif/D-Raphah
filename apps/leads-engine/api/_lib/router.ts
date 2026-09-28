@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CriteriaSchema,
   evaluateCanarySoak,
+  isSuggestionSuppressed,
   mergeSuggestionChanges,
   percentile95,
   suggestCriteriaAdjustment,
@@ -20,9 +21,15 @@ import { log, reportError, requestContext } from "./telemetry.js";
 import {
   buildHandoffPackage,
   enqueueHandoffOutbox,
+  tryImmediateDispatch,
   type SqlClient,
 } from "./handoff.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
+import {
+  dedupeRows,
+  mapRowToSourceInput,
+  normalizeSourceUrl,
+} from "./source-import.js";
 import { enqueueCanary, runWorkerTick } from "./worker.js";
 import {
   DiscoveryGeoInputSchema,
@@ -34,6 +41,20 @@ import {
   type DiscoverySourceRow,
   type DiscoveryStore,
 } from "./discovery/run.js";
+import {
+  OVERPASS_OSM_TERMS_ID,
+  OVERPASS_OSM_TERMS_VERSION,
+  requireTermsAcceptance,
+} from "./discovery/terms.js";
+import { runScheduledDiscovery } from "./discovery/schedule.js";
+
+const ConsentInputSchema = z.object({
+  organizationId: z.string().uuid().optional(),
+  opportunityId: z.string().uuid().optional(),
+  basisType: z.enum(["consent", "existing_relationship", "inquiry"]),
+  evidenceReference: z.string().min(1).max(500).optional(),
+  notes: z.string().max(2_000).optional(),
+});
 
 const SourceInputSchema = z.object({
   name: z.string().min(2).max(160),
@@ -57,6 +78,24 @@ const ManualJobSchema = z.object({
   sourceId: z.string().uuid(),
   targetUrl: z.string().url(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
+});
+
+const SourceImportBodySchema = z.object({
+  rows: z
+    .array(
+      z.object({
+        name: z.string(),
+        website: z.string(),
+        collectionMethod: z
+          .enum(["api", "rss", "sitemap", "static_html"])
+          .optional(),
+        businessPurpose: z.string().optional(),
+      }),
+    )
+    .min(1)
+    .max(200),
+  contactEmail: z.string().email(),
+  approveAll: z.boolean().optional().default(false),
 });
 
 const DiscoverySourceInputSchema = z.object({
@@ -368,7 +407,7 @@ async function authenticatedRoutes(
         client
           .from("audit_events")
           .select(
-            "id,action,resource_type,resource_id,outcome,reason,actor_id,correlation_id,created_at",
+            "id,action,resource_type,resource_id,outcome,reason,actor_id,correlation_id,before_state,after_state,created_at",
           )
           .eq("workspace_id", workspaceId)
           .order("created_at", { ascending: false })
@@ -405,17 +444,19 @@ async function authenticatedRoutes(
       workspaceId,
       memberships: memberships.data,
       sources: sources.data,
-      campaigns: (campaigns.data ?? []).map((campaign: any) => ({
-        ...campaign,
-        criteria_suggestion: suggestCriteriaAdjustment(
-          campaign.criteria,
-          Number(
-            recentLeads.data?.find(
-              (row: { campaign_id: string }) => row.campaign_id === campaign.id,
-            )?.qualified_count ?? 0,
-          ),
-        ),
-      })),
+      campaigns: (campaigns.data ?? []).map((campaign: any) => {
+        const observed = Number(
+          recentLeads.data?.find(
+            (row: { campaign_id: string }) => row.campaign_id === campaign.id,
+          )?.qualified_count ?? 0,
+        );
+        return {
+          ...campaign,
+          criteria_suggestion: isSuggestionSuppressed(campaign, observed)
+            ? null
+            : suggestCriteriaAdjustment(campaign.criteria, observed),
+        };
+      }),
       jobs: jobs.data,
       leads: leads.data,
       audit: audit.data,
@@ -431,6 +472,93 @@ async function authenticatedRoutes(
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
     return json({ data });
+  }
+  if (pathname === "/api/v1/audit" && request.method === "GET") {
+    // Any active workspace member may read the audit trail; no elevated
+    // role required. The bootstrap's embedded 100-event fetch is untouched.
+    const params = new URL(request.url).searchParams;
+    const days = Math.min(
+      Math.max(Number.parseInt(params.get("days") ?? "7", 10) || 7, 1),
+      30,
+    );
+    const limit = Math.min(
+      Math.max(Number.parseInt(params.get("limit") ?? "500", 10) || 500, 1),
+      2000,
+    );
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+    const { data, error } = await client
+      .from("audit_events")
+      .select(
+        "id,action,resource_type,resource_id,outcome,reason,actor_id,correlation_id,before_state,after_state,created_at",
+      )
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+  if (pathname === "/api/v1/sources/import" && request.method === "POST") {
+    const body = SourceImportBodySchema.parse(await bodyJson(request));
+    requireRole(
+      context,
+      body.approveAll
+        ? ["owner", "administrator"]
+        : ["owner", "administrator", "analyst"],
+    );
+    const { data: existingRows, error: existingError } = await client
+      .from("source_definitions")
+      .select("base_url")
+      .eq("workspace_id", workspaceId);
+    if (existingError) throw new Error(existingError.message);
+    const existingUrls = new Set<string>();
+    for (const row of (existingRows ?? []) as Array<{ base_url: string }>) {
+      try {
+        existingUrls.add(normalizeSourceUrl(row.base_url));
+      } catch {
+        // Legacy rows that no longer normalize cannot collide; ignore them.
+      }
+    }
+    const indexed = body.rows.map((row, index) => ({ index, row }));
+    const { unique, skipped } = dedupeRows(indexed, existingUrls);
+    const created: Array<{ id: string; name: string }> = [];
+    const errors: Array<{ index: number; name: string; error: string }> = [];
+    let approved = 0;
+    for (const { index, row } of unique) {
+      const label = row.name?.trim() || `row ${index + 1}`;
+      try {
+        const input = SourceInputSchema.parse(
+          mapRowToSourceInput(row, body.contactEmail),
+        );
+        const { data, error } = await client.rpc("create_source_with_policy", {
+          p_workspace_id: workspaceId,
+          p_input: input,
+        });
+        if (error) throw new Error(error.message);
+        const sourceId = (data as { sourceId?: string } | null)?.sourceId;
+        if (!sourceId) throw new Error("Source creation returned no id");
+        if (body.approveAll) {
+          const { error: approveError } = await client.rpc(
+            "approve_source_policy",
+            {
+              p_workspace_id: workspaceId,
+              p_source_id: sourceId,
+              p_reason: "Bulk-approved on CSV import.",
+            },
+          );
+          if (approveError) throw new Error(approveError.message);
+          approved += 1;
+        }
+        created.push({ id: sourceId, name: input.name });
+      } catch (error) {
+        errors.push({
+          index,
+          name: label,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return json({ data: { created, skipped, errors, approved } }, 201);
   }
   if (pathname === "/api/v1/sources" && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
@@ -458,6 +586,54 @@ async function authenticatedRoutes(
     if (error) throw new Error(error.message);
     return json({ data });
   }
+  const sourceUpdate = pathname.match(/^\/api\/v1\/sources\/([0-9a-f-]+)$/i);
+  if (sourceUpdate && request.method === "PATCH") {
+    requireRole(context, ["owner", "administrator"]);
+    const input = z
+      .object({
+        name: z.string().min(1).max(200).optional(),
+        baseUrl: z.string().url().max(2000).optional(),
+        collectionMethod: z
+          .enum(["static_html", "rss", "sitemap", "api"])
+          .optional(),
+        businessPurpose: z.string().min(10).max(2000).optional(),
+      })
+      .parse(await bodyJson(request));
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+    if (input.name !== undefined) {
+      sets.push(`name = $${idx++}`);
+      params.push(input.name);
+    }
+    if (input.baseUrl !== undefined) {
+      sets.push(`base_url = $${idx++}`);
+      params.push(input.baseUrl);
+    }
+    if (input.collectionMethod !== undefined) {
+      sets.push(`collection_method = $${idx++}`);
+      params.push(input.collectionMethod);
+    }
+    if (input.businessPurpose !== undefined) {
+      sets.push(`business_purpose = $${idx++}`);
+      params.push(input.businessPurpose);
+    }
+    if (sets.length === 0)
+      throw Object.assign(new Error("No fields to update"), { statusCode: 400 });
+    const sql = createAdminClient() as unknown as (
+      query: string,
+      params: unknown[],
+    ) => Promise<Array<Record<string, unknown>>>;
+    const rows = await sql(
+      `update public.source_definitions set ${sets.join(", ")}, updated_at = now()
+       where workspace_id = $${idx++} and id = $${idx++}
+       returning id, name, base_url, collection_method, business_purpose, status`,
+      [...params, workspaceId, sourceUpdate[1]],
+    );
+    if (!rows.length)
+      throw Object.assign(new Error("Source not found"), { statusCode: 404 });
+    return json({ data: rows[0] });
+  }
 
   if (pathname === "/api/v1/criteria" && request.method === "GET") {
     const { data, error } = await client
@@ -482,10 +658,25 @@ async function authenticatedRoutes(
       })
       .parse(await bodyJson(request));
     const scheduleEnabled = input.scheduleEnabled;
+    // Capture the current observed count so the suggestion stays suppressed
+    // until fresh scrape output changes it.
+    const { data: counts } = await client.rpc("campaign_qualified_counts", {
+      p_workspace_id: workspaceId,
+    });
+    const observed = Number(
+      (counts as Array<{ campaign_id: string; qualified_count: number }> | null)?.find(
+        (row) => row.campaign_id === campaignCriteria[1],
+      )?.qualified_count ?? 0,
+    );
     const updates: Record<string, unknown> = {
       criteria: input.criteria,
       criteria_version: new Date().toISOString(),
       updated_by: context.user.id,
+      // Manual save also suppresses the current suggestion cycle; a new
+      // suggestion appears only when fresh scrape output arrives.
+      last_suggestion_at: new Date().toISOString(),
+      last_suggestion_observed_count: observed,
+      last_suggestion_direction: "manual",
     };
     if (scheduleEnabled !== undefined)
       updates.schedule_enabled = scheduleEnabled;
@@ -583,6 +774,12 @@ async function authenticatedRoutes(
         criteria: merged,
         criteria_version: new Date().toISOString(),
         updated_by: context.user.id,
+        // Suppress further suggestions until the observed qualified count
+        // changes (new scrape data), so the Criteria page doesn't immediately
+        // re-suggest against the same output.
+        last_suggestion_at: new Date().toISOString(),
+        last_suggestion_observed_count: observed,
+        last_suggestion_direction: suggestion.direction,
       })
       .eq("workspace_id", workspaceId)
       .eq("id", campaignId)
@@ -892,6 +1089,14 @@ async function authenticatedRoutes(
         signature,
       },
     );
+    // Best-effort immediate dispatch (handoff gap 1): the 5-minute worker
+    // tick stays the durable fallback, but an accepted lead should reach DF
+    // in seconds, not minutes. tryImmediateDispatch never rejects, so the
+    // 201 enqueue response below is unaffected by dispatch failures.
+    await tryImmediateDispatch(
+      createAdminClient() as unknown as SqlClient,
+      enqueued.id,
+    );
     return json(
       {
         id: enqueued.id,
@@ -902,8 +1107,167 @@ async function authenticatedRoutes(
     );
   }
 
-  if (pathname === "/api/v1/audit-events" && request.method === "GET") {
+  // CASL consent records (audit gap 1): what outreach basis exists for an
+  // organization/opportunity, who recorded it, and what evidence supports
+  // it. The outreach checklist gates on these rows; the handoff package
+  // carries the latest basis to the Delivery Factory.
+  if (pathname === "/api/v1/consent" && request.method === "GET") {
+    const url = new URL(request.url);
+    const organizationId = url.searchParams.get("organizationId");
+    const opportunityId = url.searchParams.get("opportunityId");
+    let query = client
+      .from("consent_records")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .order("recorded_at", { ascending: false })
+      .limit(200);
+    if (organizationId) query = query.eq("organization_id", organizationId);
+    if (opportunityId) query = query.eq("opportunity_id", opportunityId);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+  if (pathname === "/api/v1/consent" && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const input = ConsentInputSchema.parse(await bodyJson(request));
+    if (!input.organizationId && !input.opportunityId)
+      throw Object.assign(
+        new Error("organizationId or opportunityId is required"),
+        { statusCode: 400 },
+      );
+    if (input.organizationId) {
+      const { data: org, error: orgError } = await client
+        .from("organizations")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("id", input.organizationId)
+        .single();
+      if (orgError || !org)
+        throw Object.assign(new Error("Organization not found"), {
+          statusCode: 404,
+        });
+    }
+    if (input.opportunityId) {
+      const { data: opp, error: oppError } = await client
+        .from("opportunities")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("id", input.opportunityId)
+        .single();
+      if (oppError || !opp)
+        throw Object.assign(new Error("Opportunity not found"), {
+          statusCode: 404,
+        });
+    }
     const { data, error } = await client
+      .from("consent_records")
+      .insert({
+        workspace_id: workspaceId,
+        organization_id: input.organizationId ?? null,
+        opportunity_id: input.opportunityId ?? null,
+        basis_type: input.basisType,
+        evidence_reference: input.evidenceReference ?? null,
+        recorded_by: context.user.email ?? context.user.id,
+        notes: input.notes ?? null,
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return json({ data }, 201);
+  }
+
+  // Third-party terms acceptance (audit gap 2). Owners/administrators only.
+  if (pathname === "/api/v1/terms/accept" && request.method === "POST") {
+    requireRole(context, ["owner", "administrator"]);
+    const input = z
+      .object({
+        termsId: z.string().min(1).max(80),
+        notes: z.string().max(2_000).optional(),
+      })
+      .parse(await bodyJson(request));
+    if (input.termsId !== OVERPASS_OSM_TERMS_ID)
+      throw Object.assign(new Error(`Unknown terms id: ${input.termsId}`), {
+        statusCode: 422,
+      });
+    const { error } = await client.from("terms_acceptances").upsert(
+      {
+        workspace_id: workspaceId,
+        terms_id: input.termsId,
+        terms_version: OVERPASS_OSM_TERMS_VERSION,
+        accepted_by: context.user.email ?? context.user.id,
+        notes: input.notes ?? null,
+      },
+      { onConflict: "workspace_id,terms_id" },
+    );
+    if (error) throw new Error(error.message);
+    return json(
+      {
+        data: {
+          termsId: OVERPASS_OSM_TERMS_ID,
+          termsVersion: OVERPASS_OSM_TERMS_VERSION,
+          acceptedBy: context.user.email ?? context.user.id,
+        },
+      },
+      201,
+    );
+  }
+  if (pathname === "/api/v1/terms" && request.method === "GET") {
+    const { data, error } = await client
+      .from("terms_acceptances")
+      .select("*")
+      .eq("workspace_id", workspaceId);
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+
+  // Pipeline funnel width (audit fix): one number per stage so the funnel
+  // is visible before the first qualified lead ever appears.
+  if (pathname === "/api/v1/funnel" && request.method === "GET") {
+    const url = new URL(request.url);
+    const windowDays = Math.min(
+      365,
+      Math.max(1, Number(url.searchParams.get("windowDays")) || 30),
+    );
+    const since = new Date(
+      Date.now() - windowDays * 86_400_000,
+    ).toISOString();
+    const { count: activeSources, error: sourcesError } = await client
+      .from("source_definitions")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("status", "active");
+    if (sourcesError) throw new Error(sourcesError.message);
+    const { count: candidatesEvaluated, error: evaluatedError } = await client
+      .from("maturity_assessments")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("evaluated_at", since);
+    if (evaluatedError) throw new Error(evaluatedError.message);
+    const { count: scored, error: scoredError } = await client
+      .from("opportunities")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since);
+    if (scoredError) throw new Error(scoredError.message);
+    const { count: qualified, error: qualifiedError } = await client
+      .from("opportunities")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .gte("created_at", since)
+      .eq("stage", "qualified");
+    if (qualifiedError) throw new Error(qualifiedError.message);
+    return json({
+      data: {
+        activeSources: activeSources ?? 0,
+        candidatesEvaluated: candidatesEvaluated ?? 0,
+        scored: scored ?? 0,
+        qualified: qualified ?? 0,
+        windowDays,
+      },
+    });
+  }
+
+  if (pathname === "/api/v1/audit-events" && request.method === "GET") {    const { data, error } = await client
       .from("audit_events")
       .select("*")
       .eq("workspace_id", workspaceId)
@@ -991,6 +1355,24 @@ async function authenticatedRoutes(
   );
   if (discoveryRun && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
+    // Terms gate (audit gap 2): the Overpass API usage policy and OSM
+    // attribution terms are accepted per workspace before any discovery
+    // run executes.
+    await requireTermsAcceptance(
+      {
+        hasAccepted: async (wsId: string, termsId: string) => {
+          const { data, error } = await client
+            .from("terms_acceptances")
+            .select("terms_id")
+            .eq("workspace_id", wsId)
+            .eq("terms_id", termsId)
+            .maybeSingle();
+          if (error) throw new Error(error.message);
+          return data !== null;
+        },
+      },
+      workspaceId,
+    );
     const store: DiscoveryStore = {
       getSource: async (discoverySourceId: string) => {
         const { data, error } = await client
@@ -1139,6 +1521,20 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     ) {
       await requireScheduler(request);
       response = json({ data: await enqueueCanary() }, 202);
+    } else if (
+      pathname === "/api/v1/discovery/scheduled-run" &&
+      (request.method === "GET" || request.method === "POST")
+    ) {
+      // Daily QStash schedule (audit fix 1): each active discovery source
+      // runs at most once per 24h. Scheduler-signed like the worker tick.
+      await requireScheduler(request);
+      response = json({
+        data: await runScheduledDiscovery(
+          createAdminClient() as unknown as Parameters<
+            typeof runScheduledDiscovery
+          >[0],
+        ),
+      });
     } else if (
       pathname === "/api/v1/feedback/events" &&
       request.method === "POST"

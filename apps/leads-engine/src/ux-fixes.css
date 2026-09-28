@@ -1,0 +1,33 @@
+/* P0-P2 UX hardening */
+:root { font-size: 15px; --focus: #7a9f2d; --surface-2: #f5f9f7; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 62%, white); outline-offset: 2px; }
+button:disabled { cursor: wait; opacity: .62; }
+.error-detail { color: #a84040; background: #fdf0f0; border-radius: 8px; padding: 10px 12px; font-size: 12px; overflow-wrap: anywhere; }
+.mobile-topbar-row { display: none; }
+.mobile-nav-backdrop { display: none; }
+.setup-checklist { padding: 20px; margin-bottom: 18px; }
+.setup-checklist h3 { margin: 0 0 6px; }
+.checklist-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+.checklist-step { display: grid; gap: 6px; text-align: left; background: var(--surface-2); border: 1px solid #dbe8e2; color: #1a2632; }
+.checklist-step span { color: #718589; font-size: 12px; font-weight: 500; }
+.checklist-step.complete { border-color: #b9d98b; background: #f4f9e8; }
+.empty-state { display: grid; gap: 6px; }
+.empty-state::before { content: "No records yet"; color: #52686b; font-weight: 700; }
+@media (max-width: 640px) {
+  .mobile-topbar-row { display: flex; align-items: center; justify-content: space-between; width: 100%; }
+  .mobile-menu-button { background: #edf4f1; color: #173c43; padding: 8px 10px; }
+  .mobile-view-label { color: #6c8183; font-size: 12px; font-weight: 700; }
+  .mobile-nav-backdrop { display: block; position: fixed; inset: 0; z-index: 100; background: rgba(9,26,31,.52); }
+  .mobile-nav { width: min(320px, 88vw); height: 100%; padding: 24px 16px; background: #12232b; color: #dbe8e8; box-shadow: 18px 0 50px rgba(0,0,0,.2); }
+  .mobile-nav-head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 20px; font-size: 16px; }
+  .mobile-nav .icon-button { color: #dbe8e8; }
+  .checklist-grid { grid-template-columns: 1fr; }
+  .table-head { display: none; }
+  .table-row { grid-template-columns: 1fr !important; gap: 8px; padding: 16px; }
+  .table-row > * { min-width: 0; }
+  .table-row .score, .table-row .stage-action { justify-content: space-between; }
+  .table-row .score::before { content: attr(data-label); color: #718589; font: 10px "DM Mono"; text-transform: uppercase; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+.warning-text { color: #93662e; }

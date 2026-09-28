@@ -10,7 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildHandoffPackage,
   dispatchDueHandoffs,
+  dispatchHandoffById,
   enqueueHandoffOutbox,
+  tryImmediateDispatch,
   type EnqueueHandoffInput,
   type SqlClient,
 } from "../api/_lib/handoff";
@@ -46,6 +48,7 @@ function opportunityHandlers(overrides: {
   assessment?: unknown[] | null;
   evidence?: unknown[] | null;
   signals?: unknown[] | null;
+  consent?: unknown[] | null;
 } = {}): Handler[] {
   return [
     {
@@ -100,6 +103,23 @@ function opportunityHandlers(overrides: {
             excerpt: "Quotes are prepared by hand in spreadsheets.",
           },
         ],
+    },
+    {
+      match: (sql) => sql.includes("from public.consent_records"),
+      rows: () =>
+        overrides.consent ?? [],
+    },
+  ];
+}
+
+function consentRow() {
+  return [
+    {
+      basis_type: "existing_relationship",
+      evidence_reference: "Order #1042, 2026-03",
+      recorded_at: "2026-09-20T12:00:00Z",
+      recorded_by: "ops@example.com",
+      notes: "Prior customer",
     },
   ];
 }
@@ -172,6 +192,38 @@ describe("buildHandoffPackage", () => {
         approvedBy: "approver@example.com",
       }),
     ).rejects.toThrow("Opportunity not found");
+  });
+
+  it("attaches the latest CASL basis when a consent record exists", async () => {
+    const captured: string[] = [];
+    const result = await buildHandoffPackage(
+      mockSql(opportunityHandlers({ consent: consentRow() }), captured),
+      {
+        workspaceId: WORKSPACE_ID,
+        opportunityId: OPPORTUNITY_ID,
+        approvedBy: "approver@example.com",
+      },
+    );
+    const parsed = LeadEngineHandoffPackageSchema.parse(result.package);
+    expect(parsed.consentBasis).toMatchObject({
+      basisType: "existing_relationship",
+      evidenceReference: "Order #1042, 2026-03",
+      recordedBy: "ops@example.com",
+    });
+  });
+
+  it("omits consentBasis when no consent record exists", async () => {
+    const captured: string[] = [];
+    const result = await buildHandoffPackage(
+      mockSql(opportunityHandlers({ consent: [] }), captured),
+      {
+        workspaceId: WORKSPACE_ID,
+        opportunityId: OPPORTUNITY_ID,
+        approvedBy: "approver@example.com",
+      },
+    );
+    const parsed = LeadEngineHandoffPackageSchema.parse(result.package);
+    expect(parsed.consentBasis).toBeUndefined();
   });
 });
 
@@ -381,5 +433,182 @@ describe("dispatchDueHandoffs", () => {
     expect(outcome).toEqual({ dispatched: 0, failed: 0 });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(captured).toHaveLength(0);
+  });
+});
+
+describe("dispatchHandoffById", () => {
+  const row = {
+    id: "88888888-8888-4888-8888-888888888888",
+    workspace_id: WORKSPACE_ID,
+    idempotency_key: `handoff:${WORKSPACE_ID}:${OPPORTUNITY_ID}`,
+    package: { schemaVersion: "1.0.0", packageId: "y" },
+    manifest_checksum: CONTENT_HASH,
+    signature: "base64-signature",
+    attempts: 0,
+  };
+
+  beforeEach(() => {
+    process.env.DELIVERY_INTAKE_URL = "https://delivery.example/intake";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.DELIVERY_INTAKE_URL;
+  });
+
+  /** The conditional claim (`status = 'pending'`) is the single query that
+   *  decides whether an immediate dispatch may proceed. */
+  function claimClient(
+    captured: string[],
+    claimedRows: unknown[],
+  ): SqlClient {
+    return mockSql(
+      [
+        {
+          match: (sql) =>
+            sql.includes("update public.handoff_outbox") &&
+            sql.includes("status = 'pending'"),
+          rows: () => claimedRows,
+        },
+        {
+          match: (sql) => sql.includes("update public.handoff_outbox"),
+          rows: () => [],
+        },
+      ],
+      captured,
+    );
+  }
+
+  it("claims a pending row and dispatches it immediately", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const captured: string[] = [];
+    const dispatched = await dispatchHandoffById(
+      claimClient(captured, [row]),
+      row.id,
+    );
+
+    expect(dispatched).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://delivery.example/intake");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["idempotency-key"]).toBe(row.idempotency_key);
+    expect(init.body).toBe(canonicalJsonStringify(row.package));
+    expect(
+      captured.some((query) => query.includes("status = 'sent'")),
+    ).toBe(true);
+  });
+
+  it("does not dispatch when the row is no longer pending (tick already claimed it)", async () => {
+    // The worker tick claimed the row first: the conditional claim returns
+    // no rows, so the immediate path stands down instead of double-sending.
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const captured: string[] = [];
+    const dispatched = await dispatchHandoffById(
+      claimClient(captured, []),
+      row.id,
+    );
+
+    expect(dispatched).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("records a backoff retry when the immediate POST fails, without throwing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connection refused");
+      }),
+    );
+    const captured: string[] = [];
+    const dispatched = await dispatchHandoffById(
+      claimClient(captured, [row]),
+      row.id,
+    );
+
+    expect(dispatched).toBe(true);
+    const retryUpdate = captured.find(
+      (query) =>
+        query.includes("update public.handoff_outbox") &&
+        query.includes("next_attempt_at"),
+    );
+    expect(retryUpdate).toBeTruthy();
+    const values = JSON.parse(retryUpdate!.split(" :: ")[1]) as unknown[];
+    expect(values[0]).toBe("pending");
+    expect(values[1]).toBe(1);
+  });
+
+  it("does nothing when no intake URL is configured", async () => {
+    delete process.env.DELIVERY_INTAKE_URL;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const captured: string[] = [];
+    const dispatched = await dispatchHandoffById(
+      claimClient(captured, [row]),
+      row.id,
+    );
+
+    expect(dispatched).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(captured).toHaveLength(0);
+  });
+});
+
+describe("tryImmediateDispatch", () => {
+  const OUTBOX_ID = "99999999-9999-4999-8999-999999999999";
+
+  beforeEach(() => {
+    process.env.DELIVERY_INTAKE_URL = "https://delivery.example/intake";
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.DELIVERY_INTAKE_URL;
+  });
+
+  it("resolves false — never rejects — when dispatch throws, so the 201 enqueue stands", async () => {
+    const explodingClient = (async () => {
+      throw new Error("database unavailable");
+    }) as SqlClient;
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      tryImmediateDispatch(explodingClient, OUTBOX_ID),
+    ).resolves.toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves true when the immediate dispatch succeeds", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200 })));
+    const captured: string[] = [];
+    const row = {
+      id: OUTBOX_ID,
+      workspace_id: WORKSPACE_ID,
+      idempotency_key: `handoff:${WORKSPACE_ID}:${OPPORTUNITY_ID}`,
+      package: { schemaVersion: "1.0.0", packageId: "z" },
+      manifest_checksum: CONTENT_HASH,
+      signature: "base64-signature",
+      attempts: 0,
+    };
+    const client = mockSql(
+      [
+        {
+          match: (sql) => sql.includes("update public.handoff_outbox"),
+          rows: (sql) =>
+            sql.includes("status = 'pending'") ? [row] : [],
+        },
+      ],
+      captured,
+    );
+
+    await expect(tryImmediateDispatch(client, OUTBOX_ID)).resolves.toBe(
+      true,
+    );
+    expect(
+      captured.some((query) => query.includes("status = 'sent'")),
+    ).toBe(true);
   });
 });

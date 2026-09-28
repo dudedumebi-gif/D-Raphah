@@ -12,6 +12,7 @@
  */
 
 import type { NeonClient } from "./db.js";
+import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
 
@@ -32,6 +33,8 @@ export type NodeKind =
   | "lead_handoff"
   // actions
   | "send_email"
+  | "send_sms"
+  | "ai_assist"
   | "http_request"
   | "log_database"
   | "slack_notify"
@@ -177,6 +180,26 @@ export const NODE_CATALOG: NodeSpec[] = [
     ],
   },
   {
+    kind: "send_sms", type: "action", label: "Send SMS", icon: "📱",
+    description: "Send (or draft) an SMS via the configured provider. With no provider, records the draft for human approval per the no-automated-outreach rule.",
+    defaultConfig: { to: "", message: "" },
+    configSchema: [
+      { key: "to", label: "Recipient phone", kind: "text", placeholder: "+14165550123" },
+      { key: "message", label: "Message", kind: "textarea", placeholder: "Hi {{lead.name}}, thanks for contacting us…" },
+    ],
+  },
+  {
+    kind: "ai_assist", type: "action", label: "AI Assist", icon: "🤖",
+    description: "Draft content with an AI model (summaries, replies, content). Output lands in the run context for a human to review — never sent automatically.",
+    defaultConfig: { model: "gpt-4o-mini", systemPrompt: "", userPrompt: "", maxTokens: 500 },
+    configSchema: [
+      { key: "model", label: "Model", kind: "text", placeholder: "gpt-4o-mini" },
+      { key: "systemPrompt", label: "System prompt", kind: "textarea", placeholder: "You are a helpful assistant drafting…" },
+      { key: "userPrompt", label: "User prompt", kind: "textarea", placeholder: "Draft a reply to: {{lead.message}}" },
+      { key: "maxTokens", label: "Max tokens", kind: "number", placeholder: "500" },
+    ],
+  },
+  {
     kind: "http_request", type: "action", label: "HTTP Request", icon: "🌐",
     description: "Call any HTTPS endpoint. Body supports {{path}} templates and a JSON payload editor.",
     defaultConfig: { method: "POST", url: "", headers: {}, body: {} },
@@ -295,14 +318,16 @@ function q(db: NeonClient) {
 }
 
 /* ── Template rendering ──────────────────────────────────────────────────
-   {{path.to.value}} is resolved against the run context. */
+   {{path.to.value}} is resolved against the run context. Path segments may
+   contain hyphens so node outputs are reachable via {{node_<node_key>...}}
+   (seeded templates use hyphenated keys like "action-1"). */
 
 export function renderTemplate(
   template: unknown,
   context: Record<string, unknown>,
 ): unknown {
   if (typeof template === "string") {
-    return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, path: string) => {
+    return template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_m, path: string) => {
       const value = path.split(".").reduce<unknown>(
         (acc, key) => (acc != null && typeof acc === "object"
           ? (acc as Record<string, unknown>)[key]
@@ -377,11 +402,68 @@ export async function listWorkflows(db: NeonClient): Promise<Workflow[]> {
   }));
 }
 
+export interface TriggerableWorkflow {
+  id: string;
+  name: string;
+  trigger_config: Record<string, unknown> | null;
+}
+
+/**
+ * Published workflows subscribed to a trigger type (e.g. 'lead_handoff').
+ * Trigger matching reuses the workflows table's own trigger_type column —
+ * there is no second trigger registry.
+ */
+export async function listPublishedWorkflowsByTrigger(
+  db: NeonClient,
+  triggerType: string,
+): Promise<TriggerableWorkflow[]> {
+  const rows = await q(db)`
+    select id, name, trigger_config
+    from public.workflows
+    where trigger_type = ${triggerType} and status = 'published'
+    order by created_at asc`;
+  return rows.map((r) => ({
+    id: r.id as string,
+    name: r.name as string,
+    trigger_config: (r.trigger_config ?? null) as Record<string, unknown> | null,
+  }));
+}
+
+export interface LeadHandoffTriggerPayload {
+  lead: { name: string; phone?: string; score?: number };
+  organization_name: string;
+  /** The full accepted package, for templates that need more than the lead summary. */
+  package: LeadEngineHandoffPackage;
+}
+
+/**
+ * Shapes an accepted handoff package into the trigger payload that
+ * 'lead_handoff' templates reference ({{trigger.lead.name}},
+ * {{trigger.lead.phone}}, {{trigger.lead.score}}, {{trigger.organization_name}}).
+ *
+ * The v1 contract carries no phone number and no numeric lead score, so both
+ * are undefined here — renderTemplate substitutes "" for missing values and
+ * templates must tolerate their absence. Recording a basis here never
+ * authorizes sending: DF outreach nodes stay draft-first with human approval.
+ */
+export function buildLeadHandoffTriggerPayload(
+  pkg: LeadEngineHandoffPackage,
+): LeadHandoffTriggerPayload {
+  return {
+    lead: {
+      name: pkg.stakeholders[0]?.name ?? pkg.organization.name,
+      phone: undefined,
+      score: undefined,
+    },
+    organization_name: pkg.organization.name,
+    package: pkg,
+  };
+}
+
 export async function getWorkflow(
   db: NeonClient,
   id: string,
-): Promise<Workflow | null> {
-  const rows = await q(db)`
+): Promise<Workflow | null> {  const rows = await q(db)`
     select id, name, description, status, trigger_type, trigger_config,
            created_by, created_at, updated_at, published_at
     from public.workflows where id = ${id}`;
@@ -616,6 +698,12 @@ export interface ExecutionHooks {
   sendEmail?: (args: {
     to: string; subject: string; body: string; encryptSensitive: boolean;
   }) => Promise<Record<string, unknown>>;
+  sendSms?: (args: {
+    to: string; message: string;
+  }) => Promise<Record<string, unknown>>;
+  aiAssist?: (args: {
+    model: string; systemPrompt: string; userPrompt: string; maxTokens: number;
+  }) => Promise<Record<string, unknown>>;
   httpRequest?: (args: {
     method: string; url: string;
     headers: Record<string, string>; body: unknown;
@@ -721,6 +809,37 @@ export async function executeWorkflow(
         if (hooks.sendEmail) return hooks.sendEmail(args);
         // No provider configured: record intent, mark delivered=false.
         return { delivered: false, queued: true, ...args };
+      }
+      case "send_sms": {
+        const args = {
+          to: String(cfg.to ?? ""),
+          message: String(cfg.message ?? ""),
+        };
+        if (!args.to) throw new Error("send_sms: 'to' is required");
+        if (!args.message) throw new Error("send_sms: 'message' is required");
+        if (hooks.sendSms) return hooks.sendSms(args);
+        // No provider configured: record the draft for human approval.
+        // House rule: no automated outreach sending in MVP — a human
+        // approves and sends drafted messages.
+        return { delivered: false, queued: true, draft: true, ...args };
+      }
+      case "ai_assist": {
+        const args = {
+          model: String(cfg.model ?? "gpt-4o-mini"),
+          systemPrompt: String(cfg.systemPrompt ?? ""),
+          userPrompt: String(cfg.userPrompt ?? ""),
+          maxTokens: Math.min(Math.max(Number(cfg.maxTokens ?? 500), 1), 4000),
+        };
+        if (!args.userPrompt) throw new Error("ai_assist: 'userPrompt' is required");
+        if (hooks.aiAssist) return hooks.aiAssist(args);
+        // No AI provider configured: record the request as a draft stub so
+        // the run stays auditable; a human completes it before anything sends.
+        return {
+          delivered: false, draft: true,
+          model: args.model,
+          prompt: args.userPrompt,
+          output: `[draft stub — no AI provider configured] ${args.userPrompt.slice(0, 200)}`,
+        };
       }
       case "http_request": {
         const method = String(cfg.method ?? "POST").toUpperCase();

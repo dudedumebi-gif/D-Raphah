@@ -27,7 +27,7 @@ pnpm --filter @raphah/leads-engine-app build
 2. In Neon, enable Auth and the Data API. Apply `neon/migrations/202609220001_lead_engine_production.sql` with `psql` against a disposable branch first, then production.
 3. Run `neon/tests/job_lifecycle_v3.sql` against the disposable branch, then run `pnpm test:rls:neon` with two genuine Neon Auth sessions through the Data API.
 4. Configure the variables in `.env.example` in the Lead Engine Vercel project. Keep `DATABASE_URL`, QStash keys, and `WORKER_SECRET` server-only.
-5. Deploy, create the first operator account, then approve one Raphah-controlled canary source.
+5. Deploy, create the first operator account, then approve the Raphah-controlled `/canary-source.html` fixture as a static-HTML source. Never substitute a third-party page for this deterministic production probe.
 6. Set the three `LEAD_ENGINE_CANARY_*` variables and redeploy.
 7. From `apps/leads-engine`, run `pnpm qstash:configure` once with `QSTASH_TOKEN` and `LEAD_ENGINE_BASE_URL`. Re-running updates the stable schedule IDs instead of duplicating them.
 8. Import the two files under `postman/`, paste a Neon Auth access token, and run the lifecycle collection. The optional worker diagnostic uses `WORKER_SECRET`; normal dispatch remains QStash-signed.

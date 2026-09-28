@@ -78,4 +78,36 @@ describe("handoff schema v1", () => {
       }),
     ).toThrow();
   });
+
+  it("accepts a valid package without consentBasis (v1 backwards compatible)", () => {
+    expect(
+      LeadEngineHandoffPackageV1Schema.parse(validPackage).consentBasis,
+    ).toBeUndefined();
+  });
+
+  it("accepts a valid consentBasis when present", () => {
+    const parsed = LeadEngineHandoffPackageV1Schema.parse({
+      ...validPackage,
+      consentBasis: {
+        basisType: "consent",
+        evidenceReference: "Double opt-in 2026-08-01",
+        recordedAt: "2026-08-01T10:00:00.000Z",
+        recordedBy: "ops@example.com",
+      },
+    });
+    expect(parsed.consentBasis?.basisType).toBe("consent");
+  });
+
+  it("rejects an invalid consent basisType", () => {
+    expect(() =>
+      LeadEngineHandoffPackageV1Schema.parse({
+        ...validPackage,
+        consentBasis: {
+          basisType: "implied",
+          recordedAt: "2026-08-01T10:00:00.000Z",
+          recordedBy: "ops@example.com",
+        },
+      }),
+    ).toThrow();
+  });
 });

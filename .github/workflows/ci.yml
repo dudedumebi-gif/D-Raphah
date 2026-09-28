@@ -11,7 +11,7 @@ name: CI
 
 on:
   push:
-    branches: [feat/product-platform-design]
+    branches: [feat/product-platform-design, "release/**"]
   pull_request:
 
 concurrency:
@@ -46,7 +46,7 @@ jobs:
               - 'packages/handoff-contract/**'
             contract-usage:
               # Files that consume the handoff contract schemas directly.
-              - 'apps/leads-engine/server/handoff.ts'
+              - 'apps/leads-engine/api/_lib/handoff.ts'
               - 'apps/leads-engine/tests/handoff.test.ts'
               - 'apps/delivery-factory/api/**'
               - 'apps/delivery-factory/tests/intake.test.ts'
@@ -109,6 +109,7 @@ jobs:
         run: pnpm --filter @raphah/handoff-contract build
       - run: pnpm --filter @raphah/leads-engine-app test
       - run: pnpm --filter @raphah/leads-engine-app typecheck
+      - run: pnpm --filter @raphah/leads-engine-app build
 
   delivery-factory:
     name: Delivery Factory (test + typecheck + build)

@@ -10,6 +10,7 @@ import "./styles.css";
 import "./functionality.css";
 import "./workflows.css";
 import "./monitoring.css";
+import "./ux-fixes.css";
 import { WorkflowsSection } from "./workflows";
 import { MonitoringSection } from "./monitoring";
 import { AuthProvider, LoginScreen, useAuth } from "./auth";
@@ -118,8 +119,8 @@ const navItems: Array<{ id: View; label: string }> = [
   { id: "gates", label: "Delivery gates" },
   { id: "evidence", label: "Evidence library" },
   { id: "clients", label: "Client views" },
-  { id: "workflows", label: "⚙️ Automations" },
-  { id: "monitoring", label: "📡 Monitoring" },
+  { id: "workflows", label: "Automations" },
+  { id: "monitoring", label: "Monitoring" },
 ];
 
 const viewTitles: Record<View, string> = {
@@ -155,6 +156,7 @@ function useStoredState<T>(key: string, initialValue: T) {
 function App() {
   const auth = useAuth();
   const [view, setView] = useState<View>("portfolio");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [workspace, setWorkspace] = useState<"All workspaces" | "Active only">(
     "All workspaces",
   );
@@ -219,6 +221,7 @@ function App() {
   }
 
   function resetDemoWorkspace() {
+    if (!window.confirm("Reset the demo workspace? This removes local projects, gates, and audit events from this browser.")) return;
     for (const key of [
       "raphah.delivery.projects.v1",
       "raphah.delivery.gates.v1",
@@ -243,7 +246,10 @@ function App() {
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const client = String(form.get("client") || "").trim();
-    if (!name || !client) return;
+    if (!name || !client) {
+      setNotice("Project name and client are required before creating a project.");
+      return;
+    }
     const project: Project = {
       id: crypto.randomUUID(),
       name,
@@ -275,6 +281,8 @@ function App() {
   }
 
   function advanceProject(project: Project) {
+    if (project.stage === "Complete") return;
+    if (!window.confirm(`Advance ${project.name} from ${project.stage}? This creates an audited delivery decision.`)) return;
     const order: ProjectStage[] = [
       "Discovery",
       "Plan",
@@ -299,6 +307,7 @@ function App() {
   }
 
   function approveGate(gate: Gate) {
+    if (!window.confirm(`Approve ${gate.label}? This records a human delivery decision.`)) return;
     setGates((current) =>
       current.map((item) =>
         item.id === gate.id ? { ...item, status: "Approved" } : item,
@@ -338,8 +347,8 @@ function App() {
             <button
               key={item.id}
               className={view === item.id ? "nav-item active" : "nav-item"}
-              onClick={() => changeView(item.id)}
-              aria-pressed={view === item.id}
+              onClick={() => { changeView(item.id); setMobileNavOpen(false); }}
+              aria-current={view === item.id ? "page" : undefined}
             >
               <span>{item.label}</span>
               {item.id === "projects" ? (
@@ -375,6 +384,10 @@ function App() {
 
       <main>
         <header className="topbar">
+          <div className="mobile-topbar-row">
+            <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileNavOpen} onClick={() => setMobileNavOpen(true)}>Menu</button>
+            <span className="mobile-view-label">{viewTitles[view]}</span>
+          </div>
           <div>
             <p className="eyebrow">Delivery operations / {viewTitles[view]}</p>
             <h1>{viewTitles[view]}</h1>
@@ -400,7 +413,15 @@ function App() {
             </button>
           </div>
         </header>
-        <div className="status-bar" role="status">
+        {mobileNavOpen ? (
+          <div className="mobile-nav-backdrop" role="presentation" onClick={() => setMobileNavOpen(false)}>
+            <nav className="mobile-nav" aria-label="Delivery Factory navigation" onClick={(event) => event.stopPropagation()}>
+              <div className="mobile-nav-head"><b>Navigate</b><button className="icon-button" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)}>×</button></div>
+              {[...navItems, { id: "audit" as View, label: "Audit explorer" }, { id: "operations" as View, label: "Operations" }].map((item) => <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} aria-current={view === item.id ? "page" : undefined} onClick={() => { changeView(item.id); setMobileNavOpen(false); }}>{item.label}</button>)}
+            </nav>
+          </div>
+        ) : null}
+        <div className="status-bar" role="status" aria-live="polite">
           <span className="status-dot" />
           <span className="pilot-badge">Pilot demo</span>
           <span>{notice}</span>
@@ -429,6 +450,16 @@ function App() {
             </span>
           ) : null}
         </div>
+        {projects.length === 0 || openGates.length === 0 ? (
+          <section className="setup-checklist panel" aria-labelledby="df-setup-heading">
+            <div><p className="eyebrow accent">Recommended next steps</p><h2 id="df-setup-heading">Prepare a delivery workspace</h2><p className="muted">Create the project, establish a baseline, then collect evidence before release.</p></div>
+            <div className="checklist-grid">
+              <button className="checklist-step" onClick={() => setShowProjectForm(true)}><b>1. Create a project</b><span>Give the delivery team a shared record</span></button>
+              <button className="checklist-step" onClick={() => changeView("gates")}><b>2. Review delivery gates</b><span>Assign human approval before progression</span></button>
+              <button className="checklist-step" onClick={() => changeView("evidence")}><b>3. Capture evidence</b><span>Make release readiness visible</span></button>
+            </div>
+          </section>
+        ) : null}
         {view === "portfolio" ? (
           <Portfolio
             projects={projects}

@@ -1,34 +1,41 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const CriteriaSchema = z.object({
-  automationMaturityMax: z.number().min(0).max(100).default(40),
-  opportunityPotentialMin: z.number().min(0).max(100).default(60),
-  confidenceMin: z.number().min(0).max(1).default(0.7),
-  minimumEvidenceCategories: z.number().int().min(1).max(6).default(2),
-  targetQualifiedLeadsPerWeek: z.number().int().min(1).max(10_000).default(20),
-  industries: z.array(z.string()).default([]),
-  employeeMinimum: z.number().int().min(1).default(5),
-  employeeMaximum: z.number().int().min(1).default(50),
-  geography: z
-    .object({
-      mode: z.enum(["radius", "regions", "hybrid"]).default("hybrid"),
-      cities: z.array(z.string()).default(["Toronto", "Ottawa", "Montreal"]),
-      regions: z.array(z.string()).default(["Ontario", "Quebec"]),
-      radiusKm: z.number().min(1).max(1000).default(50),
-      centreLatitude: z.number().min(-90).max(90).nullable().default(null),
-      centreLongitude: z.number().min(-180).max(180).nullable().default(null),
-    })
-    .default({}),
-}).superRefine((criteria, ctx) => {
-  if (criteria.employeeMinimum > criteria.employeeMaximum) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["employeeMinimum"],
-      message: "employeeMinimum must not exceed employeeMaximum",
-    });
-  }
-});
+export const CriteriaSchema = z
+  .object({
+    automationMaturityMax: z.number().min(0).max(100).default(40),
+    opportunityPotentialMin: z.number().min(0).max(100).default(60),
+    confidenceMin: z.number().min(0).max(1).default(0.7),
+    minimumEvidenceCategories: z.number().int().min(1).max(6).default(2),
+    targetQualifiedLeadsPerWeek: z
+      .number()
+      .int()
+      .min(1)
+      .max(10_000)
+      .default(20),
+    industries: z.array(z.string()).default([]),
+    employeeMinimum: z.number().int().min(1).default(5),
+    employeeMaximum: z.number().int().min(1).default(50),
+    geography: z
+      .object({
+        mode: z.enum(["radius", "regions", "hybrid"]).default("hybrid"),
+        cities: z.array(z.string()).default(["Toronto", "Ottawa", "Montreal"]),
+        regions: z.array(z.string()).default(["Ontario", "Quebec"]),
+        radiusKm: z.number().min(1).max(1000).default(50),
+        centreLatitude: z.number().min(-90).max(90).nullable().default(null),
+        centreLongitude: z.number().min(-180).max(180).nullable().default(null),
+      })
+      .default({}),
+  })
+  .superRefine((criteria, ctx) => {
+    if (criteria.employeeMinimum > criteria.employeeMaximum) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["employeeMinimum"],
+        message: "employeeMinimum must not exceed employeeMaximum",
+      });
+    }
+  });
 
 export type LeadCriteria = z.infer<typeof CriteriaSchema>;
 
@@ -61,6 +68,11 @@ export interface ScoreResult {
   scoringVersion: string;
 }
 
+export interface BusinessProfile {
+  industry: string | null;
+  employeeCount: number | null;
+}
+
 export interface GeographyEvaluation {
   eligible: boolean;
   city: string | null;
@@ -86,6 +98,7 @@ export interface CriteriaSuggestion {
       | "opportunityPotentialMin"
       | "confidenceMin"
       | "minimumEvidenceCategories"
+      | "geography"
     >
   >;
   rationale: string[];
@@ -184,7 +197,8 @@ const SIGNAL_RULES: Array<{
     category: "digital_foundation",
     polarity: "automated",
     strength: 15,
-    pattern: /salesforce|hubspot|dynamics 365|netsuite|\bsap\b|workday|servicenow/i,
+    pattern:
+      /salesforce|hubspot|dynamics 365|netsuite|\bsap\b|workday|servicenow/i,
   },
   {
     code: "integration",
@@ -344,6 +358,46 @@ export function detectSignals(text: string): DetectedSignal[] {
   return detected;
 }
 
+export function inferBusinessProfile(text: string): BusinessProfile {
+  const normalized = normalizeText(text);
+  const industryMatch = normalized.match(
+    /(?:industry|sector)\s*[:\-]\s*([a-z][a-z &/\-]{2,48})(?=[.;|]|\s{2}|$)/i,
+  );
+  const employeeMatch = normalized.match(
+    /(?:employees?|team|staff|workforce)\s*(?:count|size)?\s*[:\-]?\s*(\d{1,6})\b/i,
+  );
+  return {
+    industry: industryMatch?.[1]?.trim() ?? null,
+    employeeCount: employeeMatch ? Number(employeeMatch[1]) : null,
+  };
+}
+
+export function calculateIcpFit(
+  profile: BusinessProfile,
+  criteriaInput: unknown,
+): number {
+  const criteria = CriteriaSchema.parse(criteriaInput);
+  let score = 55;
+  if (profile.industry && criteria.industries.length > 0) {
+    const observed = profile.industry.toLowerCase();
+    const matched = criteria.industries.some((industry) => {
+      const configured = industry.trim().toLowerCase();
+      return (
+        configured &&
+        (observed.includes(configured) || configured.includes(observed))
+      );
+    });
+    score += matched ? 25 : -20;
+  }
+  if (profile.employeeCount !== null) {
+    const inRange =
+      profile.employeeCount >= criteria.employeeMinimum &&
+      profile.employeeCount <= criteria.employeeMaximum;
+    score += inRange ? 20 : -15;
+  }
+  return clamp(score);
+}
+
 // Matches denial of the friction cue: "do not fax", "no spreadsheets",
 // "can't apply online", "without manual entry", "no longer paper-based".
 const NEGATION_CUES =
@@ -477,12 +531,33 @@ export function evaluateGeography(
   };
 }
 
+export function isSuggestionSuppressed(
+  campaign: {
+    last_suggestion_at?: string | null;
+    last_suggestion_observed_count?: number | null;
+  } | null,
+  observedQualifiedLeads: number,
+): boolean {
+  // After the operator applies a suggestion or saves criteria, don't generate
+  // a new suggestion until the observed qualified count changes (i.e. new
+  // scrape data arrived). This stops the Criteria page filling with back-to-
+  // back "loosen further" recommendations against an unchanged 0/20 output.
+  if (!campaign?.last_suggestion_at) return false;
+  return campaign.last_suggestion_observed_count === observedQualifiedLeads;
+}
+
 export function suggestCriteriaAdjustment(
   criteriaInput: unknown,
   observedQualifiedLeads: number,
 ): CriteriaSuggestion {
   const criteria = CriteriaSchema.parse(criteriaInput);
   const target = criteria.targetQualifiedLeadsPerWeek;
+  // Complete the geography when the campaign names cities but has no
+  // centre point — without coordinates, radius qualification silently
+  // excludes everything. Included in every non-hold suggestion so that
+  // "Apply suggestion" fills all fields in one click.
+  const geographyCentre = suggestGeographyCentre(criteria);
+  const geographyChange = geographyCentre ? { geography: geographyCentre } : {};
   if (observedQualifiedLeads < target * 0.8) {
     return {
       direction: "loosen",
@@ -503,10 +578,16 @@ export function suggestCriteriaAdjustment(
             Math.max(0.5, criteria.confidenceMin - 0.05),
           ).toFixed(2),
         ),
+        ...geographyChange,
       },
       rationale: [
         `Only ${observedQualifiedLeads} qualified leads were observed against a weekly target of ${target}.`,
-        "Widen the scoring window one controlled step; keep source policy and geography unchanged.",
+        "Widen the scoring window one controlled step; keep source policy unchanged.",
+        ...(geographyCentre
+          ? [
+              `Centre coordinates were missing — suggesting ${criteria.geography.cities[0]} (${geographyCentre.centreLatitude}, ${geographyCentre.centreLongitude}) so radius qualification can work.`,
+            ]
+          : []),
       ],
       autoApply: false,
     };
@@ -531,10 +612,16 @@ export function suggestCriteriaAdjustment(
             Math.min(0.9, criteria.confidenceMin + 0.05),
           ).toFixed(2),
         ),
+        ...geographyChange,
       },
       rationale: [
         `${observedQualifiedLeads} qualified leads exceed 150% of the weekly target of ${target}.`,
         "Tighten score and confidence gates to prioritize the strongest manual-process opportunities.",
+        ...(geographyCentre
+          ? [
+              `Centre coordinates were missing — suggesting ${criteria.geography.cities[0]} (${geographyCentre.centreLatitude}, ${geographyCentre.centreLongitude}) so radius qualification can work.`,
+            ]
+          : []),
       ],
       autoApply: false,
     };
@@ -552,6 +639,52 @@ export function suggestCriteriaAdjustment(
 }
 
 // --- Lead-vision gap 3: apply suggestion + opt-in auto-apply. ---
+
+/**
+ * Approximate centre coordinates for known Canadian markets. Used to
+ * complete a suggestion's geography when the campaign has named cities
+ * but no centre point — radius qualification requires coordinates.
+ */
+const MARKET_CENTRES: Record<string, { lat: number; lng: number }> = {
+  toronto: { lat: 43.6532, lng: -79.3832 },
+  ottawa: { lat: 45.4215, lng: -75.6972 },
+  montreal: { lat: 45.5017, lng: -73.5673 },
+  vancouver: { lat: 49.2827, lng: -123.1207 },
+  calgary: { lat: 51.0447, lng: -114.0719 },
+  edmonton: { lat: 53.5461, lng: -113.4938 },
+  winnipeg: { lat: 49.8951, lng: -97.1384 },
+  "quebec city": { lat: 46.8139, lng: -71.208 },
+  hamilton: { lat: 43.2557, lng: -79.8711 },
+  kitchener: { lat: 43.4516, lng: -80.4925 },
+};
+
+/**
+ * When a campaign names cities but has no centre coordinates, resolve the
+ * centre from the first recognized city so radius qualification can work.
+ * Returns null when coordinates are already set or no city is recognized.
+ */
+export function suggestGeographyCentre(
+  criteriaInput: unknown,
+): LeadCriteria["geography"] | null {
+  const criteria = CriteriaSchema.parse(criteriaInput);
+  if (
+    criteria.geography.centreLatitude != null &&
+    criteria.geography.centreLongitude != null
+  ) {
+    return null;
+  }
+  for (const city of criteria.geography.cities) {
+    const centre = MARKET_CENTRES[city.trim().toLowerCase()];
+    if (centre) {
+      return {
+        ...criteria.geography,
+        centreLatitude: centre.lat,
+        centreLongitude: centre.lng,
+      };
+    }
+  }
+  return null;
+}
 
 /**
  * Maximum single-step movement per auto-apply evaluation, per criterion.
@@ -631,8 +764,7 @@ export function evaluateAutoApply(
     const [minimum, maximum] = AUTO_APPLY_HARD_BOUNDS[key];
     stepped = Math.min(maximum, Math.max(minimum, stepped));
     if (key === "confidenceMin") stepped = Number(stepped.toFixed(2));
-    if (key === "minimumEvidenceCategories")
-      stepped = Math.round(stepped);
+    if (key === "minimumEvidenceCategories") stepped = Math.round(stepped);
     if (stepped !== current) {
       next[key] = stepped;
       moved = true;
@@ -663,6 +795,7 @@ export function scoreSignals(
   criteriaInput: unknown,
   metadata: {
     icpFit?: number;
+    businessProfile?: BusinessProfile;
     geoEligible?: boolean;
     evidenceFreshness?: number;
   } = {},
@@ -703,7 +836,13 @@ export function scoreSignals(
   const urgencyStrength = signals
     .filter((signal) => signal.polarity === "commercial")
     .reduce((total, signal) => total + signal.strength * signal.confidence, 0);
-  const icpFit = clamp(metadata.icpFit ?? 55);
+  const icpFit = clamp(
+    metadata.icpFit ??
+      (metadata.businessProfile
+        ? calculateIcpFit(metadata.businessProfile, criteria)
+        : 55),
+  );
+  components.icp_fit = Math.round(icpFit);
   const opportunityPotential = Math.round(
     clamp(
       icpFit * 0.45 +
@@ -742,6 +881,7 @@ export function scoreSignals(
     `Automation maturity ${automationMaturity}/100 (qualifies at or below ${criteria.automationMaturityMax}).`,
     `Opportunity potential ${opportunityPotential}/100 (minimum ${criteria.opportunityPotentialMin}).`,
     `Confidence ${(confidence * 100).toFixed(0)}% across ${coverageCategories} evidence categories.`,
+    `ICP fit ${Math.round(icpFit)}/100 based on available firmographic evidence.`,
     geoEligible
       ? "Geography is eligible."
       : "Geography is outside the configured market.",
@@ -755,7 +895,7 @@ export function scoreSignals(
     qualified,
     explanation,
     components,
-    scoringVersion: "2.0.0",
+    scoringVersion: "2.1.0",
   };
 }
 

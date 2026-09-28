@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
-import { createDeliveryDb } from "./_lib/db.js";
+import { createDeliveryDb, getDb } from "./_lib/db.js";
+import { triggerLeadHandoffWorkflows } from "./_lib/handoff-triggers.js";
 import {
   corsHeadersFor,
   handleIntake,
@@ -13,6 +14,7 @@ import {
   toIntakeRequest,
   type ApiRequest,
 } from "./_lib/http.js";
+import { log, reportError } from "./_lib/telemetry.js";
 
 export const config = INTAKE_BODY_PARSER_CONFIG;
 
@@ -29,6 +31,7 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
   try {
     env = readIntakeEnv();
   } catch (error) {
+    await reportError(error, { route: "/api/intake", phase: "configuration" });
     res.statusCode = 500;
     res.setHeader("content-type", "application/json");
     res.end(
@@ -40,10 +43,7 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
   }
 
   if ((req.method ?? "GET").toUpperCase() === "OPTIONS") {
-    const cors = corsHeadersFor(
-      req.headers.origin ?? null,
-      env.allowedOrigins,
-    );
+    const cors = corsHeadersFor(req.headers.origin ?? null, env.allowedOrigins);
     if (cors === null) {
       sendJson(res, 403, {}, { error: "Origin not allowed" });
       return;
@@ -52,11 +52,23 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
     return;
   }
 
-  const rawBody = await readRawBody(req);
-  const result = await handleIntake(
-    toIntakeRequest(req, rawBody),
-    createDeliveryDb(),
-    env,
-  );
-  sendJson(res, result.status, result.headers, result.body);
+  try {
+    const rawBody = await readRawBody(req);
+    const result = await handleIntake(
+      toIntakeRequest(req, rawBody),
+      createDeliveryDb(),
+      env,
+      {
+        onHandoffAccepted: (pkg) => triggerLeadHandoffWorkflows(getDb(), pkg),
+      },
+    );
+    log("info", "handoff_intake_completed", {
+      statusCode: result.status,
+      replay: result.status === 200,
+    });
+    sendJson(res, result.status, result.headers, result.body);
+  } catch (error) {
+    await reportError(error, { route: "/api/intake", phase: "processing" });
+    sendJson(res, 500, {}, { error: "Intake processing failed" });
+  }
 }

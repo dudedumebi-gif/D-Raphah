@@ -17,6 +17,7 @@ import {
   requireOperator,
   type OperatorIdentity,
 } from "./operator.js";
+import { log, reportError } from "./telemetry.js";
 
 /**
  * Shared wrapper for the operator project routes (everything except
@@ -41,6 +42,7 @@ export function defineRoute(
   handler: RouteHandler,
 ): (req: ApiRequest, res: ServerResponse) => Promise<void> {
   return async function route(req: ApiRequest, res: ServerResponse) {
+    const startedAt = Date.now();
     const env = readIntakeEnv();
     const origin = req.headers.origin ?? null;
     let cors = corsHeadersFor(
@@ -67,17 +69,42 @@ export function defineRoute(
       return;
     }
     if (!methods.includes(method)) {
-      sendJson(res, 405, { ...cors, allow: [...methods, "OPTIONS"].join(", ") }, {
-        error: "Method not allowed",
-      });
+      sendJson(
+        res,
+        405,
+        { ...cors, allow: [...methods, "OPTIONS"].join(", ") },
+        {
+          error: "Method not allowed",
+        },
+      );
       return;
     }
     try {
       const db = createDeliveryDb();
       const operator = await requireOperator(req, dbSessionValidator(db));
       await handler(req, res, { db, env, operator });
+      log("info", "operator_route_completed", {
+        method,
+        url: req.url,
+        statusCode: res.statusCode,
+        durationMs: Date.now() - startedAt,
+        operator: operator.email,
+      });
     } catch (error) {
-      sendJson(res, errorStatus(error), cors, { error: errorMessage(error) });
+      const status = errorStatus(error);
+      const context = {
+        method,
+        url: req.url,
+        statusCode: status,
+        durationMs: Date.now() - startedAt,
+      };
+      if (status >= 500) await reportError(error, context);
+      else
+        log("warn", "operator_route_rejected", {
+          ...context,
+          message: errorMessage(error),
+        });
+      sendJson(res, status, cors, { error: errorMessage(error) });
     }
   };
 }

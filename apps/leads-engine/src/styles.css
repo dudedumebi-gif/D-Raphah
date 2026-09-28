@@ -13,10 +13,14 @@ body {
 }
 .app-shell {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 .sidebar {
   width: 252px;
+  flex-shrink: 0;
+  height: 100vh;
+  overflow-y: auto;
   background: #12232b;
   color: #dbe8e8;
   padding: 28px 18px 18px;
@@ -122,6 +126,21 @@ body {
 main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+.sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: #fff;
+}
+.criteria-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+.criteria-toggle:hover {
+  background: #f8fbfb;
 }
 .topbar {
   height: 106px;
@@ -430,4 +449,134 @@ button {
   .content {
     padding: 24px 16px;
   }
+}
+
+.edit-form {
+  grid-column: 1 / -1;
+  margin-top: 12px;
+  padding: 16px;
+  background: var(--surface-2, #f8fafc);
+  border-radius: 8px;
+  border: 1px solid var(--border, #e2e8f0);
+}
+
+.help-content {
+  padding: 24px 28px;
+  max-width: 900px;
+}
+
+.help-content h4 {
+  margin-top: 24px;
+  margin-bottom: 8px;
+  font-size: 1.1rem;
+}
+
+.help-content p, .help-content li {
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+
+.help-content ol, .help-content ul {
+  margin-left: 20px;
+  margin-bottom: 12px;
+}
+
+.audit-row {
+  cursor: pointer;
+}
+
+.audit-run {
+  border-bottom: 1px solid var(--border, #e2e8f0);
+}
+
+.audit-run-head {
+  cursor: pointer;
+  background: var(--surface-2, #f8fafc);
+  font-weight: 600;
+}
+
+.audit-run-head:hover {
+  background: var(--surface-3, #f1f5f9);
+}
+
+.audit-chevron {
+  color: var(--muted, #64748b);
+  font-size: 0.9rem;
+  margin-left: 8px;
+}
+
+.audit-detail {
+  border: 1px solid var(--border, #e2e8f0);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  margin: -8px 0 12px 0;
+  padding: 16px 20px;
+  background: var(--surface-alt, #f8fafc);
+}
+
+.audit-detail h4 {
+  margin: 0 0 12px 0;
+  font-size: 0.95rem;
+}
+
+.oma-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.oma-item {
+  background: #fff;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.oma-label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted, #64748b);
+  margin-bottom: 6px;
+}
+
+.oma-item p {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.audit-technical pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .oma-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #f59e0b;
+  background: #fffbeb;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
+  font-size: 0.9rem;
 }

@@ -55,6 +55,18 @@ export interface IntakeResult {
   body: unknown;
 }
 
+export interface IntakeHooks {
+  /**
+   * Best-effort automation after a 201 accept: offer the accepted package to
+   * published lead_handoff workflows. Invoked only on fresh accepts — never
+   * on idempotent replays. May throw; handleIntake isolates the failure so
+   * the accepted intake still returns 201.
+   */
+  onHandoffAccepted?: (
+    pkg: LeadEngineHandoffPackage,
+  ) => Promise<unknown>;
+}
+
 export function readIntakeEnv(): IntakeEnv {
   const rawPublicKeyPem = process.env.LEAD_ENGINE_PUBLIC_KEY_PEM;
   // Vercel stores PEM blocks with literal "\n" sequences; convert to real
@@ -237,6 +249,7 @@ export async function handleIntake(
   request: IntakeHttpRequest,
   db: DeliveryDb,
   env: IntakeEnv,
+  hooks: IntakeHooks = {},
 ): Promise<IntakeResult> {
   const cors = corsHeadersFor(request.origin, env.allowedOrigins);
   if (request.method === "OPTIONS") {
@@ -417,6 +430,31 @@ export async function handleIntake(
       environment: env.environment,
     }),
   });
+
+  // (g) Best-effort automation: a freshly-accepted lead is immediately
+  // offered to published lead_handoff workflows. Failure-isolated — the
+  // intake decision above stands; a trigger failure is fed back as
+  // delivery.handoff.trigger_failed, never a 5xx. Idempotent replays return
+  // earlier, so they never re-execute workflows.
+  if (hooks.onHandoffAccepted) {
+    try {
+      await hooks.onHandoffAccepted(pkg);
+    } catch (error) {
+      await db.enqueueFeedbackEvent({
+        projectId: project.id,
+        event: buildFeedbackEvent({
+          eventType: "delivery.handoff.trigger_failed",
+          pkg,
+          projectId: project.id,
+          details: {
+            idempotencyKey,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          environment: env.environment,
+        }),
+      });
+    }
+  }
 
   return {
     status: 201,

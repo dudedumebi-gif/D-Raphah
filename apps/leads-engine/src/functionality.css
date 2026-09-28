@@ -101,6 +101,19 @@
   color: #48692b;
   font-size: 10px;
 }
+.row-action.active {
+  background: #48692b;
+  color: #fff;
+}
+.range-buttons {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+}
+.audit-day-head {
+  background: #f6f9f8;
+}
 .record-list {
   border-top: 1px solid #edf1f0;
 }
@@ -116,11 +129,14 @@
   flex-direction: column;
   gap: 4px;
   flex: 1;
+  min-width: 0;
 }
 .record-row small,
 .record-row time {
   font-size: 11px;
   color: #809497;
+  overflow-wrap: break-word;
+  word-break: break-all;
 }
 .verified {
   font-size: 10px;
@@ -257,12 +273,22 @@
 .split-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(320px, .75fr); gap: 18px; }
 .form-panel { padding-bottom: 22px; }
 .form-panel .inline-form { padding: 0 20px; margin-top: 0; }
+/* Plain .panel cards never gave their body content the card gutter: forms
+   and direct-child paragraphs sat flush against the card edges. */
+.panel .inline-form:not(.edit-form) { padding: 0 20px; }
+.panel > p,
+.record-list > p { padding-left: 20px; padding-right: 20px; }
 .form-strip { margin-bottom: 18px; padding: 17px 20px; }
 .horizontal-form { display: grid; grid-template-columns: minmax(210px, .7fr) minmax(300px, 1.5fr) auto; gap: 12px; align-items: end; }
 .horizontal-form input, .horizontal-form select { width: 100%; }
 .job-table .table-head, .job-table .table-row { grid-template-columns: 1.6fr .55fr .55fr 1.25fr; }
 .job-table .table-row > span { display: flex; flex-direction: column; gap: 5px; }
 .job-table time { color: #71878a; font-size: 10px; }
+.discovery-runs-table .table-head, .discovery-runs-table .table-row { grid-template-columns: 1.3fr 1.2fr 1fr .5fr .5fr; }
+.funnel-strip { display: flex; align-items: stretch; padding: 6px 20px 8px; }
+.funnel-stage { flex: 1; min-width: 0; }
+.funnel-arrow { align-self: center; padding: 0 10px; color: #9fb3b5; font-size: 18px; }
+.funnel-diagnosis { padding: 0 20px 18px; margin: 0; }
 .danger { color: #9a3f3f; background: #fbeeee; }
 .badge { text-transform: capitalize; white-space: nowrap; }
 .status-active, .status-completed, .status-success, .status-idle { background: #e4f3df; color: #39703c; }
@@ -395,3 +421,16 @@
   color: #2b3138;
   overflow-wrap: anywhere;
 }
+
+/* Responsive: allow record rows to wrap when viewport is narrow (zoomed) */
+@media (max-width: 900px) {
+  .record-row {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+  .record-row > div {
+    flex-basis: 100%;
+  }
+}
+.requeue-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 4px 20px 20px; }
+.requeue-row .muted { margin: 0; max-width: 64ch; }

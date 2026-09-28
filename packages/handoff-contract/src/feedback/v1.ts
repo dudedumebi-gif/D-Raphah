@@ -7,6 +7,7 @@ export const DeliveryFeedbackEventV1Schema = z.object({
   eventType: z.enum([
     "delivery.handoff.accepted",
     "delivery.handoff.rejected",
+    "delivery.handoff.trigger_failed",
     "delivery.clarification.requested",
     "delivery.project.started",
     "delivery.scope.change.requested",

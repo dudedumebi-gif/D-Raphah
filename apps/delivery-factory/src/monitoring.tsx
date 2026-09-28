@@ -44,16 +44,29 @@ interface HandoffRow {
 
 interface MonitoringSnapshot {
   recentHandoffs: HandoffRow[];
-  feedbackOutbox: { pending: number; dispatching: number; failed: number; sent: number };
+  feedbackOutbox: {
+    pending: number;
+    dispatching: number;
+    failed: number;
+    sent: number;
+  };
   activeNonces: number;
   qstash: {
     configured: boolean;
-    schedules: Array<{ name: string; cadence: string; route: string; status: string }>;
+    schedules: Array<{
+      name: string;
+      cadence: string;
+      route: string;
+      status: string;
+    }>;
   };
   checkedAt: string;
 }
 
-async function fetchJson(url: string, timeoutMs = 12_000): Promise<{ ok: boolean; status: number; data: unknown; latencyMs: number }> {
+async function fetchJson(
+  url: string,
+  timeoutMs = 12_000,
+): Promise<{ ok: boolean; status: number; data: unknown; latencyMs: number }> {
   const started = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -67,10 +80,19 @@ async function fetchJson(url: string, timeoutMs = 12_000): Promise<{ ok: boolean
     }
     const res = await fetch(url, { signal: ctrl.signal, headers });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok && (res.status === 401 || res.status === 403) && url.startsWith("/api/")) {
+    if (
+      !res.ok &&
+      (res.status === 401 || res.status === 403) &&
+      url.startsWith("/api/")
+    ) {
       notifyUnauthorized(res.status);
     }
-    return { ok: res.ok, status: res.status, data, latencyMs: Date.now() - started };
+    return {
+      ok: res.ok,
+      status: res.status,
+      data,
+      latencyMs: Date.now() - started,
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -104,8 +126,22 @@ function shortId(id: string): string {
 
 export function MonitoringSection() {
   const [services, setServices] = useState<ServiceStatus[]>([
-    { name: "Lead Engine", url: `${LEAD_ENGINE_BASE_URL}/api/health/live`, state: "loading", detail: "Checking…", latencyMs: null, checkedAt: null },
-    { name: "Delivery Factory", url: "/api/health", state: "loading", detail: "Checking…", latencyMs: null, checkedAt: null },
+    {
+      name: "Lead Engine",
+      url: `${LEAD_ENGINE_BASE_URL}/api/health/live`,
+      state: "loading",
+      detail: "Checking…",
+      latencyMs: null,
+      checkedAt: null,
+    },
+    {
+      name: "Delivery Factory",
+      url: "/api/health",
+      state: "loading",
+      detail: "Checking…",
+      latencyMs: null,
+      checkedAt: null,
+    },
   ]);
   const [readyChecks, setReadyChecks] = useState<ReadyCheck[] | null>(null);
   const [readyState, setReadyState] = useState<HealthState>("loading");
@@ -152,33 +188,49 @@ export function MonitoringSection() {
     ];
     setServices(nextServices);
 
-    // 2. Lead Engine readiness (configuration status).
+    // 2. Independent readiness probes for both products.
     try {
-      const ready = await fetchJson(`${LEAD_ENGINE_BASE_URL}/api/health/ready`);
-      const data = (ready.data ?? {}) as Record<string, unknown>;
-      const status = typeof data.status === "string" ? data.status : "unknown";
-      const checksRaw = Array.isArray(data.checks) ? data.checks : [];
-      const checks: ReadyCheck[] = checksRaw.map((c) => {
-        const r = c as Record<string, unknown>;
-        return {
-          name: String(r.name ?? r.check ?? "check"),
-          ok: r.ok === true || r.status === "ok" || r.status === "pass",
-          detail: typeof r.detail === "string" ? r.detail : typeof r.error === "string" ? r.error : undefined,
-        };
-      });
+      const [leadReady, deliveryReady] = await Promise.all([
+        fetchJson(`${LEAD_ENGINE_BASE_URL}/api/health/ready`),
+        fetchJson("/api/ready"),
+      ]);
+      const normalize = (prefix: string, payload: unknown): ReadyCheck[] => {
+        const data = (payload ?? {}) as Record<string, unknown>;
+        const rows = Array.isArray(data.checks) ? data.checks : [];
+        return rows.map((c) => {
+          const r = c as Record<string, unknown>;
+          return {
+            name: `${prefix}: ${String(r.name ?? r.check ?? "check")}`,
+            ok: r.ok === true || r.status === "ok" || r.status === "pass",
+            detail:
+              typeof r.detail === "string"
+                ? r.detail
+                : typeof r.error === "string"
+                  ? r.error
+                  : undefined,
+          };
+        });
+      };
+      const checks = [
+        ...normalize("Lead Engine", leadReady.data),
+        ...normalize("Delivery Factory", deliveryReady.data),
+      ];
       setReadyChecks(checks.length > 0 ? checks : null);
-      if (status === "ready" || status === "ok") {
+      if (
+        leadReady.ok &&
+        deliveryReady.ok &&
+        checks.every((check) => check.ok)
+      ) {
         setReadyState("up");
-        setReadyDetail("Ready — all configuration checks pass");
-      } else if (status === "not_ready" || status === "degraded") {
+        setReadyDetail("Both products ready — all configuration checks pass");
+      } else {
         setReadyState("degraded");
         const missing = checks.filter((c) => !c.ok).map((c) => c.name);
         setReadyDetail(
-          missing.length > 0 ? `Not ready: ${missing.join(", ")}` : `Not ready (HTTP ${ready.status})`,
+          missing.length > 0
+            ? `Not ready: ${missing.join(", ")}`
+            : `Readiness HTTP ${leadReady.status}/${deliveryReady.status}`,
         );
-      } else {
-        setReadyState(ready.ok ? "up" : "down");
-        setReadyDetail(`HTTP ${ready.status}`);
       }
     } catch {
       setReadyState("down");
@@ -211,7 +263,9 @@ export function MonitoringSection() {
   }, [poll]);
 
   const outbox = snapshot?.feedbackOutbox;
-  const outboxTotal = outbox ? outbox.pending + outbox.dispatching + outbox.failed : 0;
+  const outboxTotal = outbox
+    ? outbox.pending + outbox.dispatching + outbox.failed
+    : 0;
 
   return (
     <div className="mon-section">
@@ -251,11 +305,11 @@ export function MonitoringSection() {
           </div>
         ))}
 
-        {/* Lead Engine readiness */}
+        {/* Independent product readiness */}
         <div className="mon-card">
           <div className="mon-card-top">
             <span className={stateDot(readyState)} />
-            <strong>Lead Engine readiness</strong>
+            <strong>Product readiness</strong>
             <span className="mon-state">{readyState.toUpperCase()}</span>
           </div>
           <div className="mon-detail">{readyDetail}</div>
@@ -269,13 +323,23 @@ export function MonitoringSection() {
               ))}
             </ul>
           ) : null}
-          <div className="mon-url">{LEAD_ENGINE_BASE_URL}/api/health/ready</div>
+          <div className="mon-url">
+            {LEAD_ENGINE_BASE_URL}/api/health/ready · /api/ready
+          </div>
         </div>
 
         {/* Feedback outbox */}
         <div className="mon-card">
           <div className="mon-card-top">
-            <span className={stateDot(snapshot ? (outboxTotal > 0 || (outbox?.failed ?? 0) > 0 ? "degraded" : "up") : "unknown")} />
+            <span
+              className={stateDot(
+                snapshot
+                  ? outboxTotal > 0 || (outbox?.failed ?? 0) > 0
+                    ? "degraded"
+                    : "up"
+                  : "unknown",
+              )}
+            />
             <strong>Feedback outbox</strong>
             <span className="mon-state">
               {snapshot ? `${outboxTotal} QUEUED` : "UNKNOWN"}
@@ -283,10 +347,22 @@ export function MonitoringSection() {
           </div>
           {snapshot && outbox ? (
             <div className="mon-queue">
-              <div><b>{outbox.pending}</b><span>pending</span></div>
-              <div><b>{outbox.dispatching}</b><span>dispatching</span></div>
-              <div className={outbox.failed > 0 ? "bad" : ""}><b>{outbox.failed}</b><span>failed</span></div>
-              <div><b>{outbox.sent}</b><span>sent</span></div>
+              <div>
+                <b>{outbox.pending}</b>
+                <span>pending</span>
+              </div>
+              <div>
+                <b>{outbox.dispatching}</b>
+                <span>dispatching</span>
+              </div>
+              <div className={outbox.failed > 0 ? "bad" : ""}>
+                <b>{outbox.failed}</b>
+                <span>failed</span>
+              </div>
+              <div>
+                <b>{outbox.sent}</b>
+                <span>sent</span>
+              </div>
             </div>
           ) : (
             <div className="mon-detail">{snapshotError ?? "Loading…"}</div>
@@ -299,18 +375,36 @@ export function MonitoringSection() {
         {/* QStash schedules */}
         <div className="mon-card">
           <div className="mon-card-top">
-            <span className={stateDot(snapshot ? (snapshot.qstash.configured ? "up" : "degraded") : "unknown")} />
+            <span
+              className={stateDot(
+                snapshot
+                  ? snapshot.qstash.configured
+                    ? "up"
+                    : "degraded"
+                  : "unknown",
+              )}
+            />
             <strong>QStash schedules</strong>
             <span className="mon-state">
-              {snapshot ? (snapshot.qstash.configured ? "CONFIGURED" : "NOT CONFIGURED") : "UNKNOWN"}
+              {snapshot
+                ? snapshot.qstash.configured
+                  ? "CONFIGURED"
+                  : "NOT CONFIGURED"
+                : "UNKNOWN"}
             </span>
           </div>
           {snapshot ? (
             <ul className="mon-checks">
               {snapshot.qstash.schedules.map((s) => (
-                <li key={s.name} className={s.status === "configured" ? "ok" : "bad"}>
+                <li
+                  key={s.name}
+                  className={s.status === "configured" ? "ok" : "bad"}
+                >
                   <span>{s.status === "configured" ? "✓" : "✗"}</span> {s.name}
-                  <small> — {s.cadence} · {s.route}</small>
+                  <small>
+                    {" "}
+                    — {s.cadence} · {s.route}
+                  </small>
                 </li>
               ))}
               <li className="note">
@@ -329,11 +423,15 @@ export function MonitoringSection() {
         <div className="mon-panel-head">
           <h3>Recent handoff packages received</h3>
           {snapshot ? (
-            <span className="mon-poll">as of {formatTime(snapshot.checkedAt)}</span>
+            <span className="mon-poll">
+              as of {formatTime(snapshot.checkedAt)}
+            </span>
           ) : null}
         </div>
         {snapshotError && !snapshot ? (
-          <div className="mon-empty">Could not load handoff activity: {snapshotError}</div>
+          <div className="mon-empty">
+            Could not load handoff activity: {snapshotError}
+          </div>
         ) : !snapshot || snapshot.recentHandoffs.length === 0 ? (
           <div className="mon-empty">
             No handoff packages received yet. Packages sent by the Lead Engine
@@ -366,7 +464,9 @@ export function MonitoringSection() {
                     {h.projectId ? (
                       <span>
                         <code>{shortId(h.projectId)}</code>
-                        {h.projectStage ? <small> · {h.projectStage}</small> : null}
+                        {h.projectStage ? (
+                          <small> · {h.projectStage}</small>
+                        ) : null}
                       </span>
                     ) : (
                       "—"

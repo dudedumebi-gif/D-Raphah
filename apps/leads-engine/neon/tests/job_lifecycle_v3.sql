@@ -29,6 +29,9 @@ values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000
 
 select is((select count(*)::int from public.lease_scrape_jobs('worker-a',3,240,now())),1,'only one job per source is leased');
 select is((select count(*)::int from public.lease_scrape_jobs('worker-b',3,240,now())),0,'another worker cannot overlap the active source');
+select ok(public.reserve_source_collection((select id from public.scrape_jobs where lease_owner='worker-a'),'worker-a',now()),'source capacity is reserved durably');
+select ok(public.reserve_source_collection((select id from public.scrape_jobs where lease_owner='worker-a'),'worker-a',now()),'reservation replay is idempotent');
+select is((select count(*)::int from public.source_collection_reservations where worker_id='worker-a'),1,'reservation replay does not consume budget twice');
 select is(public.start_scrape_attempt((select id from public.scrape_jobs where lease_owner='worker-a'),'worker-a'),1,'start increments attempt atomically');
 select throws_ok($$select public.start_scrape_attempt((select id from public.scrape_jobs where lease_owner='worker-a'),'worker-b')$$,'P0001','job lease is not owned by worker','wrong worker cannot start attempt');
 update public.scrape_jobs set lease_expires_at=now()-interval '1 second' where lease_owner='worker-a';

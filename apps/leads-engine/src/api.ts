@@ -115,6 +115,7 @@ export interface SourceRecord {
   name: string;
   base_url: string;
   collection_method: string;
+  business_purpose: string;
   status: string;
   active_policy_id: string | null;
   created_at: string;
@@ -132,7 +133,12 @@ export interface CampaignRecord {
     direction: "loosen" | "hold" | "tighten";
     observedQualifiedLeads: number;
     targetQualifiedLeads: number;
-    changes: Record<string, number>;
+    changes: Record<string, number> & {
+      geography?: {
+        centreLatitude?: number | null;
+        centreLongitude?: number | null;
+      };
+    };
     rationale: string[];
     autoApply: false;
   };
@@ -152,6 +158,16 @@ export interface JobRecord {
   created_at: string;
 }
 
+/** Discovery-funnel rollup served by GET /api/v1/funnel (see §4.2 of the
+ * PRD audit: funnel width before threshold changes). */
+export interface FunnelStats {
+  activeSources: number;
+  candidatesEvaluated: number;
+  scored: number;
+  qualified: number;
+  windowDays: number;
+}
+
 export interface LeadRecord {
   id: string;
   title: string;
@@ -168,6 +184,34 @@ export interface LeadRecord {
     | null;
 }
 
+export interface DiscoverySourceRecord {
+  id: string;
+  name: string;
+  adapter_id: string;
+  geo_params: {
+    city?: string;
+    region?: string;
+    centreLatitude?: number;
+    centreLongitude?: number;
+    radiusKm?: number;
+  } | null;
+  source_id: string;
+  campaign_id: string | null;
+  active: boolean;
+  created_at: string;
+}
+
+export interface DiscoveryRunRecord {
+  id: string;
+  discovery_source_id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  candidates_found: number | null;
+  candidates_enqueued: number | null;
+  error: string | null;
+}
+
 export interface AuditRecord {
   id: string;
   action: string;
@@ -177,6 +221,8 @@ export interface AuditRecord {
   reason: string | null;
   actor_id: string | null;
   correlation_id: string | null;
+  before_state: Record<string, unknown> | null;
+  after_state: Record<string, unknown> | null;
   created_at: string;
 }
 

@@ -4,15 +4,14 @@
 
 This runbook moves Lead Engine v3 from a buildable release candidate to a production-approved service on Vercel Hobby, Neon Free, and Upstash QStash Free. Passing local tests is necessary but does not replace the database isolation test, live collection test, or 72-hour canary.
 
-## Verified checkpoint — 2026-09-23
+## Verified checkpoint — 2026-09-28
 
-**Status: implementation in progress; do not promote.** These changes are local and have not been deployed.
+**Status: release candidate implemented; live gates pending; do not promote.** Code readiness does not replace disposable-Neon execution, genuine-token RLS proof, the deployed Postman lifecycle, or the 72-hour canary.
 
-- Lead Engine typecheck and Vite production build pass.
-- Lead Engine unit/regression tests: 24 pass, including manual scheduler authorization and unsigned-request rejection. Earlier domain-only coverage was 99.42% statements, 94.33% branches, 93.75% functions. This is not backend-wide integration coverage.
-- Existing shared-contract and legacy Lead/Delivery service tests: 16 pass.
-- The complete monorepo typecheck and build pass. Recharts and `input-otp` React type-compatibility failures in the mockup package were corrected, and the root test gate now includes the production Lead Engine suite.
-- Neon v3 migration, a genuine-token Data API/RLS harness, and job-lifecycle SQL assertions are prepared but **not executed**. Neon and QStash have not yet been provisioned.
+- Lead Engine and Delivery Factory typechecks and Vite production builds pass.
+- The frozen-lockfile release regression has **364 passing tests**: Lead Engine 213, Delivery Factory 117, shared handoff contract 22, and legacy compatibility suites 12.
+- The complete monorepo typecheck and build pass, and the static production-readiness verifier confirms CI builds, source budgets/pacing, audit coverage, scoring v2.1, readiness, and the Postman handoff lifecycle.
+- Lead Engine schema `3.2.0`, Delivery Factory schema `1.1.0`, a genuine-token Data API/RLS harness, and job-lifecycle SQL assertions are prepared but **not executed against Neon in this release session**.
 - `VERCEL_TOKEN` authentication and access to `d-raphah`, `d-raphah-leads-engine`, and `d-raphah-delivery-factory` were verified through the Vercel REST API using IPv4. The OAuth connector remains incorrectly scoped to an inaccessible team, so it is not accepted as deployment evidence. No environment mutation or production telemetry review has been performed.
 - No 72-hour soak, persistent restart experiment, concurrent database integration test, or live Postman lifecycle has passed yet.
 
@@ -27,14 +26,14 @@ This runbook moves Lead Engine v3 from a buildable release candidate to a produc
 - Canary evaluation requires 72 elapsed hourly slots, counts missing slots against completion, and rejects duplicate-only and future-completed evidence. At hourly cadence, one failed slot out of 72 is below 99%.
 - The local mirror is versioned, actor-checked, and non-authoritative, following the React review guidance.
 
-### Remaining implementation gates
+### Remaining live-evidence gates
 
-1. Complete permitted-source business discovery beyond a single target URL: directory/feed result expansion, per-business identity attribution, bounded crawl depth, and durable child jobs. Fetching an RSS/sitemap document is not equivalent to discovering each business in it.
-2. Enforce source budgets and request pacing across workers, strengthen robots handling, and pin validated DNS addresses (or use an approved egress proxy) to close DNS-rebinding risk. Current DNS prechecks alone are not a complete SSRF defence.
-3. Complete industry/company-size evidence and feedback-quality calibration; the current ICP contribution is a fixed baseline. Maturity scores are heuristic indices, not measured percentages of AI use.
-4. Restore discovery sessions, validated requirements/features, immutable baseline release, and durable signed handoff in the new authenticated UI/data plane. Legacy in-memory services and their passing tests do not establish this production parity. Delivery Factory persistence/authentication and signed receipt handling remain independent work.
-5. Add paginated full lead export, job/evidence drill-down UI, retention/orphan cleanup, and high-volume operational aggregation. Current list limits must not be treated as complete exports or scale proof.
-6. Run actual database concurrency, restart, tenant isolation, retry/DLQ and full-pipeline tests against a disposable Neon branch before production. Verify QStash dispatch latency and free-tier message/storage budgets against the start-latency target.
+1. Apply Lead Engine schema `3.2.0` and Delivery Factory schema `1.1.0` to disposable Neon branches, then production after SQL assertions pass.
+2. Run database concurrency, restart, tenant-isolation, retry/DLQ, source-budget, and full-pipeline tests against the disposable branches.
+3. Run Postman through qualified lead → human acceptance → signed Delivery Factory handoff and verify both audit streams.
+4. Review deployed Vercel runtime logs and Sentry releases for both independent products.
+5. Run the owned `/canary-source.html` hourly for 72 elapsed hours; require completion `>=99%` and scheduled-start p95 `<300,000 ms`.
+6. Record the first genuine production lead and Delivery Factory receipt as release evidence.
 
 These are code and integration gates, not merely missing credentials. A working Neon/QStash/Vercel connection does not by itself make this release production-ready.
 
@@ -75,7 +74,7 @@ The job queue, attempts, leases, evidence metadata, signals, assessments, opport
 ## Provision Neon and QStash
 
 1. In the personal Vercel Hobby scope, attach Neon and Upstash QStash Marketplace integrations to the Lead Engine project. Do not create a Vercel Team.
-2. Enable Neon Auth and Data API, then apply `apps/leads-engine/neon/migrations/202609220001_lead_engine_production.sql` to a disposable branch.
+2. Enable Neon Auth and Data API, then apply every Lead Engine migration through `202609270001_source_budget_and_audit.sql` to a disposable branch in filename order.
 3. Run `job_lifecycle_v3.sql` on that branch and `pnpm test:rls:neon` using two real Neon Auth sessions. Apply the migration to production only after both pass.
 4. Set `LEAD_ENGINE_BASE_URL` and `QSTASH_TOKEN`, then run `pnpm qstash:configure`. Stable schedule IDs make the command safely repeatable.
 5. Confirm QStash shows the five-minute worker schedule and hourly canary schedule, with signed delivery and three retries.

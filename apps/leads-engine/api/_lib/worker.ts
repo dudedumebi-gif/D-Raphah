@@ -6,6 +6,7 @@ import {
   detectSignals,
   evaluateAutoApply,
   evaluateGeography,
+  inferBusinessProfile,
   retryDelaySeconds,
   scoreSignals,
   suggestCriteriaAdjustment,
@@ -13,6 +14,7 @@ import {
 import { truncateToByteLength } from "@raphah/handoff-contract";
 import { createAdminClient } from "./neon.js";
 import { dispatchDueHandoffs, type SqlClient } from "./handoff.js";
+import { checkCanaryAlerts, checkDeadLetterAlerts } from "./alerts.js";
 import { log, reportError } from "./telemetry.js";
 
 type DatabaseClient = ReturnType<typeof createAdminClient>;
@@ -66,6 +68,8 @@ export interface WorkerTickResult {
   handoffsDispatched: number;
   handoffsFailed: number;
   autoApplied: number;
+  alertsEmitted: number;
+  prunedOperationalRows: number;
 }
 
 function collectionPolicy(row: PolicyRow): CollectionPolicy {
@@ -168,7 +172,7 @@ async function persistEvidenceAndLead(
     collected.coordinates,
   );
   const score = scoreSignals(signals, criteria, {
-    icpFit: 55,
+    businessProfile: inferBusinessProfile(collected.extractedText),
     geoEligible: geography.eligible,
     evidenceFreshness: 100,
   });
@@ -210,12 +214,19 @@ export async function processScrapeJob(
   job: ScrapeJobRow,
   workerId: string,
 ) {
-  const attemptRows = (await client`
-    select public.start_scrape_attempt(${job.id}::uuid, ${workerId}) as attempt_number
-  `) as unknown as Array<{ attempt_number: number }>;
-  const attemptNumber = Number(attemptRows[0]?.attempt_number ?? 0);
-
+  let attemptNumber = job.attempt_count;
   try {
+    const reservations = (await client`
+      select public.reserve_source_collection(
+        ${job.id}::uuid, ${workerId}, ${new Date().toISOString()}::timestamptz
+      ) as reserved
+    `) as unknown as Array<{ reserved: boolean }>;
+    if (!reservations[0]?.reserved)
+      throw new Error("Collection reservation was not granted");
+    const attemptRows = (await client`
+      select public.start_scrape_attempt(${job.id}::uuid, ${workerId}) as attempt_number
+    `) as unknown as Array<{ attempt_number: number }>;
+    attemptNumber = Number(attemptRows[0]?.attempt_number ?? 0);
     const { source, policy } = await loadSource(client, job);
     const collected = await collectUrl(
       job.target_url,
@@ -297,6 +308,8 @@ export async function runWorkerTick(
     handoffsDispatched: 0,
     handoffsFailed: 0,
     autoApplied: 0,
+    alertsEmitted: 0,
+    prunedOperationalRows: 0,
   };
   const now = new Date().toISOString();
   const deploymentId =
@@ -325,6 +338,10 @@ export async function runWorkerTick(
     where id != ${workerId}
       and last_heartbeat_at < now() - interval '24 hours'
   `;
+  const prunedRows = (await client`
+    select public.prune_operational_history(${now}::timestamptz) as count
+  `) as unknown as Array<{ count: number }>;
+  result.prunedOperationalRows = Number(prunedRows[0]?.count ?? 0);
   const enqueueRows = (await client`
     select public.enqueue_due_scrape_jobs(${now}::timestamptz) as count
   `) as unknown as Array<{ count: number }>;
@@ -371,12 +388,21 @@ export async function runWorkerTick(
         where id = ${campaign.id}::uuid
       `;
       // humanValidatorId = campaign owner-of-record (updated_by).
+      // NOTE: log_workspace_event() requires a human JWT session
+      // (is_workspace_member), so the service-role worker cannot use it —
+      // write the audit row by direct insert with actor_id = null (system),
+      // the same pattern as alerts.ts.
       await client`
-        select public.log_workspace_event(
+        insert into public.audit_events(
+          workspace_id, actor_id, action, resource_type, resource_id,
+          outcome, reason, before_state, after_state
+        ) values (
           ${campaign.workspace_id}::uuid,
+          null,
           'criteria.auto_applied',
           'scrape_campaigns',
           ${campaign.id}::text,
+          'success',
           ${`Auto-applied one bounded ${suggestion.direction} step (validator: ${campaign.updated_by ?? "unknown"})`}::text,
           ${JSON.stringify(campaign.criteria)}::jsonb,
           ${JSON.stringify(next)}::jsonb
@@ -412,6 +438,18 @@ export async function runWorkerTick(
     log("error", "handoff_dispatch_tick_failed", { workerId });
     await reportError(error, { workerId });
     result.handoffsFailed += 1;
+  }
+  // Operator alerting (audit gap 4): canary failures and dead-letter
+  // breaches must reach the operator without dashboard-watching. Alerting
+  // is failure-isolated and deduped inside the alert module, so it can
+  // never fail the tick or spam on repeat ticks.
+  try {
+    const sql = client as unknown as Parameters<typeof checkCanaryAlerts>[0];
+    result.alertsEmitted =
+      (await checkCanaryAlerts(sql)) + (await checkDeadLetterAlerts(sql));
+  } catch (error) {
+    log("error", "alert_tick_failed", { workerId });
+    await reportError(error, { workerId });
   }
   await client`
     update public.worker_nodes
