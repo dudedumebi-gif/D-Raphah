@@ -1,34 +1,41 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const CriteriaSchema = z.object({
-  automationMaturityMax: z.number().min(0).max(100).default(40),
-  opportunityPotentialMin: z.number().min(0).max(100).default(60),
-  confidenceMin: z.number().min(0).max(1).default(0.7),
-  minimumEvidenceCategories: z.number().int().min(1).max(6).default(2),
-  targetQualifiedLeadsPerWeek: z.number().int().min(1).max(10_000).default(20),
-  industries: z.array(z.string()).default([]),
-  employeeMinimum: z.number().int().min(1).default(5),
-  employeeMaximum: z.number().int().min(1).default(50),
-  geography: z
-    .object({
-      mode: z.enum(["radius", "regions", "hybrid"]).default("hybrid"),
-      cities: z.array(z.string()).default(["Toronto", "Ottawa", "Montreal"]),
-      regions: z.array(z.string()).default(["Ontario", "Quebec"]),
-      radiusKm: z.number().min(1).max(1000).default(50),
-      centreLatitude: z.number().min(-90).max(90).nullable().default(null),
-      centreLongitude: z.number().min(-180).max(180).nullable().default(null),
-    })
-    .default({}),
-}).superRefine((criteria, ctx) => {
-  if (criteria.employeeMinimum > criteria.employeeMaximum) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["employeeMinimum"],
-      message: "employeeMinimum must not exceed employeeMaximum",
-    });
-  }
-});
+export const CriteriaSchema = z
+  .object({
+    automationMaturityMax: z.number().min(0).max(100).default(40),
+    opportunityPotentialMin: z.number().min(0).max(100).default(60),
+    confidenceMin: z.number().min(0).max(1).default(0.7),
+    minimumEvidenceCategories: z.number().int().min(1).max(6).default(2),
+    targetQualifiedLeadsPerWeek: z
+      .number()
+      .int()
+      .min(1)
+      .max(10_000)
+      .default(20),
+    industries: z.array(z.string()).default([]),
+    employeeMinimum: z.number().int().min(1).default(5),
+    employeeMaximum: z.number().int().min(1).default(50),
+    geography: z
+      .object({
+        mode: z.enum(["radius", "regions", "hybrid"]).default("hybrid"),
+        cities: z.array(z.string()).default(["Toronto", "Ottawa", "Montreal"]),
+        regions: z.array(z.string()).default(["Ontario", "Quebec"]),
+        radiusKm: z.number().min(1).max(1000).default(50),
+        centreLatitude: z.number().min(-90).max(90).nullable().default(null),
+        centreLongitude: z.number().min(-180).max(180).nullable().default(null),
+      })
+      .default({}),
+  })
+  .superRefine((criteria, ctx) => {
+    if (criteria.employeeMinimum > criteria.employeeMaximum) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["employeeMinimum"],
+        message: "employeeMinimum must not exceed employeeMaximum",
+      });
+    }
+  });
 
 export type LeadCriteria = z.infer<typeof CriteriaSchema>;
 
@@ -59,6 +66,11 @@ export interface ScoreResult {
   explanation: string[];
   components: Record<string, number>;
   scoringVersion: string;
+}
+
+export interface BusinessProfile {
+  industry: string | null;
+  employeeCount: number | null;
 }
 
 export interface GeographyEvaluation {
@@ -185,7 +197,8 @@ const SIGNAL_RULES: Array<{
     category: "digital_foundation",
     polarity: "automated",
     strength: 15,
-    pattern: /salesforce|hubspot|dynamics 365|netsuite|\bsap\b|workday|servicenow/i,
+    pattern:
+      /salesforce|hubspot|dynamics 365|netsuite|\bsap\b|workday|servicenow/i,
   },
   {
     code: "integration",
@@ -343,6 +356,46 @@ export function detectSignals(text: string): DetectedSignal[] {
     });
   }
   return detected;
+}
+
+export function inferBusinessProfile(text: string): BusinessProfile {
+  const normalized = normalizeText(text);
+  const industryMatch = normalized.match(
+    /(?:industry|sector)\s*[:\-]\s*([a-z][a-z &/\-]{2,48})(?=[.;|]|\s{2}|$)/i,
+  );
+  const employeeMatch = normalized.match(
+    /(?:employees?|team|staff|workforce)\s*(?:count|size)?\s*[:\-]?\s*(\d{1,6})\b/i,
+  );
+  return {
+    industry: industryMatch?.[1]?.trim() ?? null,
+    employeeCount: employeeMatch ? Number(employeeMatch[1]) : null,
+  };
+}
+
+export function calculateIcpFit(
+  profile: BusinessProfile,
+  criteriaInput: unknown,
+): number {
+  const criteria = CriteriaSchema.parse(criteriaInput);
+  let score = 55;
+  if (profile.industry && criteria.industries.length > 0) {
+    const observed = profile.industry.toLowerCase();
+    const matched = criteria.industries.some((industry) => {
+      const configured = industry.trim().toLowerCase();
+      return (
+        configured &&
+        (observed.includes(configured) || configured.includes(observed))
+      );
+    });
+    score += matched ? 25 : -20;
+  }
+  if (profile.employeeCount !== null) {
+    const inRange =
+      profile.employeeCount >= criteria.employeeMinimum &&
+      profile.employeeCount <= criteria.employeeMaximum;
+    score += inRange ? 20 : -15;
+  }
+  return clamp(score);
 }
 
 // Matches denial of the friction cue: "do not fax", "no spreadsheets",
@@ -711,8 +764,7 @@ export function evaluateAutoApply(
     const [minimum, maximum] = AUTO_APPLY_HARD_BOUNDS[key];
     stepped = Math.min(maximum, Math.max(minimum, stepped));
     if (key === "confidenceMin") stepped = Number(stepped.toFixed(2));
-    if (key === "minimumEvidenceCategories")
-      stepped = Math.round(stepped);
+    if (key === "minimumEvidenceCategories") stepped = Math.round(stepped);
     if (stepped !== current) {
       next[key] = stepped;
       moved = true;
@@ -743,6 +795,7 @@ export function scoreSignals(
   criteriaInput: unknown,
   metadata: {
     icpFit?: number;
+    businessProfile?: BusinessProfile;
     geoEligible?: boolean;
     evidenceFreshness?: number;
   } = {},
@@ -783,7 +836,13 @@ export function scoreSignals(
   const urgencyStrength = signals
     .filter((signal) => signal.polarity === "commercial")
     .reduce((total, signal) => total + signal.strength * signal.confidence, 0);
-  const icpFit = clamp(metadata.icpFit ?? 55);
+  const icpFit = clamp(
+    metadata.icpFit ??
+      (metadata.businessProfile
+        ? calculateIcpFit(metadata.businessProfile, criteria)
+        : 55),
+  );
+  components.icp_fit = Math.round(icpFit);
   const opportunityPotential = Math.round(
     clamp(
       icpFit * 0.45 +
@@ -822,6 +881,7 @@ export function scoreSignals(
     `Automation maturity ${automationMaturity}/100 (qualifies at or below ${criteria.automationMaturityMax}).`,
     `Opportunity potential ${opportunityPotential}/100 (minimum ${criteria.opportunityPotentialMin}).`,
     `Confidence ${(confidence * 100).toFixed(0)}% across ${coverageCategories} evidence categories.`,
+    `ICP fit ${Math.round(icpFit)}/100 based on available firmographic evidence.`,
     geoEligible
       ? "Geography is eligible."
       : "Geography is outside the configured market.",
@@ -835,7 +895,7 @@ export function scoreSignals(
     qualified,
     explanation,
     components,
-    scoringVersion: "2.0.0",
+    scoringVersion: "2.1.0",
   };
 }
 

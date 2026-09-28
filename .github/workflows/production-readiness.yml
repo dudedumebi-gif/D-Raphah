@@ -1,0 +1,53 @@
+name: Production readiness
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: Run deployed health and Neon RLS checks
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm release:verify
+
+  live:
+    if: inputs.run_live
+    needs: regression
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      LEAD_ENGINE_PRODUCTION_URL: ${{ vars.LEAD_ENGINE_PRODUCTION_URL }}
+      DELIVERY_FACTORY_PRODUCTION_URL: ${{ vars.DELIVERY_FACTORY_PRODUCTION_URL }}
+      NEON_DATA_API_URL: ${{ secrets.NEON_DATA_API_URL }}
+      NEON_RLS_TEST_TOKEN_A: ${{ secrets.NEON_RLS_TEST_TOKEN_A }}
+      NEON_RLS_TEST_TOKEN_B: ${{ secrets.NEON_RLS_TEST_TOKEN_B }}
+      NEON_RLS_WORKSPACE_A: ${{ secrets.NEON_RLS_WORKSPACE_A }}
+      NEON_RLS_WORKSPACE_B: ${{ secrets.NEON_RLS_WORKSPACE_B }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify deployed product identity and readiness
+        run: pnpm release:verify:live
+      - name: Verify genuine-token Neon RLS isolation
+        run: pnpm --filter @raphah/leads-engine-app test:rls:neon

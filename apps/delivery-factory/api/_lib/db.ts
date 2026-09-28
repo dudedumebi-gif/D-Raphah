@@ -29,6 +29,17 @@ export function getDb(): NeonClient {
   return database;
 }
 
+export async function assertDeliveryDatabaseReady(
+  client: NeonClient = getDb(),
+): Promise<void> {
+  const rows = (await client`
+    select version from public.schema_versions
+    where service='delivery-factory' limit 1
+  `) as unknown as Array<{ version: string }>;
+  if (rows[0]?.version !== "1.1.0")
+    throw new Error("Database readiness failed: incompatible schema version");
+}
+
 export interface InboxRow {
   id: string;
   idempotency_key: string;
@@ -116,7 +127,10 @@ export interface DeliveryDb {
     title: string;
     targetDate?: string;
   }): Promise<MilestoneRow>;
-  completeMilestone(projectId: string, milestoneId: string): Promise<MilestoneRow>;
+  completeMilestone(
+    projectId: string,
+    milestoneId: string,
+  ): Promise<MilestoneRow>;
   createClarification(input: {
     projectId: string;
     question: string;
@@ -161,7 +175,12 @@ export interface MonitoringHandoff {
 
 export interface MonitoringSnapshot {
   recentHandoffs: MonitoringHandoff[];
-  feedbackOutbox: { pending: number; dispatching: number; failed: number; sent: number };
+  feedbackOutbox: {
+    pending: number;
+    dispatching: number;
+    failed: number;
+    sent: number;
+  };
   activeNonces: number;
 }
 
@@ -392,7 +411,9 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
       `;
     },
 
-    async findOperatorSession(token: string): Promise<{ email: string } | null> {
+    async findOperatorSession(
+      token: string,
+    ): Promise<{ email: string } | null> {
       // Neon Auth (managed better-auth) keeps its tables in the `neon_auth`
       // schema — NOT `auth` (that schema holds Neon's RLS helpers).
       // neon_auth.session.token is the opaque token stored verbatim;

@@ -250,7 +250,60 @@
               }
             ],
             "url": "{{baseUrl}}/api/v1/leads"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Qualified leads available', () => pm.response.to.have.status(200));",
+                  "const rows = pm.response.json().data || [];",
+                  "if (rows[0] && rows[0].id) pm.environment.set('opportunityId', rows[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Record human acceptance",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Workspace-ID", "value": "{{workspaceId}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/v1/leads/{{opportunityId}}/feedback",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"decision\":\"accepted\",\"reasonCode\":\"postman_human_review\",\"notes\":\"Approved for Delivery Factory handoff\"}"
+            }
           }
+        },
+        {
+          "name": "Signed Delivery Factory handoff",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Workspace-ID", "value": "{{workspaceId}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/v1/handoffs",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"opportunityId\":\"{{opportunityId}}\",\"idempotencyKey\":\"postman-handoff-{{opportunityId}}\"}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Signed handoff enqueued', () => pm.response.to.have.status(201));",
+                  "pm.test('Manifest checksum returned', () => pm.expect(pm.response.json().manifestChecksum).to.match(/^[a-f0-9]{64}$/));"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Audit events",

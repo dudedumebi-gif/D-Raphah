@@ -11,6 +11,7 @@ import {
   OperatorAuthError,
   requireSession,
 } from "./_lib/operator.js";
+import { reportError } from "./_lib/telemetry.js";
 
 /**
  * POST /api/sign-out — operator sign-out.
@@ -32,7 +33,12 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
     return;
   }
   if (method !== "POST") {
-    sendJson(res, 405, { allow: "POST, OPTIONS" }, { error: "Method not allowed" });
+    sendJson(
+      res,
+      405,
+      { allow: "POST, OPTIONS" },
+      { error: "Method not allowed" },
+    );
     return;
   }
   try {
@@ -46,6 +52,7 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
       sendJson(res, status, {}, { error: errorMessage(err) });
       return;
     }
+    await reportError(err, { route: "/api/sign-out" });
     sendJson(res, 500, {}, { error: "Sign-out failed" });
   }
 }

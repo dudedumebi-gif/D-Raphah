@@ -6,6 +6,7 @@ import {
   detectSignals,
   evaluateAutoApply,
   evaluateGeography,
+  inferBusinessProfile,
   retryDelaySeconds,
   scoreSignals,
   suggestCriteriaAdjustment,
@@ -68,6 +69,7 @@ export interface WorkerTickResult {
   handoffsFailed: number;
   autoApplied: number;
   alertsEmitted: number;
+  prunedOperationalRows: number;
 }
 
 function collectionPolicy(row: PolicyRow): CollectionPolicy {
@@ -170,7 +172,7 @@ async function persistEvidenceAndLead(
     collected.coordinates,
   );
   const score = scoreSignals(signals, criteria, {
-    icpFit: 55,
+    businessProfile: inferBusinessProfile(collected.extractedText),
     geoEligible: geography.eligible,
     evidenceFreshness: 100,
   });
@@ -212,12 +214,19 @@ export async function processScrapeJob(
   job: ScrapeJobRow,
   workerId: string,
 ) {
-  const attemptRows = (await client`
-    select public.start_scrape_attempt(${job.id}::uuid, ${workerId}) as attempt_number
-  `) as unknown as Array<{ attempt_number: number }>;
-  const attemptNumber = Number(attemptRows[0]?.attempt_number ?? 0);
-
+  let attemptNumber = job.attempt_count;
   try {
+    const reservations = (await client`
+      select public.reserve_source_collection(
+        ${job.id}::uuid, ${workerId}, ${new Date().toISOString()}::timestamptz
+      ) as reserved
+    `) as unknown as Array<{ reserved: boolean }>;
+    if (!reservations[0]?.reserved)
+      throw new Error("Collection reservation was not granted");
+    const attemptRows = (await client`
+      select public.start_scrape_attempt(${job.id}::uuid, ${workerId}) as attempt_number
+    `) as unknown as Array<{ attempt_number: number }>;
+    attemptNumber = Number(attemptRows[0]?.attempt_number ?? 0);
     const { source, policy } = await loadSource(client, job);
     const collected = await collectUrl(
       job.target_url,
@@ -300,6 +309,7 @@ export async function runWorkerTick(
     handoffsFailed: 0,
     autoApplied: 0,
     alertsEmitted: 0,
+    prunedOperationalRows: 0,
   };
   const now = new Date().toISOString();
   const deploymentId =
@@ -328,6 +338,10 @@ export async function runWorkerTick(
     where id != ${workerId}
       and last_heartbeat_at < now() - interval '24 hours'
   `;
+  const prunedRows = (await client`
+    select public.prune_operational_history(${now}::timestamptz) as count
+  `) as unknown as Array<{ count: number }>;
+  result.prunedOperationalRows = Number(prunedRows[0]?.count ?? 0);
   const enqueueRows = (await client`
     select public.enqueue_due_scrape_jobs(${now}::timestamptz) as count
   `) as unknown as Array<{ count: number }>;
@@ -430,9 +444,7 @@ export async function runWorkerTick(
   // is failure-isolated and deduped inside the alert module, so it can
   // never fail the tick or spam on repeat ticks.
   try {
-    const sql = client as unknown as Parameters<
-      typeof checkCanaryAlerts
-    >[0];
+    const sql = client as unknown as Parameters<typeof checkCanaryAlerts>[0];
     result.alertsEmitted =
       (await checkCanaryAlerts(sql)) + (await checkDeadLetterAlerts(sql));
   } catch (error) {

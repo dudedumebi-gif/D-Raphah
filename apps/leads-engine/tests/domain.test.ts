@@ -4,6 +4,8 @@ import {
   CriteriaSchema,
   detectSignals,
   evaluateCanarySoak,
+  calculateIcpFit,
+  inferBusinessProfile,
   mergeSuggestionChanges,
   percentile95,
   recoverExpiredLease,
@@ -13,7 +15,10 @@ import {
   suggestCriteriaAdjustment,
   suggestGeographyCentre,
 } from "../api/_lib/domain";
-import { assertUrlAllowed, type CollectionPolicy } from "../api/_lib/collection";
+import {
+  assertUrlAllowed,
+  type CollectionPolicy,
+} from "../api/_lib/collection";
 
 const policy: CollectionPolicy = {
   allowedDomains: ["example.com"],
@@ -94,7 +99,7 @@ describe("maturity scoring", () => {
     expect(score.automationMaturity).toBeLessThan(50);
     expect(score.opportunityPotential).toBeGreaterThanOrEqual(50);
     expect(score.qualified).toBe(true);
-    expect(score.scoringVersion).toBe("2.0.0");
+    expect(score.scoringVersion).toBe("2.1.0");
   });
 
   it("does not qualify highly automated organizations", () => {
@@ -109,6 +114,37 @@ describe("maturity scoring", () => {
     });
     expect(score.automationMaturity).toBeGreaterThan(40);
     expect(score.qualified).toBe(false);
+  });
+});
+
+describe("firmographic ICP scoring", () => {
+  it("rewards explicit industry and employee-range matches", () => {
+    const profile = inferBusinessProfile(
+      "Industry: Professional Services. Employees: 24.",
+    );
+    expect(profile).toEqual({
+      industry: "Professional Services",
+      employeeCount: 24,
+    });
+    expect(
+      calculateIcpFit(profile, {
+        industries: ["professional services"],
+        employeeMinimum: 5,
+        employeeMaximum: 50,
+      }),
+    ).toBe(100);
+  });
+
+  it("keeps unknown firmographics neutral and penalizes explicit mismatch", () => {
+    expect(calculateIcpFit({ industry: null, employeeCount: null }, {})).toBe(
+      55,
+    );
+    expect(
+      calculateIcpFit(
+        { industry: "Retail", employeeCount: 500 },
+        { industries: ["healthcare"], employeeMinimum: 5, employeeMaximum: 50 },
+      ),
+    ).toBe(20);
   });
 });
 

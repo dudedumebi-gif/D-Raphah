@@ -7,6 +7,7 @@ import {
 import { getDb } from "../_lib/db.js";
 import type { ApiRequest } from "../_lib/http.js";
 import { sendJson } from "../_lib/http.js";
+import { reportError } from "../_lib/telemetry.js";
 
 /**
  * POST /api/internal/dispatch-feedback — drains the feedback outbox to the
@@ -48,6 +49,7 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
     });
     sendJson(res, 200, {}, { status: "ok", ...summary });
   } catch (error) {
+    await reportError(error, { route: "/api/internal/dispatch-feedback" });
     sendJson(res, 500, {}, { error: "Feedback dispatch failed" });
   }
 }

@@ -22,6 +22,13 @@ const runtimeVariables = [
   "NEON_AUTH_URL",
   "QSTASH_CURRENT_SIGNING_KEY",
   "QSTASH_NEXT_SIGNING_KEY",
+  "HANDOFF_SIGNING_PRIVATE_KEY_PEM",
+  "DELIVERY_INTAKE_URL",
+  "DELIVERY_FACTORY_PUBLIC_KEY_PEM",
+  "SENTRY_DSN",
+  "LEAD_ENGINE_CANARY_WORKSPACE_ID",
+  "LEAD_ENGINE_CANARY_SOURCE_ID",
+  "LEAD_ENGINE_CANARY_URL",
 ] as const;
 
 export function configurationStatus() {
@@ -160,6 +167,6 @@ export async function assertDatabaseReady(
     where service = 'lead-engine'
     limit 1
   `) as unknown as Array<{ version: string }>;
-  if (rows[0]?.version !== "3.1.0")
+  if (rows[0]?.version !== "3.2.0")
     throw new Error("Database readiness failed: incompatible schema version");
 }
