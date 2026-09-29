@@ -110,6 +110,8 @@ export interface Membership {
   workspaces: { name: string } | Array<{ name: string }> | null;
 }
 
+export type DataMode = "demo" | "pilot" | "production";
+
 export interface SourceRecord {
   id: string;
   name: string;
@@ -119,6 +121,7 @@ export interface SourceRecord {
   status: string;
   active_policy_id: string | null;
   created_at: string;
+  data_mode: DataMode;
 }
 
 export interface CampaignRecord {
@@ -129,6 +132,7 @@ export interface CampaignRecord {
   interval_minutes: number;
   schedule_enabled: boolean;
   next_run_at: string | null;
+  data_mode: DataMode;
   criteria_suggestion?: {
     direction: "loosen" | "hold" | "tighten";
     observedQualifiedLeads: number;
@@ -156,6 +160,8 @@ export interface JobRecord {
   max_attempts: number;
   last_error: string | null;
   created_at: string;
+  data_mode: DataMode;
+  discovery_candidate_id?: string | null;
 }
 
 /** Discovery-funnel rollup served by GET /api/v1/funnel (see §4.2 of the
@@ -178,6 +184,7 @@ export interface LeadRecord {
   opportunity_potential_score: number;
   confidence: number;
   last_refreshed_at: string;
+  data_mode: DataMode;
   organizations:
     | { name: string; normalized_domain: string }
     | Array<{ name: string; normalized_domain: string }>
@@ -188,6 +195,8 @@ export interface DiscoverySourceRecord {
   id: string;
   name: string;
   adapter_id: string;
+  adapter_config: Record<string, unknown> | null;
+  data_mode: DataMode;
   geo_params: {
     city?: string;
     region?: string;
@@ -209,7 +218,27 @@ export interface DiscoveryRunRecord {
   finished_at: string | null;
   candidates_found: number | null;
   candidates_enqueued: number | null;
+  candidates_persisted: number | null;
+  candidates_unresolved: number | null;
+  data_mode: DataMode;
   error: string | null;
+}
+
+export interface DiscoveryCandidateRecord {
+  id: string;
+  discovery_source_id: string;
+  adapter_id: string;
+  external_id: string;
+  data_mode: DataMode;
+  name: string;
+  website: string | null;
+  resolved_website: string | null;
+  resolution_status: string;
+  address: string | null;
+  category: string | null;
+  source_url: string;
+  source_observed_at: string;
+  last_seen_at: string;
 }
 
 export interface AuditRecord {

@@ -8,6 +8,7 @@ import {
   type DiscoveryAdapter,
   type FetchCandidatesOptions,
 } from "./adapter.js";
+import { normalizedIdentity } from "./csv.js";
 
 /** Discovery source row as read from public.discovery_sources. */
 export interface DiscoverySourceRow {
@@ -16,6 +17,8 @@ export interface DiscoverySourceRow {
   name: string;
   adapter_id: string;
   geo_params: unknown;
+  adapter_config?: unknown;
+  data_mode?: "demo" | "pilot" | "production";
   source_id: string;
   campaign_id: string | null;
   active: boolean;
@@ -30,6 +33,8 @@ export interface RunOutcome {
   status: "completed" | "failed";
   candidatesFound: number;
   candidatesEnqueued: number;
+  candidatesPersisted?: number;
+  candidatesUnresolved?: number;
   error: string | null;
 }
 
@@ -37,6 +42,14 @@ export interface DiscoveryRunSummary extends RunOutcome {
   runId: string;
   skippedNoWebsite: number;
   skippedDuplicate: number;
+}
+
+export interface PersistedCandidate {
+  id: string;
+  resolvedWebsite: string | null;
+  resolutionStatus:
+    "direct" | "matched" | "review_required" | "unresolved" | "rejected";
+  duplicate: boolean;
 }
 
 /**
@@ -47,8 +60,18 @@ export interface DiscoveryRunSummary extends RunOutcome {
  */
 export interface DiscoveryStore {
   getSource(discoverySourceId: string): Promise<DiscoverySourceRow | null>;
-  createRun(discoverySourceId: string): Promise<{ id: string; startedAt: string }>;
+  createRun(
+    discoverySourceId: string,
+  ): Promise<{ id: string; startedAt: string }>;
   finishRun(runId: string, outcome: RunOutcome): Promise<void>;
+  /** Persist every upstream record, including candidates without websites. */
+  upsertCandidate?(args: {
+    runId: string;
+    source: DiscoverySourceRow;
+    candidate: Candidate;
+    externalId: string;
+    identityKey: string;
+  }): Promise<PersistedCandidate>;
   listExistingTargets(
     sourceId: string,
   ): Promise<Array<{ target_url: string; idempotency_key: string }>>;
@@ -57,6 +80,8 @@ export interface DiscoveryStore {
     targetUrl: string;
     key: string;
     maxAttempts: number;
+    candidateId?: string;
+    dataMode?: "demo" | "pilot" | "production";
   }): Promise<QueuedJob>;
 }
 
@@ -100,9 +125,7 @@ export async function runDiscoveryRun(
       new Error(`Unknown discovery adapter: ${source.adapter_id}`),
       { statusCode: 422 },
     );
-  const geo = resolveGeoQuery(
-    DiscoveryGeoInputSchema.parse(source.geo_params),
-  );
+  const geo = resolveGeoQuery(DiscoveryGeoInputSchema.parse(source.geo_params));
 
   const run = await store.createRun(source.id);
   const summary: DiscoveryRunSummary = {
@@ -110,30 +133,76 @@ export async function runDiscoveryRun(
     status: "completed",
     candidatesFound: 0,
     candidatesEnqueued: 0,
+    candidatesPersisted: 0,
+    candidatesUnresolved: 0,
     skippedNoWebsite: 0,
     skippedDuplicate: 0,
     error: null,
   };
 
   try {
-    const raw = await adapter.fetchCandidates(geo, { fetcher: args.fetcher });
-    const withWebsite: Array<{ candidate: Candidate; normalized: string }> =
-      [];
-    for (const candidate of raw.slice(0, maxCandidates)) {
-      const normalized = candidate.website
-        ? normalizeWebsiteUrl(candidate.website)
+    const raw = await adapter.fetchCandidates(geo, {
+      fetcher: args.fetcher,
+      config: source.adapter_config,
+      maxCandidates,
+    });
+    summary.candidatesFound = raw.slice(0, maxCandidates).length;
+    const withWebsite: Array<{
+      candidate: Candidate;
+      candidateId?: string;
+      normalized: string;
+    }> = [];
+    for (const [index, candidate] of raw.slice(0, maxCandidates).entries()) {
+      const candidateName =
+        candidate.name?.trim() ||
+        `Unnamed ${candidate.source} candidate ${candidate.externalId ?? index + 1}`;
+      const normalizedCandidate = { ...candidate, name: candidateName };
+      const identityKey =
+        normalizedIdentity(candidateName, candidate.address) ||
+        `${candidate.source}:${candidate.externalId ?? index}`;
+      const externalId = candidate.externalId ?? identityKey;
+      const persisted = store.upsertCandidate
+        ? await store.upsertCandidate({
+            runId: run.id,
+            source,
+            candidate: normalizedCandidate,
+            externalId,
+            identityKey,
+          })
+        : {
+            id: "",
+            resolvedWebsite: normalizedCandidate.website,
+            resolutionStatus: normalizedCandidate.website
+              ? ("direct" as const)
+              : ("unresolved" as const),
+            duplicate: false,
+          };
+      summary.candidatesPersisted = (summary.candidatesPersisted ?? 0) + 1;
+      const normalized = persisted.resolvedWebsite
+        ? normalizeWebsiteUrl(persisted.resolvedWebsite)
         : null;
       if (!normalized) {
         summary.skippedNoWebsite += 1;
+        summary.candidatesUnresolved = (summary.candidatesUnresolved ?? 0) + 1;
         continue;
       }
-      withWebsite.push({ candidate, normalized });
+      withWebsite.push({
+        candidate: {
+          ...normalizedCandidate,
+          website: persisted.resolvedWebsite,
+        },
+        candidateId: persisted.id || undefined,
+        normalized,
+      });
     }
-    summary.candidatesFound = withWebsite.length;
 
     // Within-run dedupe by normalized URL.
     const seen = new Set<string>();
-    const uniques: Array<{ candidate: Candidate; normalized: string }> = [];
+    const uniques: Array<{
+      candidate: Candidate;
+      candidateId?: string;
+      normalized: string;
+    }> = [];
     for (const item of withWebsite) {
       if (seen.has(item.normalized)) {
         summary.skippedDuplicate += 1;
@@ -151,14 +220,12 @@ export async function runDiscoveryRun(
         .map((row) => normalizeWebsiteUrl(row.target_url))
         .filter((value): value is string => value !== null),
     );
-    const existingKeys = new Set(
-      existing.map((row) => row.idempotency_key),
-    );
+    const existingKeys = new Set(existing.map((row) => row.idempotency_key));
 
-    for (const { candidate, normalized } of uniques) {
+    for (const { candidate, candidateId, normalized } of uniques) {
       // Deterministic idempotency key: a re-run of the same discovery
       // source never creates a duplicate job for the same website.
-      const key = `discovery:${source.source_id}:${normalized}`;
+      const key = `discovery:${source.data_mode ?? "pilot"}:${source.source_id}:${normalized}`;
       if (existingUrls.has(normalized) || existingKeys.has(key)) {
         summary.skippedDuplicate += 1;
         continue;
@@ -168,11 +235,14 @@ export async function runDiscoveryRun(
         targetUrl: candidate.website as string,
         key,
         maxAttempts: 3,
+        candidateId,
+        dataMode: source.data_mode ?? "pilot",
       });
       // queue_scrape_job returns the pre-existing row when the key was
       // already used; only count jobs actually created by this run.
       if (
-        new Date(queued.createdAt).getTime() >= new Date(run.startedAt).getTime()
+        new Date(queued.createdAt).getTime() >=
+        new Date(run.startedAt).getTime()
       ) {
         summary.candidatesEnqueued += 1;
         existingKeys.add(key);
@@ -186,6 +256,8 @@ export async function runDiscoveryRun(
       status: "completed",
       candidatesFound: summary.candidatesFound,
       candidatesEnqueued: summary.candidatesEnqueued,
+      candidatesPersisted: summary.candidatesPersisted,
+      candidatesUnresolved: summary.candidatesUnresolved,
       error: null,
     });
     log("info", "discovery_run_completed", {

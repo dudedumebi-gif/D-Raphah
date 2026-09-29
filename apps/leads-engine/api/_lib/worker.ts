@@ -29,6 +29,31 @@ interface ScrapeJobRow {
   criteria_snapshot: unknown;
   scheduled_for: string;
   canary_run_id?: string | null;
+  discovery_candidate_id?: string | null;
+  data_mode?: "demo" | "pilot" | "production";
+}
+
+export interface DiscoveryCandidateEvidenceRow {
+  name: string;
+  evidence_text: string;
+  source_url: string;
+  source_observed_at: string;
+  raw_record: unknown;
+}
+
+export function mergeDiscoveryEvidence(
+  collectedText: string,
+  discoveryEvidence?: DiscoveryCandidateEvidenceRow,
+): string {
+  return [
+    collectedText,
+    discoveryEvidence?.evidence_text
+      ? `\nStructured discovery evidence (${discoveryEvidence.source_url}, observed ${discoveryEvidence.source_observed_at}):\n${discoveryEvidence.evidence_text}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
 }
 
 interface SourceRow {
@@ -43,6 +68,7 @@ interface SourceRow {
 interface PolicyRow {
   id: string;
   allowed_domains: string[];
+  allow_discovered_domains: boolean;
   allowlist_paths: string[];
   denylist_paths: string[];
   user_agent: string;
@@ -72,9 +98,24 @@ export interface WorkerTickResult {
   prunedOperationalRows: number;
 }
 
-function collectionPolicy(row: PolicyRow): CollectionPolicy {
+export function allowedDomainsForJob(
+  row: Pick<PolicyRow, "allowed_domains" | "allow_discovered_domains">,
+  job: Pick<ScrapeJobRow, "target_url" | "discovery_candidate_id">,
+): string[] {
+  const allowed = new Set(
+    row.allowed_domains.map((domain) => domain.toLowerCase()),
+  );
+  if (row.allow_discovered_domains && job.discovery_candidate_id) {
+    const hostname = new URL(job.target_url).hostname.toLowerCase();
+    allowed.add(hostname);
+    if (hostname.startsWith("www.")) allowed.add(hostname.slice(4));
+  }
+  return [...allowed];
+}
+
+function collectionPolicy(row: PolicyRow, job: ScrapeJobRow): CollectionPolicy {
   return {
-    allowedDomains: row.allowed_domains,
+    allowedDomains: allowedDomainsForJob(row, job),
     allowlistPaths: row.allowlist_paths,
     denylistPaths: row.denylist_paths,
     userAgent: row.user_agent,
@@ -142,6 +183,22 @@ async function persistEvidenceAndLead(
   collected: Awaited<ReturnType<typeof collectUrl>>,
   workerId: string,
 ) {
+  const discoveryEvidence = job.discovery_candidate_id
+    ? (
+        (await client`
+        select name, evidence_text, source_url, source_observed_at, raw_record
+        from public.discovery_candidates
+        where id = ${job.discovery_candidate_id}::uuid
+          and workspace_id = ${job.workspace_id}::uuid
+          and data_mode = ${job.data_mode ?? "pilot"}
+        limit 1
+      `) as unknown as DiscoveryCandidateEvidenceRow[]
+      )[0]
+    : undefined;
+  const combinedExtractedText = mergeDiscoveryEvidence(
+    collected.extractedText,
+    discoveryEvidence,
+  );
   const evidenceInsert = {
     workspace_id: job.workspace_id,
     source_id: source.id,
@@ -155,24 +212,27 @@ async function persistEvidenceAndLead(
     storage_path: `${job.workspace_id}/${source.id}/${collected.contentHash}`,
     raw_content: truncateToByteLength(collected.rawContent, 250_000),
     extracted_title: collected.extractedTitle,
-    extracted_organization: collected.extractedOrganization,
-    extracted_text: truncateToByteLength(collected.extractedText, 100_000),
+    extracted_organization:
+      collected.extractedOrganization || discoveryEvidence?.name || null,
+    extracted_text: truncateToByteLength(combinedExtractedText, 100_000),
     fetched_at: collected.fetchedAt,
-    parser_version: "html-text-1.0.0",
+    parser_version: discoveryEvidence
+      ? "html-text+structured-discovery-1.0.0"
+      : "html-text-1.0.0",
     policy_version_id: policy.id,
     robots_decision: collected.robotsDecision,
     response_status: collected.statusCode,
   };
-  const signals = detectSignals(collected.extractedText);
+  const signals = detectSignals(combinedExtractedText);
   const { domain, fallbackName } = organizationFromUrl(collected.finalUrl);
   const criteria = CriteriaSchema.parse(job.criteria_snapshot ?? {});
   const geography = evaluateGeography(
-    collected.extractedText,
+    combinedExtractedText,
     criteria,
     collected.coordinates,
   );
   const score = scoreSignals(signals, criteria, {
-    businessProfile: inferBusinessProfile(collected.extractedText),
+    businessProfile: inferBusinessProfile(combinedExtractedText),
     geoEligible: geography.eligible,
     evidenceFreshness: 100,
   });
@@ -187,7 +247,10 @@ async function persistEvidenceAndLead(
     score,
     organization: {
       domain,
-      name: collected.extractedOrganization || fallbackName,
+      name:
+        collected.extractedOrganization ||
+        discoveryEvidence?.name ||
+        fallbackName,
       website: new URL(collected.finalUrl).origin,
     },
   };
@@ -230,7 +293,7 @@ export async function processScrapeJob(
     const { source, policy } = await loadSource(client, job);
     const collected = await collectUrl(
       job.target_url,
-      collectionPolicy(policy),
+      collectionPolicy(policy, job),
     );
     const result = await persistEvidenceAndLead(
       client,

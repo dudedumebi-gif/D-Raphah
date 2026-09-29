@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Raphah Lead Engine API
-  version: 3.0.0
-  description: Permitted-source collection, evidence, scoring, lead, audit, and operational lifecycle API.
+  version: 3.3.0
+  description: Permitted-source discovery, collection, structured evidence, scoring, lead, audit, and operational lifecycle API with isolated demo, pilot, and production data modes.
 servers:
   - url: https://d-raphah-leads-engine.vercel.app
 security:
@@ -157,6 +157,101 @@ paths:
           }
       requestBody: { $ref: "#/components/requestBodies/Reason" }
       responses: { "200": { description: Job cancelled } }
+  /api/v1/terms:
+    get:
+      summary: List explicitly accepted third-party source terms
+      responses: { "200": { description: Workspace terms acceptances } }
+  /api/v1/terms/accept:
+    post:
+      summary: Record a human source-licence acceptance
+      description: Owner or administrator action. Acceptance must never be automated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [termsId]
+              properties:
+                termsId:
+                  enum:
+                    [overpass-osm, toronto-open-data, canada-job-bank-open-data]
+                notes: { type: string, maxLength: 2000 }
+      responses:
+        "201": { description: Acceptance recorded and audited }
+        "422": { description: Unknown terms identifier }
+  /api/v1/discovery/sources:
+    get:
+      summary: List configured discovery adapters
+      responses: { "200": { description: Discovery source list } }
+    post:
+      summary: Register a bounded discovery adapter configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DiscoverySourceInput" }
+      responses:
+        "201": { description: Discovery source registered }
+        "409": { description: Collection source data mode does not match }
+  /api/v1/discovery/sources/{discoverySourceId}/run:
+    post:
+      summary: Execute discovery and persist every candidate
+      parameters:
+        - name: discoverySourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "202":
+          { description: Discovery completed and eligible scrape jobs queued }
+        "409": { description: Required source terms have not been accepted }
+  /api/v1/discovery/runs:
+    get:
+      summary: Inspect discovery run counts and failures
+      parameters:
+        - name: source_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses: { "200": { description: Discovery run history } }
+  /api/v1/discovery/candidates:
+    get:
+      summary: Inspect persistent candidates, including unresolved records
+      parameters:
+        - $ref: "#/components/parameters/DataMode"
+      responses: { "200": { description: Mode-isolated candidate list } }
+  /api/v1/discovery/candidates/{candidateId}/resolve:
+    post:
+      summary: Human-resolve a candidate website and atomically queue collection
+      parameters:
+        - name: candidateId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [website, notes]
+              properties:
+                website: { type: string, format: uri }
+                notes: { type: string, minLength: 3, maxLength: 1000 }
+      responses:
+        "202": { description: Candidate resolved and durable job queued }
+        "404": { description: Candidate not found in workspace }
+        "409": { description: Candidate/source mode mismatch }
+  /api/v1/funnel:
+    get:
+      summary: Inspect the mode-specific discovery-to-qualified funnel
+      parameters:
+        - $ref: "#/components/parameters/DataMode"
+        - name: windowDays
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses: { "200": { description: Funnel counts } }
   /api/v1/leads:
     get:
       summary: List persistent qualified leads with evidence-backed assessments
@@ -165,7 +260,8 @@ paths:
     post:
       summary: Human-approved emission of a signed LeadEngineHandoffPackage into the durable outbox
       responses:
-        "201": { description: Enqueued handoff with id, manifestChecksum, status }
+        "201":
+          { description: Enqueued handoff with id, manifestChecksum, status }
         "404": { description: Opportunity not found in the caller's workspace }
   /api/v1/audit-events:
     get:
@@ -187,6 +283,11 @@ components:
         required: false,
         schema: { type: string },
       }
+    DataMode:
+      name: mode
+      in: query
+      required: false
+      schema: { $ref: "#/components/schemas/DataMode" }
   requestBodies:
     Reason:
       required: true
@@ -214,6 +315,10 @@ components:
         collectionMethod: { enum: [api, rss, sitemap, static_html] }
         businessPurpose: { type: string }
         allowedDomains: { type: array, items: { type: string } }
+        allowDiscoveredDomains:
+          type: boolean
+          default: false
+          description: Explicitly permits approved discovery adapters to collect candidate public domains; all normal URL, robots, path, rate, and budget safeguards still apply.
         allowlistPaths:
           { type: array, items: { type: string }, default: ["/*"] }
         denylistPaths: { type: array, items: { type: string } }
@@ -225,6 +330,30 @@ components:
         intervalMinutes: { type: integer, default: 1440 }
         userAgent: { type: string }
         contactEmail: { type: string, format: email }
+        dataMode: { $ref: "#/components/schemas/DataMode" }
+    DataMode:
+      type: string
+      enum: [demo, pilot, production]
+      default: pilot
+    DiscoverySourceInput:
+      type: object
+      required: [name, adapterId, geo, sourceId, dataMode]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 160 }
+        adapterId: { enum: [overpass, toronto_open_data, job_bank] }
+        geo:
+          type: object
+          required: [city]
+          properties:
+            city: { type: string }
+            region: { type: string }
+            centreLatitude: { type: number, minimum: -90, maximum: 90 }
+            centreLongitude: { type: number, minimum: -180, maximum: 180 }
+            radiusKm: { type: number, minimum: 1, maximum: 500, default: 50 }
+        adapterConfig: { type: object, additionalProperties: true }
+        dataMode: { $ref: "#/components/schemas/DataMode" }
+        sourceId: { type: string, format: uuid }
+        campaignId: { type: string, format: uuid }
     CriteriaUpdate:
       type: object
       required: [criteria]

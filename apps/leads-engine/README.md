@@ -2,11 +2,11 @@
 
 Production-oriented web application for permitted-source discovery, evidence capture, automation-maturity scoring, durable scrape jobs, and human-reviewed lead qualification.
 
-**Work in progress — not production approved.** See `docs/runbooks/Lead_Engine_Production_Readiness_Runbook.md` for verified checks, unexecuted database tests, and remaining discovery/lifecycle/security gates. The new console does not yet have full legacy discovery/requirements/handoff parity; do not promote it over the live UI.
+**Implementation complete — not production approved.** See the repository-level `PRODUCTION_README.md` and `docs/runbooks/Lead_Engine_Production_Readiness_Runbook.md` for migration, source-licence acceptance, live proof, and canary gates. Do not promote Pilot data until those gates pass.
 
 ## Runtime architecture
 
-- **Vite/React UI** — Neon Auth, policy/source management, scrape job lifecycle, lead review, criteria, audit, and operational SLO views.
+- **Vite/React UI** — Neon Auth, policy/source management, Toronto/Job Bank/Overpass discovery, persistent candidates, scrape lifecycle, lead review, criteria, audit, operational SLOs, and visibly separate Demo/Pilot/Production views.
 - **Vercel Hobby Functions** — authenticated API, collection worker, and canary endpoint. No Pro/Teams capability is required.
 - **Neon Free** — PostgreSQL source of truth, Data API RLS tenant boundary, Auth, database audit triggers, and capped evidence payloads.
 - **Upstash QStash Free** — signed five-minute worker dispatch and hourly canary dispatch with retries. This replaces Vercel Cron because Hobby Cron is limited to daily execution.
@@ -24,7 +24,7 @@ pnpm --filter @raphah/leads-engine-app build
 ## Provisioning order
 
 1. In the personal Vercel Hobby scope, add a Neon integration and an Upstash QStash integration to the Lead Engine project. Do not create or use a Vercel Team.
-2. In Neon, enable Auth and the Data API. Apply `neon/migrations/202609220001_lead_engine_production.sql` with `psql` against a disposable branch first, then production.
+2. In Neon, enable Auth and the Data API. Apply every migration under `neon/migrations/` in timestamp order against a disposable branch first, ending with schema `3.3.0`; apply to production only after rehearsal.
 3. Run `neon/tests/job_lifecycle_v3.sql` against the disposable branch, then run `pnpm test:rls:neon` with two genuine Neon Auth sessions through the Data API.
 4. Configure the variables in `.env.example` in the Lead Engine Vercel project. Keep `DATABASE_URL`, QStash keys, and `WORKER_SECRET` server-only.
 5. Deploy, create the first operator account, then approve the Raphah-controlled `/canary-source.html` fixture as a static-HTML source. Never substitute a third-party page for this deterministic production probe.

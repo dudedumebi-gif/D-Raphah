@@ -40,6 +40,8 @@ const workspaceB = randomUUID();
 const sourceA = randomUUID();
 const policyA = randomUUID();
 const campaignA = randomUUID();
+const discoverySourceA = randomUUID();
+const discoveryCandidateA = randomUUID();
 const key = `neon-rls-${randomUUID()}`;
 
 try {
@@ -83,6 +85,25 @@ try {
       'Neon RLS discovery','{}'::jsonb,1440,${userA}
     )
   `;
+  await database`
+    insert into public.discovery_sources(
+      id,workspace_id,name,adapter_id,geo_params,source_id,campaign_id,data_mode
+    ) values (
+      ${discoverySourceA}::uuid,${workspaceA}::uuid,'Toronto RLS discovery',
+      'toronto_open_data','{"city":"Toronto","region":"Ontario","centreLatitude":43.6532,"centreLongitude":-79.3832,"radiusKm":50}'::jsonb,
+      ${sourceA}::uuid,${campaignA}::uuid,'pilot'
+    )
+  `;
+  await database`
+    insert into public.discovery_candidates(
+      id,workspace_id,discovery_source_id,adapter_id,external_id,data_mode,
+      name,identity_key,source_url,source_observed_at,evidence_text
+    ) values (
+      ${discoveryCandidateA}::uuid,${workspaceA}::uuid,${discoverySourceA}::uuid,
+      'toronto_open_data','RLS-1','pilot','Tenant A candidate','tenant-a:toronto',
+      'https://open.toronto.ca',now(),'Municipal licence category: fixture'
+    )
+  `;
 
   const aRead = await clientA
     .from("source_definitions")
@@ -97,6 +118,25 @@ try {
     .eq("id", sourceA);
   assert.equal(bRead.error, null);
   assert.equal(bRead.data?.length, 0, "tenant B must not see tenant A source");
+
+  const aCandidate = await clientA
+    .from("discovery_candidates")
+    .select("id,data_mode")
+    .eq("id", discoveryCandidateA);
+  assert.equal(aCandidate.error, null);
+  assert.equal(aCandidate.data?.length, 1, "tenant A must see its candidate");
+  assert.equal(aCandidate.data?.[0]?.data_mode, "pilot");
+
+  const bCandidate = await clientB
+    .from("discovery_candidates")
+    .select("id")
+    .eq("id", discoveryCandidateA);
+  assert.equal(bCandidate.error, null);
+  assert.equal(
+    bCandidate.data?.length,
+    0,
+    "tenant B must not see tenant A discovery candidate",
+  );
 
   const crossTenantWrite = await clientB.from("source_definitions").insert({
     workspace_id: workspaceA,
