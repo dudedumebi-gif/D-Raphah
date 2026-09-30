@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { createClient } from "@neondatabase/neon-js";
+import { createClient, SupabaseAuthAdapter } from "@neondatabase/neon-js";
 import { neon } from "@neondatabase/serverless";
 
-function required(name) {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required environment variable ${name}`);
+function required(name, aliases = []) {
+  const names = [name, ...aliases];
+  const value = names.map((candidate) => process.env[candidate]).find(Boolean);
+  if (!value)
+    throw new Error(
+      `Missing required environment variable ${names.join(" or ")}`,
+    );
   return value;
 }
 
@@ -26,12 +30,46 @@ function dataClient(token) {
   });
 }
 
+async function resolveToken(label) {
+  const direct = [
+    process.env[`NEON_TEST_USER_${label}_TOKEN`],
+    process.env[`NEON_RLS_TEST_TOKEN_${label}`],
+  ].find(Boolean);
+  if (direct) return direct;
+
+  const email = required(`NEON_RLS_TEST_USER_${label}_EMAIL`);
+  const password = required(`NEON_RLS_TEST_USER_${label}_PASSWORD`);
+  const authClient = createClient({
+    auth: {
+      adapter: SupabaseAuthAdapter(),
+      url: required("NEON_AUTH_URL"),
+    },
+  });
+  const { data, error } = await authClient.auth.signInWithPassword({
+    email,
+    password,
+  });
+  if (error) {
+    throw new Error(
+      `Unable to authenticate RLS test user ${label}: ${error.message}`,
+    );
+  }
+  if (!data.session?.access_token) {
+    throw new Error(`RLS test user ${label} returned no access token`);
+  }
+  return data.session.access_token;
+}
+
 const database = neon(required("DATABASE_URL"));
-const tokenA = required("NEON_TEST_USER_A_TOKEN");
-const tokenB = required("NEON_TEST_USER_B_TOKEN");
+const tokenA = await resolveToken("A");
+const tokenB = await resolveToken("B");
 const userA = subject(tokenA);
 const userB = subject(tokenB);
-assert.notEqual(userA, userB, "RLS test requires two different Neon Auth users");
+assert.notEqual(
+  userA,
+  userB,
+  "RLS test requires two different Neon Auth users",
+);
 
 const clientA = dataClient(tokenA);
 const clientB = dataClient(tokenB);
@@ -164,7 +202,11 @@ try {
     p_max_attempts: 3,
   });
   assert.equal(replay.error, null);
-  assert.equal(first.data?.id, replay.data?.id, "replay must return the same job");
+  assert.equal(
+    first.data?.id,
+    replay.data?.id,
+    "replay must return the same job",
+  );
 
   const forbiddenWorkerRpc = await clientA.rpc("lease_scrape_jobs", {
     p_worker_id: "browser",
@@ -179,11 +221,26 @@ try {
     .select("id")
     .eq("workspace_id", workspaceA);
   assert.equal(audit.error, null);
-  assert.ok((audit.data?.length ?? 0) >= 5, "state changes must emit audit rows");
+  assert.ok(
+    (audit.data?.length ?? 0) >= 5,
+    "state changes must emit audit rows",
+  );
 
   process.stdout.write(
     "PASS: Neon Data API RLS isolation, mutation denial, audit capture, worker RPC denial, and queue idempotency.\n",
   );
 } finally {
+  // Delete explicitly in dependency order. Deleting a workspace first causes
+  // cascading child-table audit triggers to reference a parent row that is
+  // already being removed, which correctly violates the audit FK.
+  await database`delete from public.scrape_jobs where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.discovery_candidates where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.discovery_sources where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.scrape_campaigns where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.source_policy_versions where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.source_definitions where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.workspace_memberships where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.audit_events where workspace_id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
   await database`delete from public.workspaces where id in (${workspaceA}::uuid,${workspaceB}::uuid)`;
+  await database`delete from public.audit_events where workspace_id is null and resource_type='workspaces' and resource_id in (${workspaceA},${workspaceB})`;
 }

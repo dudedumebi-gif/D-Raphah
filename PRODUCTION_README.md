@@ -1,10 +1,10 @@
 # Raphah Lead Engine — Production README
 
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 
-Target release: Lead Engine schema/API `3.3.0`
+Target release: Lead Engine schema/API `3.3.1`
 
-Status: **implementation complete; production migration and source-licence acceptance intentionally pending**
+Status: **pilot release candidate; disposable-branch migration and SQL RLS checks pass; live release gates remain**
 
 This is the operational handover for the Lead Engine’s permitted-source discovery pipeline. It records what is implemented, what must remain human-controlled, and the exact gates for moving Pilot data into Production. It does not authorize source collection or a production database migration.
 
@@ -82,16 +82,18 @@ The user/operator will execute this after implementation review.
 
 1. Create a disposable Neon branch from the target database.
 2. Apply all migrations in timestamp order, ending with:
-   `apps/leads-engine/neon/migrations/202609290001_source_adapters_and_data_modes.sql`.
+   `apps/leads-engine/neon/migrations/202609290002_single_source_leasing.sql`.
 3. Run:
 
    ```bash
    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
      -f apps/leads-engine/neon/tests/job_lifecycle_v3.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+     -f apps/leads-engine/neon/tests/rls_behavior_v3.sql
    pnpm --filter @raphah/leads-engine-app test:rls:neon
    ```
 
-4. Confirm schema version `3.3.0`, expected indexes, RLS policies, and audit triggers.
+4. Confirm schema version `3.3.1`, expected indexes, RLS policies, and audit triggers.
 5. Deploy the application against the disposable branch and exercise both adapters in `pilot` mode.
 6. Create the linked collection source with **Permit public domains discovered by approved adapters** selected, then approve its policy. Registering an adapter without this explicit permission must fail.
 7. Review candidate provenance, unresolved candidates, deduplication, evidence, signals, score explanations, retries, and audit events.
@@ -131,15 +133,26 @@ Postman artifacts:
 
 Postman is an inspection client. Vercel logs/traces and Sentry are the authoritative operational telemetry.
 
+### Verified Neon rehearsal evidence — 2026-09-30
+
+- Schema `3.3.1`, the complete migration footprint, RLS enablement, policies, and audit triggers were verified on the `lead-engine-adapters-rehearsal` branch.
+- `job_lifecycle_v3.sql` passed all **15/15** assertions, including source-scoped leasing, duplicate schedule idempotency, ownership fencing, expired-lease recovery, retry, and dead-letter behavior.
+- `rls_behavior_v3.sql` passed all **13/13** assertions using PostgreSQL's `authenticated` role and JWT-claim context, including tenant read/write isolation, fail-closed missing claims, audit visibility, queue idempotency, and denial of worker lease RPCs.
+- Neon Auth and the Data API are enabled on the rehearsal branch. The separate two-genuine-session Data API test remains mandatory because it proves the HTTP/Auth integration in addition to the database policies.
+- The production branch remains at schema `3.1.0`; no production migration or Pilot-to-Production data promotion has been performed.
+
+For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_URL`, `NEON_AUTH_URL`, `NEON_DATA_API_URL`, `NEON_RLS_TEST_USER_A_EMAIL`, `NEON_RLS_TEST_USER_A_PASSWORD`, `NEON_RLS_TEST_USER_B_EMAIL`, and `NEON_RLS_TEST_USER_B_PASSWORD`. The two accounts must be dedicated synthetic users with different identities. Short-lived JWT inputs remain supported for one-off local runs but should not be stored as durable CI secrets.
+
 ## Production release gates
 
 - [ ] Toronto Open Data terms reviewed and accepted by a human operator.
 - [ ] Canada Job Bank terms reviewed and accepted by a human operator.
-- [ ] Migration rehearsed on a disposable Neon branch.
+- [x] Migration rehearsed on a disposable Neon branch.
+- [x] Database-role RLS behavior passes all 13 assertions.
 - [ ] Two-user Data API RLS isolation test passes.
 - [ ] One permitted source completes discovery → candidate → evidence → signals → score → persistent lead.
 - [ ] Restart test proves jobs/results survive process replacement.
-- [ ] Expired lease recovery is demonstrated.
+- [x] Expired lease recovery is demonstrated in the transactional lifecycle suite.
 - [ ] Duplicate schedule delivery produces no duplicate candidate, job, organization, or opportunity.
 - [ ] Retry and dead-letter recovery are demonstrated and audited.
 - [ ] Signed versioned Delivery Factory handoff and replay protection pass.
