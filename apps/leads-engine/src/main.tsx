@@ -211,6 +211,11 @@ function Workspace({ session }: { session: Session }) {
     "Connecting to the production data plane…",
   );
 
+  const signOut = useCallback(async () => {
+    localStorage.removeItem("raphah.lead.workspace");
+    await neonClient!.auth.signOut();
+  }, []);
+
   useEffect(() => {
     void (async () => {
       // Retry the bootstrap RPC — the session JWT can take a moment to
@@ -246,7 +251,14 @@ function Workspace({ session }: { session: Session }) {
       }
       const rows = (result.data ?? []) as unknown as Membership[];
       setMemberships(rows);
-      setWorkspaceId((current) => current || rows[0]?.workspace_id || "");
+      // localStorage is shared by every account in this browser. Keep the
+      // stored workspace only when the newly authenticated user is actually a
+      // member; otherwise select that user's first active workspace.
+      setWorkspaceId((current) =>
+        rows.some((row) => row.workspace_id === current)
+          ? current
+          : rows[0]?.workspace_id || "",
+      );
     })();
   }, [session.user.id]);
 
@@ -306,13 +318,6 @@ function Workspace({ session }: { session: Session }) {
     }
   }
 
-  if (!memberships.length && !data)
-    return (
-      <Centered
-        title="Workspace initializing"
-        detail="No active workspace membership was found. Confirm the Neon migration, Auth, and Data API are enabled."
-      />
-    );
   const activeMembership =
     memberships.find((item) => item.workspace_id === workspaceId) ??
     memberships[0];
@@ -335,6 +340,24 @@ function Workspace({ session }: { session: Session }) {
   useEffect(() => {
     localStorage.setItem("raphah.lead.data-mode", dataMode);
   }, [dataMode]);
+
+  // Keep every hook above this conditional render. Membership bootstrap is
+  // asynchronous, so placing hooks below this return causes React to render a
+  // different number of hooks once the membership arrives and crashes the UI.
+  if (!memberships.length && !data)
+    return (
+      <Centered title="Workspace initializing" detail={notice}>
+        <div className="setup-list">
+          <button className="primary" onClick={() => window.location.reload()}>
+            Retry initialization
+          </button>
+          <button className="text-button" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        </div>
+      </Centered>
+    );
+
   return (
     <div className={`app-shell lead-shell mode-${dataMode}`}>
       <aside className="sidebar">
@@ -380,7 +403,7 @@ function Workspace({ session }: { session: Session }) {
           </div>
           <button
             className="nav-item"
-            onClick={() => void neonClient!.auth.signOut()}
+            onClick={() => void signOut()}
           >
             Sign out
           </button>

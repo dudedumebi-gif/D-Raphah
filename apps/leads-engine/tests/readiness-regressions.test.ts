@@ -15,6 +15,43 @@ import {
 } from "../api/_lib/collection";
 import { requireScheduler } from "../api/_lib/neon";
 
+describe("workspace bootstrap UI safety", () => {
+  const source = readFileSync(
+    new URL("../src/main.tsx", import.meta.url),
+    "utf8",
+  );
+  const workspace = source.slice(
+    source.indexOf("function Workspace("),
+    source.indexOf("function funnelDiagnosis("),
+  );
+
+  it("declares every workspace hook before the initializing return", () => {
+    const initializingReturn = workspace.indexOf(
+      "if (!memberships.length && !data)",
+    );
+    expect(initializingReturn).toBeGreaterThan(0);
+    expect(workspace.indexOf("const visibleData = useMemo")).toBeLessThan(
+      initializingReturn,
+    );
+    expect(
+      workspace.lastIndexOf("useEffect(", initializingReturn),
+    ).toBeLessThan(initializingReturn);
+    expect(workspace.indexOf("useEffect(", initializingReturn)).toBe(-1);
+  });
+
+  it("lets a trapped user retry or sign out during initialization", () => {
+    expect(workspace).toContain("Retry initialization");
+    expect(workspace).toContain("Sign out");
+    expect(workspace).toContain('localStorage.removeItem("raphah.lead.workspace")');
+  });
+
+  it("does not reuse another account's remembered workspace", () => {
+    expect(workspace).toContain(
+      "rows.some((row) => row.workspace_id === current)",
+    );
+  });
+});
+
 describe("geographic qualification", () => {
   it("does not mistake the word 'on' for Ontario", () => {
     expect(evaluateGeography("We focus on customer service", {}).eligible).toBe(
