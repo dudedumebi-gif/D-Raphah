@@ -33,18 +33,23 @@ import {
 import { enqueueCanary, runWorkerTick } from "./worker.js";
 import {
   DiscoveryGeoInputSchema,
+  normalizeWebsiteUrl,
   resolveGeoQuery,
 } from "./discovery/adapter.js";
-import { OverpassAdapter } from "./discovery/overpass.js";
+import {
+  createDiscoveryAdapters,
+  DiscoveryAdapterIdSchema,
+  parseDiscoveryAdapterConfig,
+} from "./discovery/registry.js";
 import {
   runDiscoveryRun,
   type DiscoverySourceRow,
   type DiscoveryStore,
 } from "./discovery/run.js";
 import {
-  OVERPASS_OSM_TERMS_ID,
-  OVERPASS_OSM_TERMS_VERSION,
+  DISCOVERY_TERMS,
   requireTermsAcceptance,
+  termsForAdapter,
 } from "./discovery/terms.js";
 import { runScheduledDiscovery } from "./discovery/schedule.js";
 
@@ -62,6 +67,7 @@ const SourceInputSchema = z.object({
   collectionMethod: z.enum(["api", "rss", "sitemap", "static_html"]),
   businessPurpose: z.string().min(10).max(1_000),
   allowedDomains: z.array(z.string().min(1)).min(1),
+  allowDiscoveredDomains: z.boolean().default(false),
   allowlistPaths: z.array(z.string()).default(["/*"]),
   denylistPaths: z.array(z.string()).default([]),
   dailyBudget: z.number().int().min(1).max(100_000).default(100),
@@ -72,6 +78,7 @@ const SourceInputSchema = z.object({
   intervalMinutes: z.number().int().min(5).max(43_200).default(1_440),
   userAgent: z.string().min(3).default("RaphahLeadEngineBot/2.0"),
   contactEmail: z.string().email(),
+  dataMode: z.enum(["demo", "pilot", "production"]).default("pilot"),
 });
 
 const ManualJobSchema = z.object({
@@ -96,14 +103,22 @@ const SourceImportBodySchema = z.object({
     .max(200),
   contactEmail: z.string().email(),
   approveAll: z.boolean().optional().default(false),
+  dataMode: z.enum(["demo", "pilot", "production"]).default("pilot"),
 });
 
 const DiscoverySourceInputSchema = z.object({
   name: z.string().min(2).max(160),
-  adapterId: z.literal("overpass"),
+  adapterId: DiscoveryAdapterIdSchema,
   geo: DiscoveryGeoInputSchema,
+  adapterConfig: z.record(z.unknown()).default({}),
+  dataMode: z.enum(["demo", "pilot", "production"]).default("pilot"),
   sourceId: z.string().uuid(),
   campaignId: z.string().uuid().optional(),
+});
+
+const CandidateResolutionInputSchema = z.object({
+  website: z.string().url().max(2000),
+  notes: z.string().min(3).max(1000),
 });
 
 function json(
@@ -181,9 +196,7 @@ export function exportFilename(
 export function csvEscape(value: unknown): string {
   if (value === null || value === undefined) return "";
   const text = String(value);
-  return /[",\n\r]/.test(text)
-    ? `"${text.replace(/"/g, '""')}"`
-    : text;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 export const LEAD_EXPORT_COLUMNS = [
@@ -246,7 +259,9 @@ export function serializeLeadsExport(
   if (format === "json") return JSON.stringify(rows, null, 2);
   const lines = [LEAD_EXPORT_COLUMNS.map(csvEscape).join(",")];
   for (const row of rows)
-    lines.push(LEAD_EXPORT_COLUMNS.map((column) => csvEscape(row[column])).join(","));
+    lines.push(
+      LEAD_EXPORT_COLUMNS.map((column) => csvEscape(row[column])).join(","),
+    );
   return lines.join("\r\n") + "\r\n";
 }
 
@@ -391,7 +406,7 @@ async function authenticatedRoutes(
         client
           .from("scrape_jobs")
           .select(
-            "id,source_id,target_url,status,scheduled_for,started_at,completed_at,attempt_count,max_attempts,last_error,created_at",
+            "id,source_id,target_url,status,scheduled_for,started_at,completed_at,attempt_count,max_attempts,last_error,created_at,data_mode,discovery_candidate_id",
           )
           .eq("workspace_id", workspaceId)
           .order("created_at", { ascending: false })
@@ -527,9 +542,10 @@ async function authenticatedRoutes(
     for (const { index, row } of unique) {
       const label = row.name?.trim() || `row ${index + 1}`;
       try {
-        const input = SourceInputSchema.parse(
-          mapRowToSourceInput(row, body.contactEmail),
-        );
+        const input = SourceInputSchema.parse({
+          ...mapRowToSourceInput(row, body.contactEmail),
+          dataMode: body.dataMode,
+        });
         const { data, error } = await client.rpc("create_source_with_policy", {
           p_workspace_id: workspaceId,
           p_input: input,
@@ -619,7 +635,9 @@ async function authenticatedRoutes(
       params.push(input.businessPurpose);
     }
     if (sets.length === 0)
-      throw Object.assign(new Error("No fields to update"), { statusCode: 400 });
+      throw Object.assign(new Error("No fields to update"), {
+        statusCode: 400,
+      });
     const sql = createAdminClient() as unknown as (
       query: string,
       params: unknown[],
@@ -664,9 +682,10 @@ async function authenticatedRoutes(
       p_workspace_id: workspaceId,
     });
     const observed = Number(
-      (counts as Array<{ campaign_id: string; qualified_count: number }> | null)?.find(
-        (row) => row.campaign_id === campaignCriteria[1],
-      )?.qualified_count ?? 0,
+      (
+        counts as Array<{ campaign_id: string; qualified_count: number }> | null
+      )?.find((row) => row.campaign_id === campaignCriteria[1])
+        ?.qualified_count ?? 0,
     );
     const updates: Record<string, unknown> = {
       criteria: input.criteria,
@@ -746,9 +765,9 @@ async function authenticatedRoutes(
     );
     if (countsError) throw new Error(countsError.message);
     const observed = Number(
-      (counts as Array<{ campaign_id: string; qualified_count: number }> | null)?.find(
-        (row) => row.campaign_id === campaignId,
-      )?.qualified_count ?? 0,
+      (
+        counts as Array<{ campaign_id: string; qualified_count: number }> | null
+      )?.find((row) => row.campaign_id === campaignId)?.qualified_count ?? 0,
     );
     const suggestion = suggestCriteriaAdjustment(campaign.criteria, observed);
     if (
@@ -758,8 +777,7 @@ async function authenticatedRoutes(
       return json({
         applied: false,
         direction: suggestion.direction,
-        reason:
-          "Suggestion is hold or has no changes; nothing was applied.",
+        reason: "Suggestion is hold or has no changes; nothing was applied.",
       });
     }
     // Merge through the same validation the PATCH route uses (full
@@ -1071,12 +1089,15 @@ async function authenticatedRoutes(
       throw Object.assign(new Error("Opportunity not found"), {
         statusCode: 404,
       });
-    const { package: handoffPackage, manifestChecksum, signature } =
-      await buildHandoffPackage(createAdminClient() as unknown as SqlClient, {
-        workspaceId,
-        opportunityId: input.opportunityId,
-        approvedBy: context.user.email ?? context.user.id,
-      });
+    const {
+      package: handoffPackage,
+      manifestChecksum,
+      signature,
+    } = await buildHandoffPackage(createAdminClient() as unknown as SqlClient, {
+      workspaceId,
+      opportunityId: input.opportunityId,
+      approvedBy: context.user.email ?? context.user.id,
+    });
     const enqueued = await enqueueHandoffOutbox(
       (name, args) => client.rpc(name, args),
       {
@@ -1185,7 +1206,10 @@ async function authenticatedRoutes(
         notes: z.string().max(2_000).optional(),
       })
       .parse(await bodyJson(request));
-    if (input.termsId !== OVERPASS_OSM_TERMS_ID)
+    const terms = Object.values(DISCOVERY_TERMS).find(
+      (item) => item.id === input.termsId,
+    );
+    if (!terms)
       throw Object.assign(new Error(`Unknown terms id: ${input.termsId}`), {
         statusCode: 422,
       });
@@ -1193,7 +1217,7 @@ async function authenticatedRoutes(
       {
         workspace_id: workspaceId,
         terms_id: input.termsId,
-        terms_version: OVERPASS_OSM_TERMS_VERSION,
+        terms_version: terms.version,
         accepted_by: context.user.email ?? context.user.id,
         notes: input.notes ?? null,
       },
@@ -1203,8 +1227,8 @@ async function authenticatedRoutes(
     return json(
       {
         data: {
-          termsId: OVERPASS_OSM_TERMS_ID,
-          termsVersion: OVERPASS_OSM_TERMS_VERSION,
+          termsId: terms.id,
+          termsVersion: terms.version,
           acceptedBy: context.user.email ?? context.user.id,
         },
       },
@@ -1224,37 +1248,42 @@ async function authenticatedRoutes(
   // is visible before the first qualified lead ever appears.
   if (pathname === "/api/v1/funnel" && request.method === "GET") {
     const url = new URL(request.url);
+    const mode = z
+      .enum(["demo", "pilot", "production"])
+      .parse(url.searchParams.get("mode") ?? "pilot");
     const windowDays = Math.min(
       365,
       Math.max(1, Number(url.searchParams.get("windowDays")) || 30),
     );
-    const since = new Date(
-      Date.now() - windowDays * 86_400_000,
-    ).toISOString();
+    const since = new Date(Date.now() - windowDays * 86_400_000).toISOString();
     const { count: activeSources, error: sourcesError } = await client
       .from("source_definitions")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
+      .eq("data_mode", mode)
       .eq("status", "active");
     if (sourcesError) throw new Error(sourcesError.message);
     const { count: candidatesEvaluated, error: evaluatedError } = await client
+      .from("discovery_candidates")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("data_mode", mode)
+      .gte("last_seen_at", since);
+    if (evaluatedError) throw new Error(evaluatedError.message);
+    const { count: scored, error: scoredError } = await client
       .from("maturity_assessments")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
+      .eq("data_mode", mode)
       .gte("evaluated_at", since);
-    if (evaluatedError) throw new Error(evaluatedError.message);
-    const { count: scored, error: scoredError } = await client
-      .from("opportunities")
-      .select("id", { count: "exact", head: true })
-      .eq("workspace_id", workspaceId)
-      .gte("created_at", since);
     if (scoredError) throw new Error(scoredError.message);
     const { count: qualified, error: qualifiedError } = await client
-      .from("opportunities")
+      .from("maturity_assessments")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .gte("created_at", since)
-      .eq("stage", "qualified");
+      .eq("data_mode", mode)
+      .gte("evaluated_at", since)
+      .eq("qualified", true);
     if (qualifiedError) throw new Error(qualifiedError.message);
     return json({
       data: {
@@ -1267,7 +1296,8 @@ async function authenticatedRoutes(
     });
   }
 
-  if (pathname === "/api/v1/audit-events" && request.method === "GET") {    const { data, error } = await client
+  if (pathname === "/api/v1/audit-events" && request.method === "GET") {
+    const { data, error } = await client
       .from("audit_events")
       .select("*")
       .eq("workspace_id", workspaceId)
@@ -1294,12 +1324,16 @@ async function authenticatedRoutes(
   if (pathname === "/api/v1/discovery/sources" && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
     const input = DiscoverySourceInputSchema.parse(await bodyJson(request));
+    const adapterConfig = parseDiscoveryAdapterConfig(
+      input.adapterId,
+      input.adapterConfig,
+    );
     const resolvedGeo = resolveGeoQuery(input.geo);
     // The discovery source borrows an existing, approved collection source:
     // its policy governs the scrape jobs enqueued from discovered websites.
     const { data: linked, error: linkedError } = await client
       .from("source_definitions")
-      .select("id,status")
+      .select("id,status,data_mode,active_policy_id")
       .eq("workspace_id", workspaceId)
       .eq("id", input.sourceId)
       .maybeSingle();
@@ -1308,6 +1342,36 @@ async function authenticatedRoutes(
       throw Object.assign(new Error("Collection source not found"), {
         statusCode: 404,
       });
+    if (linked.data_mode !== input.dataMode)
+      throw Object.assign(
+        new Error(
+          "Discovery source and collection source must use the same data mode",
+        ),
+        { statusCode: 409 },
+      );
+    if (linked.status !== "active" || !linked.active_policy_id)
+      throw Object.assign(
+        new Error("Collection source must have an approved active policy"),
+        { statusCode: 409 },
+      );
+    const { data: linkedPolicy, error: policyError } = await client
+      .from("source_policy_versions")
+      .select("status,approved_by,allow_discovered_domains")
+      .eq("workspace_id", workspaceId)
+      .eq("id", linked.active_policy_id)
+      .maybeSingle();
+    if (policyError) throw new Error(policyError.message);
+    if (
+      linkedPolicy?.status !== "approved" ||
+      !linkedPolicy.approved_by ||
+      !linkedPolicy.allow_discovered_domains
+    )
+      throw Object.assign(
+        new Error(
+          "Linked collection source must have an approved policy with discovered-domain collection enabled",
+        ),
+        { statusCode: 409 },
+      );
     if (input.campaignId) {
       const { data: campaign, error: campaignError } = await client
         .from("scrape_campaigns")
@@ -1328,6 +1392,8 @@ async function authenticatedRoutes(
         name: input.name,
         adapter_id: input.adapterId,
         geo_params: resolvedGeo,
+        adapter_config: adapterConfig,
+        data_mode: input.dataMode,
         source_id: input.sourceId,
         campaign_id: input.campaignId ?? null,
         active: true,
@@ -1350,14 +1416,92 @@ async function authenticatedRoutes(
     if (error) throw new Error(error.message);
     return json({ data });
   }
+  if (pathname === "/api/v1/discovery/candidates" && request.method === "GET") {
+    const url = new URL(request.url);
+    const mode = z
+      .enum(["demo", "pilot", "production"])
+      .parse(url.searchParams.get("mode") ?? "pilot");
+    const { data, error } = await client
+      .from("discovery_candidates")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("data_mode", mode)
+      .order("last_seen_at", { ascending: false })
+      .limit(500);
+    if (error) throw new Error(error.message);
+    return json({ data });
+  }
+  const candidateResolution = pathname.match(
+    /^\/api\/v1\/discovery\/candidates\/([0-9a-f-]+)\/resolve$/i,
+  );
+  if (candidateResolution && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const input = CandidateResolutionInputSchema.parse(await bodyJson(request));
+    const normalized = new URL(input.website);
+    if (normalized.protocol !== "http:" && normalized.protocol !== "https:")
+      throw Object.assign(new Error("Resolved website must use HTTP(S)"), {
+        statusCode: 422,
+      });
+    normalized.hash = "";
+    const website = normalized.toString();
+    const { data: candidate, error: candidateError } = await client
+      .from("discovery_candidates")
+      .select("id,data_mode,discovery_source_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", candidateResolution[1])
+      .maybeSingle();
+    if (candidateError) throw new Error(candidateError.message);
+    if (!candidate)
+      throw Object.assign(new Error("Discovery candidate not found"), {
+        statusCode: 404,
+      });
+    const { data: discoverySource, error: discoveryError } = await client
+      .from("discovery_sources")
+      .select("source_id,data_mode")
+      .eq("workspace_id", workspaceId)
+      .eq("id", candidate.discovery_source_id)
+      .single();
+    if (discoveryError) throw new Error(discoveryError.message);
+    if (discoverySource.data_mode !== candidate.data_mode)
+      throw Object.assign(
+        new Error("Candidate data mode does not match its source"),
+        {
+          statusCode: 409,
+        },
+      );
+    const normalizedTarget = normalizeWebsiteUrl(website);
+    if (!normalizedTarget)
+      throw Object.assign(new Error("Resolved website is invalid"), {
+        statusCode: 422,
+      });
+    const key = `discovery:${candidate.data_mode}:${discoverySource.source_id}:${normalizedTarget}`;
+    const { data, error } = await client.rpc("resolve_discovery_candidate", {
+      p_workspace_id: workspaceId,
+      p_candidate_id: candidate.id,
+      p_website: website,
+      p_domain: normalized.hostname.toLowerCase(),
+      p_key: key,
+      p_notes: input.notes,
+    });
+    if (error) throw new Error(error.message);
+    return json({ data }, 202);
+  }
   const discoveryRun = pathname.match(
     /^\/api\/v1\/discovery\/sources\/([0-9a-f-]+)\/run$/i,
   );
   if (discoveryRun && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
-    // Terms gate (audit gap 2): the Overpass API usage policy and OSM
-    // attribution terms are accepted per workspace before any discovery
-    // run executes.
+    const { data: discoverySource, error: discoverySourceError } = await client
+      .from("discovery_sources")
+      .select("adapter_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", discoveryRun[1])
+      .single();
+    if (discoverySourceError || !discoverySource)
+      throw Object.assign(new Error("Discovery source not found"), {
+        statusCode: 404,
+      });
+    const requiredTerms = termsForAdapter(discoverySource.adapter_id);
     await requireTermsAcceptance(
       {
         hasAccepted: async (wsId: string, termsId: string) => {
@@ -1372,6 +1516,8 @@ async function authenticatedRoutes(
         },
       },
       workspaceId,
+      requiredTerms.id,
+      requiredTerms.label,
     );
     const store: DiscoveryStore = {
       getSource: async (discoverySourceId: string) => {
@@ -1406,11 +1552,94 @@ async function authenticatedRoutes(
             finished_at: new Date().toISOString(),
             candidates_found: outcome.candidatesFound,
             candidates_enqueued: outcome.candidatesEnqueued,
+            candidates_persisted: outcome.candidatesPersisted ?? 0,
+            candidates_unresolved: outcome.candidatesUnresolved ?? 0,
             error: outcome.error,
           })
           .eq("workspace_id", workspaceId)
           .eq("id", runId);
         if (error) throw new Error(error.message);
+      },
+      upsertCandidate: async ({
+        runId,
+        source,
+        candidate,
+        externalId,
+        identityKey,
+      }) => {
+        const mode = source.data_mode ?? "pilot";
+        const { data: existing, error: existingError } = await client
+          .from("discovery_candidates")
+          .select("id,resolved_website,resolution_status")
+          .eq("workspace_id", workspaceId)
+          .eq("adapter_id", source.adapter_id)
+          .eq("external_id", externalId)
+          .eq("data_mode", mode)
+          .maybeSingle();
+        if (existingError) throw new Error(existingError.message);
+        let resolvedWebsite = candidate.website;
+        let resolutionStatus: "direct" | "matched" | "unresolved" =
+          candidate.website ? "direct" : "unresolved";
+        let confidence = candidate.website ? 1 : 0;
+        if (!resolvedWebsite) {
+          const { data: match, error: matchError } = await client
+            .from("discovery_candidates")
+            .select("resolved_website")
+            .eq("workspace_id", workspaceId)
+            .eq("data_mode", mode)
+            .eq("identity_key", identityKey)
+            .not("resolved_website", "is", null)
+            .limit(1)
+            .maybeSingle();
+          if (matchError) throw new Error(matchError.message);
+          if (match?.resolved_website) {
+            resolvedWebsite = match.resolved_website;
+            resolutionStatus = "matched";
+            confidence = 0.9;
+          }
+        }
+        const { data, error } = await client
+          .from("discovery_candidates")
+          .upsert(
+            {
+              workspace_id: workspaceId,
+              discovery_source_id: source.id,
+              discovery_run_id: runId,
+              adapter_id: source.adapter_id,
+              external_id: externalId,
+              data_mode: mode,
+              name: candidate.name ?? "Unnamed candidate",
+              normalized_name: (
+                candidate.name ?? "Unnamed candidate"
+              ).toLowerCase(),
+              identity_key: identityKey,
+              website: candidate.website,
+              resolved_website: resolvedWebsite,
+              resolution_status: resolutionStatus,
+              resolution_confidence: confidence,
+              address: candidate.address,
+              latitude: candidate.lat,
+              longitude: candidate.lng,
+              category: candidate.category,
+              source_url:
+                candidate.sourceUrl ?? resolvedWebsite ?? "about:blank",
+              source_observed_at:
+                candidate.observedAt ?? new Date().toISOString(),
+              evidence_text: candidate.evidenceText ?? "",
+              raw_record: candidate.rawRecord ?? {},
+              last_seen_at: new Date().toISOString(),
+            },
+            { onConflict: "workspace_id,adapter_id,external_id,data_mode" },
+          )
+          .select("id,resolved_website,resolution_status")
+          .single();
+        if (error) throw new Error(error.message);
+        return {
+          id: data.id,
+          resolvedWebsite: data.resolved_website,
+          resolutionStatus: data.resolution_status,
+          duplicate: existing !== null,
+        };
       },
       listExistingTargets: async (sourceId: string) => {
         const { data, error } = await client
@@ -1424,7 +1653,13 @@ async function authenticatedRoutes(
           idempotency_key: string;
         }>;
       },
-      queueJob: async ({ sourceId, targetUrl, key, maxAttempts }) => {
+      queueJob: async ({
+        sourceId,
+        targetUrl,
+        key,
+        maxAttempts,
+        candidateId,
+      }) => {
         // Existing creation path: the DB validates the source is approved
         // and active, links the campaign, and enforces idempotency.
         const { data, error } = await client.rpc("queue_scrape_job", {
@@ -1436,12 +1671,20 @@ async function authenticatedRoutes(
         });
         if (error) throw new Error(error.message);
         const row = data as { id: string; created_at: string };
+        if (candidateId) {
+          const { error: candidateError } = await client
+            .from("scrape_jobs")
+            .update({ discovery_candidate_id: candidateId })
+            .eq("workspace_id", workspaceId)
+            .eq("id", row.id);
+          if (candidateError) throw new Error(candidateError.message);
+        }
         return { id: row.id, createdAt: row.created_at };
       },
     };
     const summary = await runDiscoveryRun({
       store,
-      adapters: { overpass: new OverpassAdapter() },
+      adapters: createDiscoveryAdapters(),
       discoverySourceId: discoveryRun[1],
     });
     return json({ data: summary }, 202);

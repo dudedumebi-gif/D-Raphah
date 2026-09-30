@@ -17,7 +17,6 @@ export interface RequestContext {
 }
 
 const runtimeVariables = [
-  "DATABASE_URL",
   "NEON_DATA_API_URL",
   "NEON_AUTH_URL",
   "QSTASH_CURRENT_SIGNING_KEY",
@@ -32,7 +31,10 @@ const runtimeVariables = [
 ] as const;
 
 export function configurationStatus() {
-  const missing = runtimeVariables.filter((key) => !process.env[key]);
+  const missing: string[] = runtimeVariables.filter((key) => !process.env[key]);
+  if (!process.env.LEAD_ENGINE_DATABASE_URL && !process.env.DATABASE_URL) {
+    missing.unshift("DATABASE_URL");
+  }
   return { configured: missing.length === 0, missing };
 }
 
@@ -45,7 +47,12 @@ function requiredEnvironment(name: string): string {
 let database: ReturnType<typeof neon> | null = null;
 
 export function createAdminClient(): ReturnType<typeof neon> {
-  if (!database) database = neon(requiredEnvironment("DATABASE_URL"));
+  if (!database) {
+    database = neon(
+      process.env.LEAD_ENGINE_DATABASE_URL ??
+        requiredEnvironment("DATABASE_URL"),
+    );
+  }
   return database;
 }
 

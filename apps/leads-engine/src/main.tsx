@@ -17,6 +17,8 @@ import {
   neonClient,
   type AuditRecord,
   type BootstrapData,
+  type DataMode,
+  type DiscoveryCandidateRecord,
   type DiscoveryRunRecord,
   type DiscoverySourceRecord,
   type FunnelStats,
@@ -200,10 +202,19 @@ function Workspace({ session }: { session: Session }) {
     workspaceId ? cachedBootstrap(workspaceId, session.user.id) : null,
   );
   const [view, setView] = useState<View>("overview");
+  const [dataMode, setDataMode] = useState<DataMode>(() => {
+    const stored = localStorage.getItem("raphah.lead.data-mode");
+    return stored === "demo" || stored === "production" ? stored : "pilot";
+  });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(
     "Connecting to the production data plane…",
   );
+
+  const signOut = useCallback(async () => {
+    localStorage.removeItem("raphah.lead.workspace");
+    await neonClient!.auth.signOut();
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -212,7 +223,8 @@ function Workspace({ session }: { session: Session }) {
       // on the first attempt. Retry with backoff instead of giving up.
       let bootstrap: { error: { message: string } | null } | null = null;
       for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * attempt));
+        if (attempt > 0)
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
         bootstrap = await neonClient!.rpc("ensure_personal_workspace", {
           p_name: "Raphah Lead Workspace",
         });
@@ -239,7 +251,14 @@ function Workspace({ session }: { session: Session }) {
       }
       const rows = (result.data ?? []) as unknown as Membership[];
       setMemberships(rows);
-      setWorkspaceId((current) => current || rows[0]?.workspace_id || "");
+      // localStorage is shared by every account in this browser. Keep the
+      // stored workspace only when the newly authenticated user is actually a
+      // member; otherwise select that user's first active workspace.
+      setWorkspaceId((current) =>
+        rows.some((row) => row.workspace_id === current)
+          ? current
+          : rows[0]?.workspace_id || "",
+      );
     })();
   }, [session.user.id]);
 
@@ -299,18 +318,48 @@ function Workspace({ session }: { session: Session }) {
     }
   }
 
-  if (!memberships.length && !data)
-    return (
-      <Centered
-        title="Workspace initializing"
-        detail="No active workspace membership was found. Confirm the Neon migration, Auth, and Data API are enabled."
-      />
-    );
   const activeMembership =
     memberships.find((item) => item.workspace_id === workspaceId) ??
     memberships[0];
+  const visibleData = useMemo<BootstrapData | null>(() => {
+    if (!data) return null;
+    return {
+      ...data,
+      sources: data.sources.filter(
+        (row) => (row.data_mode ?? "pilot") === dataMode,
+      ),
+      campaigns: data.campaigns.filter(
+        (row) => (row.data_mode ?? "pilot") === dataMode,
+      ),
+      jobs: data.jobs.filter((row) => (row.data_mode ?? "pilot") === dataMode),
+      leads: data.leads.filter(
+        (row) => (row.data_mode ?? "pilot") === dataMode,
+      ),
+    };
+  }, [data, dataMode]);
+  useEffect(() => {
+    localStorage.setItem("raphah.lead.data-mode", dataMode);
+  }, [dataMode]);
+
+  // Keep every hook above this conditional render. Membership bootstrap is
+  // asynchronous, so placing hooks below this return causes React to render a
+  // different number of hooks once the membership arrives and crashes the UI.
+  if (!memberships.length && !data)
+    return (
+      <Centered title="Workspace initializing" detail={notice}>
+        <div className="setup-list">
+          <button className="primary" onClick={() => window.location.reload()}>
+            Retry initialization
+          </button>
+          <button className="text-button" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        </div>
+      </Centered>
+    );
+
   return (
-    <div className="app-shell lead-shell">
+    <div className={`app-shell lead-shell mode-${dataMode}`}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">R</span>
@@ -328,7 +377,7 @@ function Workspace({ session }: { session: Session }) {
             >
               <span>{item.label}</span>
               {item.id === "jobs" && data ? (
-                <strong>{data.jobs.length}</strong>
+                <strong>{visibleData?.jobs.length ?? 0}</strong>
               ) : null}
             </button>
           ))}
@@ -354,7 +403,7 @@ function Workspace({ session }: { session: Session }) {
           </div>
           <button
             className="nav-item"
-            onClick={() => void neonClient!.auth.signOut()}
+            onClick={() => void signOut()}
           >
             Sign out
           </button>
@@ -368,6 +417,20 @@ function Workspace({ session }: { session: Session }) {
               <h1>{views.find((item) => item.id === view)?.label}</h1>
             </div>
             <div className="top-actions">
+              <label className="mode-selector">
+                <span>Data environment</span>
+                <select
+                  value={dataMode}
+                  onChange={(event) =>
+                    setDataMode(event.target.value as DataMode)
+                  }
+                  aria-label="Data environment"
+                >
+                  <option value="demo">Demo data</option>
+                  <option value="pilot">Pilot data</option>
+                  <option value="production">Production data</option>
+                </select>
+              </label>
               <button
                 className="quiet"
                 disabled={busy}
@@ -379,10 +442,10 @@ function Workspace({ session }: { session: Session }) {
           </header>
           <div className="status-bar" role="status">
             <span className="status-dot" />
-            {notice}
+            <strong>{dataMode.toUpperCase()}</strong> · {notice}
           </div>
         </div>
-        {!data ? (
+        {!visibleData ? (
           <Centered
             title="Loading workspace"
             detail="Fetching sources, jobs, leads, and telemetry."
@@ -391,7 +454,8 @@ function Workspace({ session }: { session: Session }) {
           <DashboardView
             view={view}
             setView={setView}
-            data={data}
+            data={visibleData}
+            dataMode={dataMode}
             mutate={mutate}
             session={session}
             workspaceId={workspaceId}
@@ -422,15 +486,21 @@ function FunnelStrip({
   data,
   session,
   workspaceId,
+  dataMode,
 }: {
   data: BootstrapData;
   session: Session;
   workspaceId: string;
+  dataMode: DataMode;
 }) {
   const [live, setLive] = useState<FunnelStats | null>(null);
   useEffect(() => {
     let cancelled = false;
-    apiRequest<{ data?: FunnelStats }>(session, workspaceId, "/api/v1/funnel")
+    apiRequest<{ data?: FunnelStats }>(
+      session,
+      workspaceId,
+      `/api/v1/funnel?mode=${dataMode}`,
+    )
       .then((payload) => {
         if (cancelled) return;
         const stats = payload?.data;
@@ -442,7 +512,7 @@ function FunnelStrip({
     return () => {
       cancelled = true;
     };
-  }, [session, workspaceId]);
+  }, [session, workspaceId, dataMode]);
 
   const stats: FunnelStats = live ?? fallbackFunnelStats(data);
   const stages = [
@@ -463,7 +533,11 @@ function FunnelStrip({
   stages.forEach((stage, index) => {
     if (index > 0)
       nodes.push(
-        <span key={`arrow-${index}`} className="funnel-arrow" aria-hidden="true">
+        <span
+          key={`arrow-${index}`}
+          className="funnel-arrow"
+          aria-hidden="true"
+        >
           →
         </span>,
       );
@@ -489,9 +563,7 @@ function FunnelStrip({
         </div>
       </div>
       <div className="funnel-strip">{nodes}</div>
-      {diagnosis ? (
-        <p className="muted funnel-diagnosis">{diagnosis}</p>
-      ) : null}
+      {diagnosis ? <p className="muted funnel-diagnosis">{diagnosis}</p> : null}
     </section>
   );
 }
@@ -525,6 +597,7 @@ function DashboardView({
   mutate,
   session,
   workspaceId,
+  dataMode,
 }: {
   view: View;
   setView: (view: View) => void;
@@ -532,8 +605,10 @@ function DashboardView({
   mutate: Mutate;
   session: Session;
   workspaceId: string;
+  dataMode: DataMode;
 }) {
-  if (view === "sources") return <Sources data={data} mutate={mutate} />;
+  if (view === "sources")
+    return <Sources data={data} mutate={mutate} dataMode={dataMode} />;
   if (view === "discovery")
     return (
       <Discovery
@@ -541,21 +616,31 @@ function DashboardView({
         mutate={mutate}
         session={session}
         workspaceId={workspaceId}
+        dataMode={dataMode}
       />
     );
   if (view === "jobs")
     return (
-      <Jobs data={data} mutate={mutate} session={session} workspaceId={workspaceId} />
+      <Jobs
+        data={data}
+        mutate={mutate}
+        session={session}
+        workspaceId={workspaceId}
+      />
     );
   if (view === "leads")
     return (
-      <Leads data={data} mutate={mutate} session={session} workspaceId={workspaceId} />
+      <Leads
+        data={data}
+        mutate={mutate}
+        session={session}
+        workspaceId={workspaceId}
+      />
     );
   if (view === "operations") return <Operations data={data} />;
   if (view === "audit")
     return <Audit data={data} session={session} workspaceId={workspaceId} />;
-  if (view === "settings")
-    return <Settings data={data} mutate={mutate} />;
+  if (view === "settings") return <Settings data={data} mutate={mutate} />;
   if (view === "help") return <HelpGuide />;
   const complete = data.jobs.filter((job) => job.status === "completed").length;
   const active = data.jobs.filter((job) =>
@@ -565,7 +650,7 @@ function DashboardView({
     <div className="content">
       <section className="hero-row">
         <div>
-          <p className="eyebrow accent">Production workspace</p>
+          <p className="eyebrow accent">{dataMode} data environment</p>
           <h2>Find the businesses ready for meaningful automation.</h2>
           <p className="muted">
             Permitted evidence becomes explainable signals, maturity scores, and
@@ -602,7 +687,12 @@ function DashboardView({
           }
         />
       </section>
-      <FunnelStrip data={data} session={session} workspaceId={workspaceId} />
+      <FunnelStrip
+        data={data}
+        session={session}
+        workspaceId={workspaceId}
+        dataMode={dataMode}
+      />
       <section className="panel">
         <div className="panel-head">
           <div>
@@ -643,9 +733,11 @@ interface ImportSummary {
 function ImportSources({
   data,
   mutate,
+  dataMode,
 }: {
   data: BootstrapData;
   mutate: Mutate;
+  dataMode: DataMode;
 }) {
   const [fileName, setFileName] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
@@ -770,6 +862,7 @@ function ImportSources({
       rows: newRows.map(({ key }) => rows[key]),
       contactEmail,
       approveAll,
+      dataMode,
     };
     const result = await mutate<{
       data: {
@@ -809,7 +902,10 @@ function ImportSources({
           Download CSV template
         </button>
       </div>
-      <form className="inline-form" onSubmit={(event) => event.preventDefault()}>
+      <form
+        className="inline-form"
+        onSubmit={(event) => event.preventDefault()}
+      >
         <label>
           CSV file
           <input type="file" accept=".csv" onChange={handleFile} />
@@ -892,7 +988,15 @@ function ImportSources({
   );
 }
 
-function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
+function Sources({
+  data,
+  mutate,
+  dataMode,
+}: {
+  data: BootstrapData;
+  mutate: Mutate;
+  dataMode: DataMode;
+}) {
   const [editingId, setEditingId] = useState<string | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -910,6 +1014,7 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
           collectionMethod: form.get("method"),
           businessPurpose: form.get("purpose"),
           allowedDomains: [host],
+          allowDiscoveredDomains: form.get("allowDiscoveredDomains") === "on",
           allowlistPaths: ["/*"],
           denylistPaths: ["/login*", "/account*", "/admin*"],
           dailyBudget: 100,
@@ -920,6 +1025,7 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
           intervalMinutes: Number(form.get("interval")),
           userAgent: "RaphahLeadEngineBot/2.0",
           contactEmail: form.get("contactEmail"),
+          dataMode,
         }),
       },
       "Source submitted for policy approval.",
@@ -932,171 +1038,198 @@ function Sources({ data, mutate }: { data: BootstrapData; mutate: Mutate }) {
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h3>Permitted sources</h3>
-            <p>No collection begins before explicit policy approval.</p>
+              <h3>Permitted sources · {dataMode}</h3>
+              <p>No collection begins before explicit policy approval.</p>
+            </div>
           </div>
-        </div>
-        <div className="record-list">
-          {data.sources.map((source) => (
-            <div className="record-row" key={source.id}>
-              <div>
-                <b>{source.name}</b>
-                <small>
-                  {source.base_url} · {source.collection_method}
-                </small>
-              </div>
-              <Status value={source.status} />
-              <button
-                className="row-action"
-                onClick={() =>
-                  setEditingId(editingId === source.id ? null : source.id)
-                }
-              >
-                {editingId === source.id ? "Cancel" : "Edit"}
-              </button>
-              {source.status === "pending_approval" ? (
+          <div className="record-list">
+            {data.sources.map((source) => (
+              <div className="record-row" key={source.id}>
+                <div>
+                  <b>{source.name}</b>
+                  <small>
+                    {source.base_url} · {source.collection_method}
+                  </small>
+                </div>
+                <Status value={source.status} />
                 <button
                   className="row-action"
                   onClick={() =>
-                    void mutate(
-                      `/api/v1/sources/${source.id}/approve`,
-                      {
-                        method: "POST",
-                        body: JSON.stringify({
-                          reason:
-                            "Reviewed for permitted public collection and business purpose.",
-                        }),
-                      },
-                      `${source.name} approved.`,
-                    )
+                    setEditingId(editingId === source.id ? null : source.id)
                   }
                 >
-                  Approve
+                  {editingId === source.id ? "Cancel" : "Edit"}
                 </button>
-              ) : null}
-              {editingId === source.id ? (
-                <form
-                  className="inline-form edit-form"
-                  onSubmit={async (event) => {
-                    event.preventDefault();
-                    const form = new FormData(event.currentTarget);
-                    const result = await mutate(
-                      `/api/v1/sources/${source.id}`,
-                      {
-                        method: "PATCH",
-                        body: JSON.stringify({
-                          name: String(form.get("name")),
-                          baseUrl: String(form.get("baseUrl")),
-                          collectionMethod: String(form.get("method")),
-                          businessPurpose: String(form.get("purpose")),
-                        }),
-                      },
-                      `${String(form.get("name"))} updated.`,
-                    );
-                    if (result) setEditingId(null);
-                  }}
-                >
-                  <label>
-                    Name
-                    <input name="name" defaultValue={source.name} required />
-                  </label>
-                  <label>
-                    Base URL
-                    <input
-                      name="baseUrl"
-                      type="url"
-                      defaultValue={source.base_url}
-                      required
-                    />
-                  </label>
-                  <label>
-                    Collection method
-                    <select
-                      name="method"
-                      defaultValue={source.collection_method}
-                    >
-                      <option value="static_html">Static HTML</option>
-                      <option value="rss">RSS</option>
-                      <option value="sitemap">Sitemap</option>
-                      <option value="api">Public API</option>
-                    </select>
-                  </label>
-                  <label>
-                    Purpose
-                    <textarea
-                      name="purpose"
-                      defaultValue={source.business_purpose}
-                      required
-                    />
-                  </label>
-                  <button type="submit" className="primary">
-                    Save changes
+                {source.status === "pending_approval" ? (
+                  <button
+                    className="row-action"
+                    onClick={() =>
+                      void mutate(
+                        `/api/v1/sources/${source.id}/approve`,
+                        {
+                          method: "POST",
+                          body: JSON.stringify({
+                            reason:
+                              "Reviewed for permitted public collection and business purpose.",
+                          }),
+                        },
+                        `${source.name} approved.`,
+                      )
+                    }
+                  >
+                    Approve
                   </button>
-                </form>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      </section>
-      <section className="panel form-panel">
-        <div className="panel-head">
-          <div>
-            <h3>Add source</h3>
-            <p>Register policy before scheduling.</p>
+                ) : null}
+                {editingId === source.id ? (
+                  <form
+                    className="inline-form edit-form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      const form = new FormData(event.currentTarget);
+                      const result = await mutate(
+                        `/api/v1/sources/${source.id}`,
+                        {
+                          method: "PATCH",
+                          body: JSON.stringify({
+                            name: String(form.get("name")),
+                            baseUrl: String(form.get("baseUrl")),
+                            collectionMethod: String(form.get("method")),
+                            businessPurpose: String(form.get("purpose")),
+                          }),
+                        },
+                        `${String(form.get("name"))} updated.`,
+                      );
+                      if (result) setEditingId(null);
+                    }}
+                  >
+                    <label>
+                      Name
+                      <input name="name" defaultValue={source.name} required />
+                    </label>
+                    <label>
+                      Base URL
+                      <input
+                        name="baseUrl"
+                        type="url"
+                        defaultValue={source.base_url}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Collection method
+                      <select
+                        name="method"
+                        defaultValue={source.collection_method}
+                      >
+                        <option value="static_html">Static HTML</option>
+                        <option value="rss">RSS</option>
+                        <option value="sitemap">Sitemap</option>
+                        <option value="api">Public API</option>
+                      </select>
+                    </label>
+                    <label>
+                      Purpose
+                      <textarea
+                        name="purpose"
+                        defaultValue={source.business_purpose}
+                        required
+                      />
+                    </label>
+                    <button type="submit" className="primary">
+                      Save changes
+                    </button>
+                  </form>
+                ) : null}
+              </div>
+            ))}
           </div>
-        </div>
-        <form className="inline-form" onSubmit={submit}>
-          <label>
-            Name
-            <input name="name" required />
-          </label>
-          <label>
-            Base URL
-            <input name="baseUrl" type="url" required />
-          </label>
-          <label>
-            Collection method
-            <select name="method" defaultValue="static_html">
-              <option value="static_html">Static HTML</option>
-              <option value="rss">RSS</option>
-              <option value="sitemap">Sitemap</option>
-              <option value="api">Public API</option>
-            </select>
-          </label>
-          <label>
-            Purpose
-            <textarea
-              name="purpose"
-              defaultValue="Identify public evidence of manual processes and automation opportunity."
-              required
-            />
-          </label>
-          <label>
-            Contact email
-            <input name="contactEmail" type="email" required />
-          </label>
-          <label>
-            Refresh interval (minutes)
-            <input
-              name="interval"
-              type="number"
-              min="5"
-              defaultValue="1440"
-              required
-            />
-          </label>
-          <button className="primary">Create source policy</button>
-        </form>
+        </section>
+        <section className="panel form-panel">
+          <div className="panel-head">
+            <div>
+              <h3>Add source</h3>
+              <p>Register policy before scheduling.</p>
+            </div>
+          </div>
+          <form className="inline-form" onSubmit={submit}>
+            <label>
+              Name
+              <input name="name" required />
+            </label>
+            <label>
+              Base URL
+              <input name="baseUrl" type="url" required />
+            </label>
+            <label>
+              Collection method
+              <select name="method" defaultValue="static_html">
+                <option value="static_html">Static HTML</option>
+                <option value="rss">RSS</option>
+                <option value="sitemap">Sitemap</option>
+                <option value="api">Public API</option>
+              </select>
+            </label>
+            <label>
+              Purpose
+              <textarea
+                name="purpose"
+                defaultValue="Identify public evidence of manual processes and automation opportunity."
+                required
+              />
+            </label>
+            <label>
+              Contact email
+              <input name="contactEmail" type="email" required />
+            </label>
+            <label>
+              Refresh interval (minutes)
+              <input
+                name="interval"
+                type="number"
+                min="5"
+                defaultValue="1440"
+                required
+              />
+            </label>
+            <label className="check-label">
+              <input name="allowDiscoveredDomains" type="checkbox" />
+              <span>
+                Permit public domains discovered by approved adapters. Each
+                target still passes HTTPS/public-host, robots, path, rate, and
+                budget controls.
+              </span>
+            </label>
+            <button className="primary">Create source policy</button>
+          </form>
         </section>
       </div>
       <div className="content">
-        <ImportSources data={data} mutate={mutate} />
+        <ImportSources data={data} mutate={mutate} dataMode={dataMode} />
       </div>
     </>
   );
 }
 
 const DISCOVERY_CITIES = ["Toronto", "Ottawa", "Montreal", "Custom"];
+const DISCOVERY_ADAPTERS = {
+  overpass: {
+    label: "OpenStreetMap / Overpass",
+    termsId: "overpass-osm",
+    detail: "Business place discovery with public websites and coordinates.",
+  },
+  toronto_open_data: {
+    label: "Toronto Open Data",
+    termsId: "toronto-open-data",
+    detail: "Municipal business licence and permit records from Toronto CKAN.",
+  },
+  job_bank: {
+    label: "Canada Job Bank",
+    termsId: "canada-job-bank-open-data",
+    detail:
+      "Employer and hiring signals from the Government of Canada catalogue.",
+  },
+} as const;
+type DiscoveryAdapterId = keyof typeof DISCOVERY_ADAPTERS;
 
 function geoSummary(geo: DiscoverySourceRecord["geo_params"]): string {
   if (!geo) return "—";
@@ -1114,50 +1247,65 @@ export function Discovery({
   mutate,
   session,
   workspaceId,
+  dataMode,
 }: {
   data: BootstrapData;
   mutate: Mutate;
   session: Session;
   workspaceId: string;
+  dataMode: DataMode;
 }) {
   const [sources, setSources] = useState<DiscoverySourceRecord[] | null>(null);
   const [runs, setRuns] = useState<DiscoveryRunRecord[] | null>(null);
+  const [candidates, setCandidates] = useState<
+    DiscoveryCandidateRecord[] | null
+  >(null);
   const [loading, setLoading] = useState(true);
   const [city, setCity] = useState("Toronto");
   const [runningId, setRunningId] = useState<string | null>(null);
-
-  const [termsAccepted, setTermsAccepted] = useState<boolean | null>(null);
+  const [adapterId, setAdapterId] = useState<DiscoveryAdapterId>("overpass");
+  const [acceptedTerms, setAcceptedTerms] = useState<Set<string>>(new Set());
+  const [resolvingCandidateId, setResolvingCandidateId] = useState<
+    string | null
+  >(null);
+  const [resolutionUrl, setResolutionUrl] = useState("");
+  const [resolutionNotes, setResolutionNotes] = useState("");
 
   const refresh = useCallback(async () => {
     try {
-      const [sourceResult, runResult, termsResult] = await Promise.all([
-        apiRequest<{ data: DiscoverySourceRecord[] }>(
-          session,
-          workspaceId,
-          "/api/v1/discovery/sources",
-        ),
-        apiRequest<{ data: DiscoveryRunRecord[] }>(
-          session,
-          workspaceId,
-          "/api/v1/discovery/runs",
-        ),
-        apiRequest<{ data: Array<{ terms_id: string }> }>(
-          session,
-          workspaceId,
-          "/api/v1/terms",
-        ),
-      ]);
-      setSources(sourceResult.data);
-      setRuns(runResult.data);
-      setTermsAccepted(
-        termsResult.data.some((t) => t.terms_id === "overpass-osm"),
-      );
+      const [sourceResult, runResult, candidateResult, termsResult] =
+        await Promise.all([
+          apiRequest<{ data: DiscoverySourceRecord[] }>(
+            session,
+            workspaceId,
+            "/api/v1/discovery/sources",
+          ),
+          apiRequest<{ data: DiscoveryRunRecord[] }>(
+            session,
+            workspaceId,
+            "/api/v1/discovery/runs",
+          ),
+          apiRequest<{ data: DiscoveryCandidateRecord[] }>(
+            session,
+            workspaceId,
+            `/api/v1/discovery/candidates?mode=${dataMode}`,
+          ),
+          apiRequest<{ data: Array<{ terms_id: string }> }>(
+            session,
+            workspaceId,
+            "/api/v1/terms",
+          ),
+        ]);
+      setSources(sourceResult.data.filter((row) => row.data_mode === dataMode));
+      setRuns(runResult.data.filter((row) => row.data_mode === dataMode));
+      setCandidates(candidateResult.data);
+      setAcceptedTerms(new Set(termsResult.data.map((t) => t.terms_id)));
     } catch {
       // mutate() surfaces request errors; the lists simply stay stale.
     } finally {
       setLoading(false);
     }
-  }, [session, workspaceId]);
+  }, [session, workspaceId, dataMode]);
 
   useEffect(() => {
     void refresh();
@@ -1166,11 +1314,11 @@ export function Discovery({
   const role = data.actor.role ?? "";
   const canAcceptTerms = role === "owner" || role === "administrator";
 
-  async function acceptTerms() {
+  async function acceptTerms(termsId: string) {
     await mutate(
       "/api/v1/terms/accept",
-      { method: "POST", body: JSON.stringify({ termsId: "overpass-osm" }) },
-      "Overpass/OSM terms accepted — discovery runs are unblocked.",
+      { method: "POST", body: JSON.stringify({ termsId }) },
+      `${DISCOVERY_ADAPTERS[adapterId].label} terms accepted — its discovery runs are unblocked.`,
     );
     await refresh();
   }
@@ -1193,6 +1341,23 @@ export function Discovery({
       geo.centreLatitude = Number(form.get("latitude"));
       geo.centreLongitude = Number(form.get("longitude"));
     }
+    const adapterConfig: Record<string, unknown> = {};
+    if (adapterId === "toronto_open_data") {
+      adapterConfig.categories = String(form.get("categories") ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      adapterConfig.activeOnly = form.get("activeOnly") === "on";
+      adapterConfig.maxRecords = Number(form.get("maxRecords")) || 200;
+    } else if (adapterId === "job_bank") {
+      adapterConfig.keywords = String(form.get("keywords") ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      adapterConfig.postedWithinDays =
+        Number(form.get("postedWithinDays")) || 30;
+      adapterConfig.maxRecords = Number(form.get("maxRecords")) || 200;
+    }
     const campaignId = String(form.get("campaignId") ?? "");
     const result = await mutate(
       "/api/v1/discovery/sources",
@@ -1200,7 +1365,9 @@ export function Discovery({
         method: "POST",
         body: JSON.stringify({
           name: form.get("name"),
-          adapterId: "overpass",
+          adapterId,
+          adapterConfig,
+          dataMode,
           geo,
           sourceId: form.get("sourceId"),
           ...(campaignId ? { campaignId } : {}),
@@ -1211,6 +1378,7 @@ export function Discovery({
     if (result) {
       formElement.reset();
       setCity("Toronto");
+      setAdapterId("overpass");
       await refresh();
     }
   }
@@ -1226,6 +1394,28 @@ export function Discovery({
     await refresh();
   }
 
+  async function resolveCandidate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!resolvingCandidateId) return;
+    const result = await mutate(
+      `/api/v1/discovery/candidates/${resolvingCandidateId}/resolve`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          website: resolutionUrl,
+          notes: resolutionNotes,
+        }),
+      },
+      "Candidate website resolved and persistent scrape job queued.",
+    );
+    if (result) {
+      setResolvingCandidateId(null);
+      setResolutionUrl("");
+      setResolutionNotes("");
+      await refresh();
+    }
+  }
+
   return (
     <>
       <div className="content split-layout">
@@ -1234,24 +1424,30 @@ export function Discovery({
             <div>
               <h3>Discovery sources</h3>
               <p>
-                Business discovery over OpenStreetMap. Discovered websites are
-                enqueued as scrape jobs under the linked collection source, so
-                its approved policy governs collection.
+                Permitted public-data adapters persist every candidate, resolve
+                websites, and enqueue approved collection jobs. Showing only
+                <b> {dataMode}</b> records.
               </p>
             </div>
           </div>
-          {termsAccepted === false ? (
+          {!acceptedTerms.has(DISCOVERY_ADAPTERS[adapterId].termsId) ? (
             <div className="notice">
               <div>
-                <b>Overpass/OSM terms not yet accepted.</b>{" "}
+                <b>
+                  {DISCOVERY_ADAPTERS[adapterId].label} terms not yet accepted.
+                </b>{" "}
                 <span className="muted">
-                  Discovery runs are blocked until an owner or administrator
-                  accepts the Overpass API usage policy and OpenStreetMap
-                  attribution (ODbL) terms for this workspace.
+                  Registration is available, but runs stay blocked until an
+                  owner or administrator records human acceptance.
                 </span>
               </div>
               {canAcceptTerms ? (
-                <button className="row-action" onClick={() => void acceptTerms()}>
+                <button
+                  className="row-action"
+                  onClick={() =>
+                    void acceptTerms(DISCOVERY_ADAPTERS[adapterId].termsId)
+                  }
+                >
                   Accept terms
                 </button>
               ) : (
@@ -1270,7 +1466,10 @@ export function Discovery({
                   <div>
                     <b>{source.name}</b>
                     <small>
-                      {geoSummary(source.geo_params)} ·{" "}
+                      {DISCOVERY_ADAPTERS[
+                        source.adapter_id as DiscoveryAdapterId
+                      ]?.label ?? source.adapter_id}{" "}
+                      · {geoSummary(source.geo_params)} ·{" "}
                       {source.active ? "active" : "paused"}
                     </small>
                   </div>
@@ -1297,9 +1496,8 @@ export function Discovery({
             <div>
               <h3>Register discovery source</h3>
               <p>
-                Free Overpass adapter — no API key required. Use is subject to
-                the Overpass API usage policy and OpenStreetMap attribution
-                (ODbL) terms.
+                Choose an adapter and configure its bounded discovery scope.
+                Human terms acceptance remains a separate release gate.
               </p>
             </div>
           </div>
@@ -1307,6 +1505,23 @@ export function Discovery({
             <label>
               Name
               <input name="name" minLength={2} maxLength={160} required />
+            </label>
+            <label>
+              Adapter
+              <select
+                name="adapterId"
+                value={adapterId}
+                onChange={(event) =>
+                  setAdapterId(event.target.value as DiscoveryAdapterId)
+                }
+              >
+                {Object.entries(DISCOVERY_ADAPTERS).map(([id, adapter]) => (
+                  <option key={id} value={id}>
+                    {adapter.label}
+                  </option>
+                ))}
+              </select>
+              <small>{DISCOVERY_ADAPTERS[adapterId].detail}</small>
             </label>
             <label>
               City
@@ -1365,6 +1580,64 @@ export function Discovery({
                 required
               />
             </label>
+            {adapterId === "toronto_open_data" ? (
+              <>
+                <label>
+                  Licence categories (comma-separated, optional)
+                  <input
+                    name="categories"
+                    placeholder="Restaurant, Contractor"
+                  />
+                </label>
+                <label>
+                  Maximum records
+                  <input
+                    name="maxRecords"
+                    type="number"
+                    min={1}
+                    max={200}
+                    defaultValue={200}
+                  />
+                </label>
+                <label>
+                  <span>
+                    <input name="activeOnly" type="checkbox" defaultChecked />{" "}
+                    Active licences only
+                  </span>
+                </label>
+              </>
+            ) : null}
+            {adapterId === "job_bank" ? (
+              <>
+                <label>
+                  Hiring keywords (comma-separated)
+                  <input
+                    name="keywords"
+                    defaultValue="administrative, data entry, coordinator"
+                  />
+                </label>
+                <label>
+                  Posted within (days)
+                  <input
+                    name="postedWithinDays"
+                    type="number"
+                    min={1}
+                    max={365}
+                    defaultValue={30}
+                  />
+                </label>
+                <label>
+                  Maximum records
+                  <input
+                    name="maxRecords"
+                    type="number"
+                    min={1}
+                    max={200}
+                    defaultValue={200}
+                  />
+                </label>
+              </>
+            ) : null}
             <label>
               Collection source (approved)
               <select name="sourceId" required>
@@ -1404,6 +1677,7 @@ export function Discovery({
               <span>Source</span>
               <span>Status</span>
               <span>Candidates</span>
+              <span>Persisted / unresolved</span>
               <span>Enqueued</span>
             </div>
             {(runs ?? []).map((run) => (
@@ -1420,12 +1694,112 @@ export function Discovery({
                   ) : null}
                 </span>
                 <span>{run.candidates_found ?? "—"}</span>
+                <span>
+                  {run.candidates_persisted ?? "—"} /{" "}
+                  {run.candidates_unresolved ?? "—"}
+                </span>
                 <span>{run.candidates_enqueued ?? "—"}</span>
               </div>
             ))}
           </div>
           {(runs ?? []).length === 0 && !loading ? (
             <p className="muted">No discovery runs yet.</p>
+          ) : null}
+        </section>
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h3>Persistent discovery candidates</h3>
+              <p>
+                All {dataMode} candidates are retained, including records that
+                need website resolution before collection.
+              </p>
+            </div>
+          </div>
+          <div className="table">
+            <div className="table-head">
+              <span>Business</span>
+              <span>Adapter</span>
+              <span>Resolution</span>
+              <span>Observed</span>
+            </div>
+            {(candidates ?? []).slice(0, 100).map((candidate) => (
+              <div className="table-row" key={candidate.id}>
+                <span>
+                  <b>{candidate.name}</b>
+                  <small>
+                    {candidate.address ?? candidate.category ?? "—"}
+                  </small>
+                </span>
+                <span>{candidate.adapter_id}</span>
+                <span>
+                  <Status value={candidate.resolution_status} />
+                  <small>
+                    {candidate.resolved_website ?? "Review required"}
+                  </small>
+                  {!candidate.resolved_website ? (
+                    <button
+                      type="button"
+                      className="row-action"
+                      onClick={() => {
+                        setResolvingCandidateId(candidate.id);
+                        setResolutionUrl(candidate.website ?? "");
+                        setResolutionNotes("");
+                      }}
+                    >
+                      Resolve website
+                    </button>
+                  ) : null}
+                </span>
+                <span>
+                  {new Date(candidate.source_observed_at).toLocaleString()}
+                </span>
+              </div>
+            ))}
+          </div>
+          {resolvingCandidateId ? (
+            <form
+              className="horizontal-form resolution-form"
+              onSubmit={resolveCandidate}
+            >
+              <label>
+                Human-validated website
+                <input
+                  type="url"
+                  value={resolutionUrl}
+                  onChange={(event) => setResolutionUrl(event.target.value)}
+                  placeholder="https://business.example"
+                  required
+                />
+              </label>
+              <label>
+                Validation note
+                <input
+                  value={resolutionNotes}
+                  onChange={(event) => setResolutionNotes(event.target.value)}
+                  placeholder="Where and how the website was verified"
+                  minLength={3}
+                  required
+                />
+              </label>
+              <p className="muted">
+                This audited action links the candidate to an approved source
+                policy and queues its mode-scoped collection job.
+              </p>
+              <div>
+                <button className="primary">Resolve and queue</button>{" "}
+                <button
+                  type="button"
+                  className="quiet"
+                  onClick={() => setResolvingCandidateId(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
+          {(candidates ?? []).length === 0 && !loading ? (
+            <p className="muted">No {dataMode} candidates persisted yet.</p>
           ) : null}
         </section>
       </div>
@@ -1658,9 +2032,7 @@ export function Leads({
       anchor.remove();
       URL.revokeObjectURL(url);
     } catch (error) {
-      setExportError(
-        error instanceof Error ? error.message : "Export failed.",
-      );
+      setExportError(error instanceof Error ? error.message : "Export failed.");
     } finally {
       setExporting(null);
     }
@@ -1813,14 +2185,13 @@ function Operations({ data }: { data: BootstrapData }) {
           <p>
             The operating-economics gate is a hard target: total infrastructure
             spend across <b>Neon</b>, <b>Vercel</b>, and <b>QStash</b> stays
-            under <b>CAD 150/month</b> until the business reaches CAD 1,000
-            MRR. Billing alerts are the enforcement mechanism — set them up
-            per the runbook before introducing any per-candidate LLM spend.
+            under <b>CAD 150/month</b> until the business reaches CAD 1,000 MRR.
+            Billing alerts are the enforcement mechanism — set them up per the
+            runbook before introducing any per-candidate LLM spend.
           </p>
           <ul>
             <li>
-              Runbook:{" "}
-              <code>docs/runbooks/spend-gate-billing-alerts.md</code>
+              Runbook: <code>docs/runbooks/spend-gate-billing-alerts.md</code>
             </li>
             <li>
               <a
@@ -1833,7 +2204,11 @@ function Operations({ data }: { data: BootstrapData }) {
               — billing in project / organization settings
             </li>
             <li>
-              <a href="https://vercel.com/dashboard" target="_blank" rel="noreferrer">
+              <a
+                href="https://vercel.com/dashboard"
+                target="_blank"
+                rel="noreferrer"
+              >
                 Vercel dashboard
               </a>{" "}
               — billing tab
@@ -1924,7 +2299,9 @@ function auditParentKey(event: AuditRecord): string | null {
       return orgId ? `organizations:${orgId}` : null;
     }
     case "opportunities": {
-      const assessmentId = str(state.assessment_id ?? state.maturity_assessment_id);
+      const assessmentId = str(
+        state.assessment_id ?? state.maturity_assessment_id,
+      );
       if (assessmentId) return `maturity_assessments:${assessmentId}`;
       const orgId = str(state.organization_id);
       return orgId ? `organizations:${orgId}` : null;
@@ -1983,7 +2360,7 @@ function buildAuditRuns(events: AuditRecord[]): AuditRun[] {
     );
     const title = jobRoot
       ? `Scrape run · ${jobRoot.event.resource_id?.slice(0, 8) ?? "job"}`
-      : rootActions[0]?.replace(/\./g, " ") ?? `Run ${index + 1}`;
+      : (rootActions[0]?.replace(/\./g, " ") ?? `Run ${index + 1}`);
     return {
       id: `run-${index}-${bucket[0].id}`,
       title,
@@ -2206,9 +2583,9 @@ function Audit({
           <div>
             <h3>Immutable application audit trail</h3>
             <p>
-              Events are grouped by day, then bucketed into runs — expand a
-              day, then a run, to walk its grandparent → parent → children
-              tree. Click any entry to inspect it.
+              Events are grouped by day, then bucketed into runs — expand a day,
+              then a run, to walk its grandparent → parent → children tree.
+              Click any entry to inspect it.
             </p>
           </div>
           <div
@@ -2253,8 +2630,8 @@ function Audit({
                   <div>
                     <b>{day.label}</b>
                     <small>
-                      {day.runs.length} run{day.runs.length === 1 ? "" : "s"}{" "}
-                      · {day.events.length} record
+                      {day.runs.length} run{day.runs.length === 1 ? "" : "s"} ·{" "}
+                      {day.events.length} record
                       {day.events.length === 1 ? "" : "s"}
                     </small>
                   </div>
@@ -2295,7 +2672,8 @@ function interpretAuditEvent(event: {
     return {
       observation: `A new lead source "${String(after.name ?? after.base_url ?? "unknown")}" was submitted for policy approval.`,
       metric: `Status: ${String(after.status ?? "pending_approval")} · Collection method: ${String(after.collection_method ?? "—")}`,
-      action: "Review the source's policy (allowed domains, rate limits, budgets), then approve it so it becomes available for scraping.",
+      action:
+        "Review the source's policy (allowed domains, rate limits, budgets), then approve it so it becomes available for scraping.",
     };
   }
   if (action === "source_definitions.update") {
@@ -2314,7 +2692,8 @@ function interpretAuditEvent(event: {
     return {
       observation: `Source "${String(after.name ?? after.base_url ?? "unknown")}" settings were edited.`,
       metric: "Configuration updated (see technical view for changed fields).",
-      action: "Verify the edited values are correct; budgets and rate limits remain versioned by design.",
+      action:
+        "Verify the edited values are correct; budgets and rate limits remain versioned by design.",
     };
   }
 
@@ -2323,7 +2702,8 @@ function interpretAuditEvent(event: {
     return {
       observation: `A new scrape job was queued for ${String(after.target_url ?? "a target URL")}.`,
       metric: `Initial status: ${String(after.status ?? "queued")} · Attempt 0 of ${String(after.max_attempts ?? 3)}`,
-      action: "Watch the job on the Scrape jobs page — the worker picks it up within minutes.",
+      action:
+        "Watch the job on the Scrape jobs page — the worker picks it up within minutes.",
     };
   }
   if (action === "scrape_jobs.update") {
@@ -2334,31 +2714,41 @@ function interpretAuditEvent(event: {
       return {
         observation: `Scrape job for ${String(after.target_url ?? "the target")} completed successfully.`,
         metric: `Attempts used: ${attempts} · Duration and evidence counts in technical view.`,
-        action: "Check Qualified leads — newly scored businesses appear there once the criteria thresholds are applied.",
+        action:
+          "Check Qualified leads — newly scored businesses appear there once the criteria thresholds are applied.",
       };
     }
     if (to === "dead_letter") {
       return {
         observation: `Scrape job for ${String(after.target_url ?? "the target")} exhausted all retries and was dead-lettered.`,
         metric: `Attempts used: ${attempts} · Last error: ${String(after.last_error ?? before.last_error ?? "see attempt records")}`,
-        action: "Inspect the failure reason (robots.txt denial, 404, timeout). Fix the target or source policy, then retry the job.",
+        action:
+          "Inspect the failure reason (robots.txt denial, 404, timeout). Fix the target or source policy, then retry the job.",
       };
     }
     return {
       observation: `Scrape job for ${String(after.target_url ?? "the target")} moved from ${from} to ${to}.`,
       metric: `Status transition: ${from} → ${to} · Attempts: ${attempts}`,
-      action: to === "leased" ? "A worker has picked up the job — no action needed." : "Monitor the job; it will retry automatically on transient failures.",
+      action:
+        to === "leased"
+          ? "A worker has picked up the job — no action needed."
+          : "Monitor the job; it will retry automatically on transient failures.",
     };
   }
   if (action === "scrape_job_attempts.insert") {
     return {
-      observation: "A worker started a new collection attempt for a scrape job.",
+      observation:
+        "A worker started a new collection attempt for a scrape job.",
       metric: `Attempt ${String(after.attempt_number ?? "?")} began at ${String(after.started_at ?? "—")}`,
       action: "No action needed — the attempt runs automatically.",
     };
   }
   if (action === "scrape_job_attempts.update") {
-    const ok = after.success === true || String(after.status ?? "").toLowerCase().includes("success");
+    const ok =
+      after.success === true ||
+      String(after.status ?? "")
+        .toLowerCase()
+        .includes("success");
     return {
       observation: ok
         ? "A collection attempt finished successfully and its evidence was stored."
@@ -2375,26 +2765,38 @@ function interpretAuditEvent(event: {
     return {
       observation: "A business was scored for automation maturity.",
       metric: `Maturity score: ${String(after.maturity_score ?? "—")} · Confidence: ${String(after.confidence ?? "—")}`,
-      action: "Scores feed the qualification thresholds — check Qualified leads for businesses that met the bar.",
+      action:
+        "Scores feed the qualification thresholds — check Qualified leads for businesses that met the bar.",
     };
   }
   if (action === "opportunities.insert") {
     return {
       observation: `A new qualified lead was created: ${String(after.business_name ?? after.organization_id ?? "a business")}.`,
       metric: `Opportunity score: ${String(after.opportunity_potential_score ?? after.score ?? "—")}`,
-      action: "Review the lead in Qualified leads and export it when ready for outreach planning.",
+      action:
+        "Review the lead in Qualified leads and export it when ready for outreach planning.",
     };
   }
 
   // Criteria
-  if (action === "criteria.suggestion_applied" || action.includes("suggestion_applied")) {
+  if (
+    action === "criteria.suggestion_applied" ||
+    action.includes("suggestion_applied")
+  ) {
     return {
-      observation: "The engine's threshold suggestion was applied to the discovery campaign.",
-      metric: event.reason ?? "Thresholds adjusted (see technical view for before/after).",
-      action: "Watch qualified-lead output over the next cycle to confirm the adjustment had the intended effect.",
+      observation:
+        "The engine's threshold suggestion was applied to the discovery campaign.",
+      metric:
+        event.reason ??
+        "Thresholds adjusted (see technical view for before/after).",
+      action:
+        "Watch qualified-lead output over the next cycle to confirm the adjustment had the intended effect.",
     };
   }
-  if (action === "criteria.auto_apply_changed" || action.includes("auto_apply")) {
+  if (
+    action === "criteria.auto_apply_changed" ||
+    action.includes("auto_apply")
+  ) {
     return {
       observation: `Automatic threshold application was ${after.auto_apply_criteria ? "enabled" : "disabled"}.`,
       metric: `auto_apply_criteria: ${String(before.auto_apply_criteria ?? "—")} → ${String(after.auto_apply_criteria ?? "—")}`,
@@ -2408,7 +2810,9 @@ function interpretAuditEvent(event: {
   const friendly = event.action.replace(/[._]/g, " ");
   return {
     observation: `Recorded change: ${friendly} on ${event.resource_type}.`,
-    metric: event.reason ?? `Outcome: ${event.outcome}. See the technical view for before/after state.`,
+    metric:
+      event.reason ??
+      `Outcome: ${event.outcome}. See the technical view for before/after state.`,
     action: "Expand the technical view to inspect exactly what changed.",
   };
 }
@@ -2476,7 +2880,10 @@ function HelpGuide() {
         <div className="panel-head">
           <div>
             <h3>Lead Engine User Guide</h3>
-            <p>How to use the Raphah Lead Engine — from first source to qualified lead.</p>
+            <p>
+              How to use the Raphah Lead Engine — from first source to qualified
+              lead.
+            </p>
           </div>
         </div>
         <div className="help-content">
@@ -2484,8 +2891,8 @@ function HelpGuide() {
           <p>
             The Lead Engine discovers businesses with low automation maturity,
             scores them as opportunities, and keeps a continuously-refreshed
-            list of qualified leads. Work flows through <b>workspaces</b> —
-            your personal workspace was created automatically on first sign-in.
+            list of qualified leads. Work flows through <b>workspaces</b> — your
+            personal workspace was created automatically on first sign-in.
           </p>
 
           <h4>2. Sources &amp; policies — the approval gate</h4>
@@ -2495,66 +2902,94 @@ function HelpGuide() {
             explicitly approved:
           </p>
           <ol>
-            <li>Go to <b>Sources &amp; policies</b> → fill in <b>Add source</b> (name, base URL, collection method, purpose, contact email, refresh interval).</li>
-            <li>The source is created with status <b>pending approval</b> — it appears in the list with a badge and an <b>Approve</b> button.</li>
-            <li>Review the policy (allowed domains, rate limits, budgets), then click <b>Approve</b>. Only owners and administrators can approve.</li>
-            <li>Once approved, the status becomes <b>active</b> and the source appears in the <b>Approved source</b> dropdown on the Scrape jobs page.</li>
+            <li>
+              Go to <b>Sources &amp; policies</b> → fill in <b>Add source</b>{" "}
+              (name, base URL, collection method, purpose, contact email,
+              refresh interval).
+            </li>
+            <li>
+              The source is created with status <b>pending approval</b> — it
+              appears in the list with a badge and an <b>Approve</b> button.
+            </li>
+            <li>
+              Review the policy (allowed domains, rate limits, budgets), then
+              click <b>Approve</b>. Only owners and administrators can approve.
+            </li>
+            <li>
+              Once approved, the status becomes <b>active</b> and the source
+              appears in the <b>Approved source</b> dropdown on the Scrape jobs
+              page.
+            </li>
           </ol>
           <p>
             <b>Why the gate?</b> The Lead Engine only collects public evidence
-            for a stated business purpose. The approval step is your record
-            that a human reviewed and permitted the collection.
+            for a stated business purpose. The approval step is your record that
+            a human reviewed and permitted the collection.
           </p>
           <p>
-            <b>Bulk import:</b> the <b>Import sources</b> panel below the
-            source list accepts a CSV with <b>name</b> and <b>website</b>
+            <b>Bulk import:</b> the <b>Import sources</b> panel below the source
+            list accepts a CSV with <b>name</b> and <b>website</b>
             columns (a template is downloadable from the panel). Each row
-            becomes one source with its own policy, duplicates are skipped,
-            and nothing is collected until you approve each source — or tick
+            becomes one source with its own policy, duplicates are skipped, and
+            nothing is collected until you approve each source — or tick
             <b>Approve all on import</b> (owners and administrators only) to
             activate them immediately.
           </p>
 
           <p>
             <b>Discovery sources</b> (the <b>Discovery</b> view) find candidate
-            businesses via the OpenStreetMap/Overpass engine. Use is subject
-            to the Overpass API usage policy and OpenStreetMap attribution
-            (ODbL) terms — see Compliance References in the product
-            documentation.
+            businesses via the OpenStreetMap/Overpass engine. Use is subject to
+            the Overpass API usage policy and OpenStreetMap attribution (ODbL)
+            terms — see Compliance References in the product documentation.
           </p>
 
           <h4>3. Criteria &amp; schedule — what counts as a lead</h4>
           <p>Each discovery campaign has scoring thresholds:</p>
           <ul>
-            <li><b>Maximum maturity</b> — only businesses scoring at or below this automation-maturity level qualify (lower = less automated = better prospect).</li>
-            <li><b>Minimum opportunity</b> — the opportunity score a business must reach.</li>
-            <li><b>Confidence %</b> — minimum evidence confidence.</li>
-            <li><b>Evidence categories</b> — how many distinct evidence types must be observed.</li>
-            <li><b>Geography</b> — limit discovery to cities, regions, or a radius around a point.</li>
+            <li>
+              <b>Maximum maturity</b> — only businesses scoring at or below this
+              automation-maturity level qualify (lower = less automated = better
+              prospect).
+            </li>
+            <li>
+              <b>Minimum opportunity</b> — the opportunity score a business must
+              reach.
+            </li>
+            <li>
+              <b>Confidence %</b> — minimum evidence confidence.
+            </li>
+            <li>
+              <b>Evidence categories</b> — how many distinct evidence types must
+              be observed.
+            </li>
+            <li>
+              <b>Geography</b> — limit discovery to cities, regions, or a radius
+              around a point.
+            </li>
           </ul>
           <p>
-            The engine watches your qualified-lead output and suggests
-            threshold adjustments (e.g. "loosen" when output is below target).
-            Click <b>Apply suggestion</b> to accept, or edit the values
-            manually and save. Enable <b>auto-apply</b> to let future
-            suggestions apply themselves.
+            The engine watches your qualified-lead output and suggests threshold
+            adjustments (e.g. "loosen" when output is below target). Click{" "}
+            <b>Apply suggestion</b> to accept, or edit the values manually and
+            save. Enable <b>auto-apply</b> to let future suggestions apply
+            themselves.
           </p>
 
           <h4>4. Scrape jobs — collecting evidence</h4>
           <p>
             Go to <b>Scrape jobs</b>, pick an <b>approved source</b>, enter a
             public target URL, and click <b>Queue scrape</b>. Jobs move through
-            a durable lifecycle: <b>queued → leased → completed</b> (or
-            retried, then dead-lettered after max attempts). Every job stays
-            queryable in the job table.
+            a durable lifecycle: <b>queued → leased → completed</b> (or retried,
+            then dead-lettered after max attempts). Every job stays queryable in
+            the job table.
           </p>
 
           <h4>5. Qualified leads — the output</h4>
           <p>
             <b>Qualified leads</b> lists businesses that met your criteria,
             ranked by opportunity potential. Each lead links to its evidence.
-            Export the list for outreach — note: the system drafts messages,
-            a human approves and sends them (no automated outreach).
+            Export the list for outreach — note: the system drafts messages, a
+            human approves and sends them (no automated outreach).
           </p>
 
           <h4>6. Operations &amp; audit</h4>
@@ -2567,9 +3002,19 @@ function HelpGuide() {
 
           <h4>Troubleshooting</h4>
           <ul>
-            <li><b>Source dropdown is empty</b> — no active sources in this workspace yet. Create one under Sources &amp; policies and approve it.</li>
-            <li><b>Stuck on "Workspace initializing"</b> — refresh the page; the bootstrap retries automatically.</li>
-            <li><b>"Request failed (404)"</b> — the data plane had a hiccup; click Refresh or reload the page.</li>
+            <li>
+              <b>Source dropdown is empty</b> — no active sources in this
+              workspace yet. Create one under Sources &amp; policies and approve
+              it.
+            </li>
+            <li>
+              <b>Stuck on "Workspace initializing"</b> — refresh the page; the
+              bootstrap retries automatically.
+            </li>
+            <li>
+              <b>"Request failed (404)"</b> — the data plane had a hiccup; click
+              Refresh or reload the page.
+            </li>
           </ul>
         </div>
       </section>

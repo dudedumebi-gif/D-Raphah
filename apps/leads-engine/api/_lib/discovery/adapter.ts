@@ -5,6 +5,8 @@ import { z } from "zod";
  * scrape target plus the evidence that identified it.
  */
 export interface Candidate {
+  /** Stable identifier assigned by the upstream dataset. */
+  externalId?: string;
   name: string | null;
   website: string | null;
   address: string | null;
@@ -13,6 +15,12 @@ export interface Candidate {
   category: string | null;
   /** Adapter that produced the candidate (e.g. "overpass"). */
   source: string;
+  /** Canonical record or dataset URL used for provenance. */
+  sourceUrl?: string;
+  observedAt?: string;
+  /** Structured-source text that participates in signal extraction. */
+  evidenceText?: string;
+  rawRecord?: Record<string, unknown>;
 }
 
 /**
@@ -31,6 +39,10 @@ export interface GeoQuery {
 export interface FetchCandidatesOptions {
   /** Injectable fetch; tests pass a mock so no live network is touched. */
   fetcher?: typeof fetch;
+  /** Adapter-specific, validated configuration stored on the source row. */
+  config?: unknown;
+  /** Upper bound supplied by the run coordinator. */
+  maxCandidates?: number;
 }
 
 export interface DiscoveryAdapter {
@@ -146,8 +158,7 @@ export function normalizeWebsiteUrl(raw: string): string | null {
     }
   }
   if (!parsed) return null;
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    return null;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
   const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
   if (!host) return null;
   const bare = host.replace(/^www\./, "");

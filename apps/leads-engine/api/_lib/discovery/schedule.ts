@@ -26,7 +26,7 @@
  */
 
 import { log } from "../telemetry.js";
-import { OverpassAdapter } from "./overpass.js";
+import { createDiscoveryAdapters } from "./registry.js";
 import {
   runDiscoveryRun,
   type DiscoverySourceRow,
@@ -34,10 +34,7 @@ import {
   type QueuedJob,
   type RunOutcome,
 } from "./run.js";
-import {
-  OVERPASS_OSM_TERMS_ID,
-  requireTermsAcceptance,
-} from "./terms.js";
+import { requireTermsAcceptance, termsForAdapter } from "./terms.js";
 
 export type ScheduleSqlClient = (
   strings: TemplateStringsArray,
@@ -52,6 +49,8 @@ interface SourceRow {
   name: string;
   adapter_id: string;
   geo_params: unknown;
+  adapter_config: unknown;
+  data_mode: "demo" | "pilot" | "production";
   source_id: string;
   campaign_id: string | null;
   active: boolean;
@@ -64,6 +63,8 @@ function toDiscoverySourceRow(row: SourceRow): DiscoverySourceRow {
     name: row.name,
     adapter_id: row.adapter_id,
     geo_params: row.geo_params,
+    adapter_config: row.adapter_config,
+    data_mode: row.data_mode,
     source_id: row.source_id,
     campaign_id: row.campaign_id,
     active: row.active,
@@ -84,11 +85,14 @@ async function assertCollectionSourceApproved(
       and s.status = 'active'
       and p.status = 'approved'
       and p.approved_by is not null
+      and p.allow_discovered_domains = true
     limit 1
   `) as unknown as Array<{ "?column?": number }>;
   if (rows.length === 0)
     throw Object.assign(
-      new Error("Borrowed collection source is not approved and active"),
+      new Error(
+        "Borrowed collection source is not approved, active, and authorized for discovered domains",
+      ),
       { statusCode: 409 },
     );
 }
@@ -97,8 +101,8 @@ function buildStore(client: ScheduleSqlClient): DiscoveryStore {
   return {
     getSource: async (discoverySourceId: string) => {
       const rows = (await client`
-        select id, workspace_id, name, adapter_id, geo_params, source_id,
-               campaign_id, active
+        select id, workspace_id, name, adapter_id, geo_params, adapter_config,
+               data_mode, source_id, campaign_id, active
         from public.discovery_sources
         where id = ${discoverySourceId}::uuid
         limit 1
@@ -107,14 +111,18 @@ function buildStore(client: ScheduleSqlClient): DiscoveryStore {
     },
     createRun: async (discoverySourceId: string) => {
       const source = (await client`
-        select workspace_id from public.discovery_sources
+        select workspace_id, data_mode from public.discovery_sources
         where id = ${discoverySourceId}::uuid limit 1
-      `) as unknown as Array<{ workspace_id: string }>;
+      `) as unknown as Array<{
+        workspace_id: string;
+        data_mode: "demo" | "pilot" | "production";
+      }>;
       const rows = (await client`
         insert into public.discovery_runs(
-          workspace_id, discovery_source_id, status
+          workspace_id, discovery_source_id, status, data_mode
         ) values (
-          ${source[0].workspace_id}::uuid, ${discoverySourceId}::uuid, 'running'
+          ${source[0].workspace_id}::uuid, ${discoverySourceId}::uuid, 'running',
+          ${source[0].data_mode}
         )
         returning id, started_at
       `) as unknown as Array<{ id: string; started_at: string }>;
@@ -127,6 +135,8 @@ function buildStore(client: ScheduleSqlClient): DiscoveryStore {
           finished_at = now(),
           candidates_found = ${outcome.candidatesFound},
           candidates_enqueued = ${outcome.candidatesEnqueued},
+          candidates_persisted = ${outcome.candidatesPersisted ?? 0},
+          candidates_unresolved = ${outcome.candidatesUnresolved ?? 0},
           error = ${outcome.error}
         where id = ${runId}::uuid
       `;
@@ -139,7 +149,100 @@ function buildStore(client: ScheduleSqlClient): DiscoveryStore {
       `) as unknown as Array<{ target_url: string; idempotency_key: string }>;
       return rows;
     },
-    queueJob: async ({ sourceId, targetUrl, key, maxAttempts }) => {
+    upsertCandidate: async ({
+      runId,
+      source,
+      candidate,
+      externalId,
+      identityKey,
+    }) => {
+      const mode = source.data_mode ?? "pilot";
+      let resolvedWebsite = candidate.website;
+      let resolutionStatus: "direct" | "matched" | "unresolved" =
+        candidate.website ? "direct" : "unresolved";
+      let confidence = candidate.website ? 1 : 0;
+      if (!resolvedWebsite) {
+        const match = (await client`
+          select resolved_website from public.discovery_candidates
+          where workspace_id = ${source.workspace_id}::uuid
+            and data_mode = ${mode}
+            and identity_key = ${identityKey}
+            and resolved_website is not null
+          order by last_seen_at desc limit 1
+        `) as unknown as Array<{ resolved_website: string }>;
+        if (match[0]?.resolved_website) {
+          resolvedWebsite = match[0].resolved_website;
+          resolutionStatus = "matched";
+          confidence = 0.9;
+        }
+      }
+      const existing = (await client`
+        select id from public.discovery_candidates
+        where workspace_id = ${source.workspace_id}::uuid
+          and adapter_id = ${source.adapter_id}
+          and external_id = ${externalId}
+          and data_mode = ${mode}
+        limit 1
+      `) as unknown as Array<{ id: string }>;
+      const rows = (await client`
+        insert into public.discovery_candidates(
+          workspace_id, discovery_source_id, discovery_run_id, adapter_id,
+          external_id, data_mode, name, normalized_name, identity_key,
+          website, resolved_website, resolution_status,
+          resolution_confidence, address, latitude, longitude, category,
+          source_url, source_observed_at, evidence_text, raw_record
+        ) values (
+          ${source.workspace_id}::uuid, ${source.id}::uuid, ${runId}::uuid,
+          ${source.adapter_id}, ${externalId}, ${mode}, ${candidate.name ?? "Unnamed candidate"},
+          ${(candidate.name ?? "Unnamed candidate").toLowerCase()}, ${identityKey}, ${candidate.website},
+          ${resolvedWebsite}, ${resolutionStatus}, ${confidence},
+          ${candidate.address}, ${candidate.lat}, ${candidate.lng},
+          ${candidate.category}, ${candidate.sourceUrl ?? resolvedWebsite ?? "about:blank"},
+          ${candidate.observedAt ?? new Date().toISOString()}::timestamptz,
+          ${candidate.evidenceText ?? ""}, ${JSON.stringify(candidate.rawRecord ?? {})}::jsonb
+        )
+        on conflict (workspace_id, adapter_id, external_id, data_mode)
+        do update set
+          discovery_source_id = excluded.discovery_source_id,
+          discovery_run_id = excluded.discovery_run_id,
+          name = excluded.name,
+          normalized_name = excluded.normalized_name,
+          identity_key = excluded.identity_key,
+          website = excluded.website,
+          resolved_website = excluded.resolved_website,
+          resolution_status = excluded.resolution_status,
+          resolution_confidence = excluded.resolution_confidence,
+          address = excluded.address,
+          latitude = excluded.latitude,
+          longitude = excluded.longitude,
+          category = excluded.category,
+          source_url = excluded.source_url,
+          source_observed_at = excluded.source_observed_at,
+          evidence_text = excluded.evidence_text,
+          raw_record = excluded.raw_record,
+          last_seen_at = now()
+        returning id, resolved_website, resolution_status
+      `) as unknown as Array<{
+        id: string;
+        resolved_website: string | null;
+        resolution_status:
+          "direct" | "matched" | "review_required" | "unresolved" | "rejected";
+      }>;
+      return {
+        id: rows[0].id,
+        resolvedWebsite: rows[0].resolved_website,
+        resolutionStatus: rows[0].resolution_status,
+        duplicate: existing.length > 0,
+      };
+    },
+    queueJob: async ({
+      sourceId,
+      targetUrl,
+      key,
+      maxAttempts,
+      candidateId,
+      dataMode,
+    }) => {
       const jobRows = (await client`
         select workspace_id from public.source_definitions
         where id = ${sourceId}::uuid limit 1
@@ -152,11 +255,12 @@ function buildStore(client: ScheduleSqlClient): DiscoveryStore {
       const inserted = (await client`
         insert into public.scrape_jobs(
           workspace_id, source_id, campaign_id, target_url, idempotency_key,
-          criteria_snapshot, max_attempts, created_by
+          criteria_snapshot, max_attempts, created_by,
+          discovery_candidate_id, data_mode
         )
         select ${workspaceId}::uuid, ${sourceId}::uuid, sc.id, ${targetUrl},
                ${key}, coalesce(sc.criteria, '{}'::jsonb), ${maxAttempts},
-               'discovery-scheduler'
+               'discovery-scheduler', ${candidateId}::uuid, ${dataMode ?? "pilot"}
         from (select 1) one
         left join lateral (
           select id, criteria from public.scrape_campaigns
@@ -167,7 +271,11 @@ function buildStore(client: ScheduleSqlClient): DiscoveryStore {
         on conflict (idempotency_key) do nothing
         returning id, created_at
       `) as unknown as Array<{ id: string; created_at: string }>;
-      if (inserted[0]) return { id: inserted[0].id, createdAt: inserted[0].created_at } satisfies QueuedJob;
+      if (inserted[0])
+        return {
+          id: inserted[0].id,
+          createdAt: inserted[0].created_at,
+        } satisfies QueuedJob;
       const existing = (await client`
         select id, created_at from public.scrape_jobs
         where idempotency_key = ${key}
@@ -204,14 +312,14 @@ export async function runScheduledDiscovery(
     errors: [],
   };
   const sources = (await client`
-    select id, workspace_id, name, adapter_id, geo_params, source_id,
-           campaign_id, active
+    select id, workspace_id, name, adapter_id, geo_params, adapter_config,
+           data_mode, source_id, campaign_id, active
     from public.discovery_sources
     where active
     order by created_at
   `) as unknown as SourceRow[];
   const store = buildStore(client);
-  const adapters = { overpass: new OverpassAdapter() };
+  const adapters = createDiscoveryAdapters();
 
   for (const source of sources) {
     result.checked += 1;
@@ -228,6 +336,7 @@ export async function runScheduledDiscovery(
       }
       // Terms gate (audit gap 2): skip loudly, never fail the sweep.
       try {
+        const requiredTerms = termsForAdapter(source.adapter_id);
         await requireTermsAcceptance(
           {
             hasAccepted: async (workspaceId: string, termsId: string) => {
@@ -241,7 +350,8 @@ export async function runScheduledDiscovery(
             },
           },
           source.workspace_id,
-          OVERPASS_OSM_TERMS_ID,
+          requiredTerms.id,
+          requiredTerms.label,
         );
       } catch (error) {
         log("warn", "discovery_skipped_terms_not_accepted", {

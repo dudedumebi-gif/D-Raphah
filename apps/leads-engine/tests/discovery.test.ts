@@ -334,18 +334,20 @@ describe("runDiscoveryRun", () => {
     });
     expect(adapters.overpass.fetchCandidates).toHaveBeenCalledTimes(1);
     expect(summary.status).toBe("completed");
-    expect(summary.candidatesFound).toBe(3);
+    expect(summary.candidatesFound).toBe(5);
+    expect(summary.candidatesPersisted).toBe(5);
+    expect(summary.candidatesUnresolved).toBe(2);
     expect(summary.candidatesEnqueued).toBe(2);
     expect(summary.skippedNoWebsite).toBe(2);
     expect(summary.skippedDuplicate).toBe(1);
     expect(calls.queued.map((call) => call.key).sort()).toEqual([
-      `discovery:${SOURCE_ID}:https://a.example`,
-      `discovery:${SOURCE_ID}:https://b.example`,
+      `discovery:pilot:${SOURCE_ID}:https://a.example`,
+      `discovery:pilot:${SOURCE_ID}:https://b.example`,
     ]);
     expect(finished).toHaveLength(1);
     expect(finished[0].outcome).toMatchObject({
       status: "completed",
-      candidatesFound: 3,
+      candidatesFound: 5,
       candidatesEnqueued: 2,
       error: null,
     });
@@ -354,7 +356,7 @@ describe("runDiscoveryRun", () => {
     const { store, existing } = makeStore(discoverySource());
     existing.push({
       target_url: "https://a.example",
-      idempotency_key: `discovery:${SOURCE_ID}:https://a.example`,
+      idempotency_key: `discovery:pilot:${SOURCE_ID}:https://a.example`,
     });
     const summary = await runDiscoveryRun({
       store,
@@ -380,7 +382,7 @@ describe("runDiscoveryRun", () => {
     // Same key already used by an earlier job with a differently-cased URL.
     existing.push({
       target_url: "https://WWW.a.example/",
-      idempotency_key: `discovery:${SOURCE_ID}:https://a.example`,
+      idempotency_key: `discovery:pilot:${SOURCE_ID}:https://a.example`,
     });
     const summary = await runDiscoveryRun({
       store,
