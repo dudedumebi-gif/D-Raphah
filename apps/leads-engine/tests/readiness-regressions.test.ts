@@ -52,6 +52,18 @@ describe("workspace bootstrap UI safety", () => {
   });
 });
 
+describe("database environment isolation", () => {
+  const source = readFileSync(
+    new URL("../api/_lib/neon.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("prefers the Lead Engine-specific database URL without replacing production DATABASE_URL", () => {
+    expect(source).toContain("process.env.LEAD_ENGINE_DATABASE_URL ??");
+    expect(source).toContain('requiredEnvironment("DATABASE_URL")');
+  });
+});
+
 describe("geographic qualification", () => {
   it("does not mistake the word 'on' for Ontario", () => {
     expect(evaluateGeography("We focus on customer service", {}).eligible).toBe(
