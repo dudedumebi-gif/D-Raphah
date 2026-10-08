@@ -14,7 +14,7 @@ import {
 import { truncateToByteLength } from "@raphah/handoff-contract";
 import { createAdminClient } from "./neon.js";
 import { dispatchDueHandoffs, type SqlClient } from "./handoff.js";
-import { checkCanaryAlerts, checkDeadLetterAlerts } from "./alerts.js";
+import { checkOperationalAlerts } from "./alerts.js";
 import { log, reportError } from "./telemetry.js";
 
 type DatabaseClient = ReturnType<typeof createAdminClient>;
@@ -502,14 +502,11 @@ export async function runWorkerTick(
     await reportError(error, { workerId });
     result.handoffsFailed += 1;
   }
-  // Operator alerting (audit gap 4): canary failures and dead-letter
-  // breaches must reach the operator without dashboard-watching. Alerting
-  // is failure-isolated and deduped inside the alert module, so it can
-  // never fail the tick or spam on repeat ticks.
+  // Stateful operational alerting is failure-isolated: Slack or alert
+  // persistence can never fail the worker tick or a lead pipeline result.
   try {
-    const sql = client as unknown as Parameters<typeof checkCanaryAlerts>[0];
-    result.alertsEmitted =
-      (await checkCanaryAlerts(sql)) + (await checkDeadLetterAlerts(sql));
+    const sql = client as unknown as Parameters<typeof checkOperationalAlerts>[0];
+    result.alertsEmitted = await checkOperationalAlerts(sql);
   } catch (error) {
     log("error", "alert_tick_failed", { workerId });
     await reportError(error, { workerId });

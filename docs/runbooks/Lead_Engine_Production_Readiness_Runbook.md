@@ -32,7 +32,7 @@ This runbook moves Lead Engine v3 from a buildable release candidate to a produc
 2. Run process-restart, source-budget, and full-pipeline tests against the disposable/rehearsal branches. Database tenant isolation, lease ownership, expiry, idempotency, retry, and DLQ assertions already pass.
 3. Run Postman through qualified lead → human acceptance → signed Delivery Factory handoff and verify both audit streams.
 4. Review deployed Vercel runtime logs and Sentry releases for both independent products.
-5. Run the owned `/canary-source.html` hourly for 72 elapsed hours; require completion `>=99%` and scheduled-start p95 `<300,000 ms`.
+5. Run the owned `/canary-source.html` hourly for 72 elapsed hours; require completion `>=99%` and scheduled-start p95 `<300,000 ms`. Stateful Slack alerts must cover all conditions in `apps/leads-engine/docs/runbooks/operations-alerting.md`.
 6. Record the first genuine production lead and Delivery Factory receipt as release evidence.
 
 These are code and integration gates, not merely missing credentials. A working Neon/QStash/Vercel connection does not by itself make this release production-ready.
@@ -78,7 +78,7 @@ The job queue, attempts, leases, evidence metadata, signals, assessments, opport
 2. Enable Neon Auth and Data API, then apply every Lead Engine migration through `202609290002_single_source_leasing.sql` to a disposable branch in filename order.
 3. Run `job_lifecycle_v3.sql` and `rls_behavior_v3.sql` on that branch, then run `pnpm test:rls:neon` using two real Neon Auth sessions. Apply the migration to production only after all three pass.
 4. Set `LEAD_ENGINE_BASE_URL` and `QSTASH_TOKEN`, then run `pnpm qstash:configure`. Stable schedule IDs make the command safely repeatable.
-5. Confirm QStash shows the five-minute worker schedule and hourly canary schedule, with signed delivery and three retries.
+5. Confirm QStash shows the four-minute worker schedule and hourly canary schedule, with signed delivery, three retries, and `/api/v1/qstash/failure` as the final-failure callback.
 
 ## Configure Vercel
 

@@ -52,6 +52,23 @@ import {
   termsForAdapter,
 } from "./discovery/terms.js";
 import { runScheduledDiscovery } from "./discovery/schedule.js";
+import {
+  checkOperationalAlerts,
+  recordQstashFailure,
+  recordQstashSuccess,
+  type AlertSqlClient,
+} from "./alerts.js";
+
+const QstashFailureSchema = z.object({
+  status: z.number().int().optional(),
+  retried: z.number().int().nonnegative().optional(),
+  maxRetries: z.number().int().nonnegative().optional(),
+  sourceMessageId: z.string().optional(),
+  scheduleId: z.string().optional(),
+  dlqId: z.string().optional(),
+  url: z.string().url().optional(),
+  sourceBody: z.string().optional(),
+}).passthrough();
 
 const ConsentInputSchema = z.object({
   organizationId: z.string().uuid().optional(),
@@ -167,6 +184,21 @@ async function bodyJson(request: Request): Promise<unknown> {
     });
   }
   return request.json();
+}
+
+async function schedulerName(request: Request): Promise<string | undefined> {
+  try {
+    const value = await request.clone().json() as { schedule?: unknown };
+    return typeof value.schedule === "string" ? value.schedule : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function schedulerWorkspaceId(): string {
+  const workspaceId = process.env.LEAD_ENGINE_CANARY_WORKSPACE_ID;
+  if (!workspaceId) throw new Error("LEAD_ENGINE_CANARY_WORKSPACE_ID is required");
+  return workspaceId;
 }
 
 // --- Lead export (lead-vision gap 2): pure serialization helpers. ---
@@ -305,7 +337,7 @@ async function operationalSnapshot(
     Math.floor(now.getTime() / 3_600_000) * 3_600_000 - 72 * 3_600_000,
   ).toISOString();
   const workspaceFilter = workspaceId ?? null;
-  const [jobsResult, canaryResult, workersResult] = await Promise.all([
+  const [jobsResult, canaryResult, workersResult, alertsResult] = await Promise.all([
     client`
       select status, scheduled_for, started_at, completed_at
       from public.scrape_jobs
@@ -324,6 +356,16 @@ async function operationalSnapshot(
       from public.worker_nodes
       order by last_heartbeat_at desc
       limit 20
+    `,
+    client`
+      select id, alert_type, severity, status, resource_type, resource_id,
+        reason, payload, first_observed_at, last_observed_at,
+        last_notified_at, resolved_at, occurrence_count
+      from public.alert_log
+      where (${workspaceFilter}::uuid is null or workspace_id = ${workspaceFilter}::uuid)
+      order by case when status='open' then 0 else 1 end,
+        last_observed_at desc
+      limit 100
     `,
   ]);
   const jobs = jobsResult as unknown as Array<{
@@ -380,6 +422,7 @@ async function operationalSnapshot(
     },
     canary,
     workers,
+    alerts: alertsResult,
   };
 }
 
@@ -1757,13 +1800,25 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       (request.method === "GET" || request.method === "POST")
     ) {
       await requireScheduler(request);
-      response = json({ data: await runWorkerTick() });
+      const admin = createAdminClient();
+      response = json({ data: await runWorkerTick(admin) });
+      await recordQstashSuccess(
+        admin as unknown as AlertSqlClient,
+        schedulerWorkspaceId(),
+        await schedulerName(request),
+      );
     } else if (
       pathname === "/api/v1/canary/run" &&
       (request.method === "GET" || request.method === "POST")
     ) {
       await requireScheduler(request);
-      response = json({ data: await enqueueCanary() }, 202);
+      const admin = createAdminClient();
+      response = json({ data: await enqueueCanary(admin) }, 202);
+      await recordQstashSuccess(
+        admin as unknown as AlertSqlClient,
+        schedulerWorkspaceId(),
+        await schedulerName(request),
+      );
     } else if (
       pathname === "/api/v1/discovery/scheduled-run" &&
       (request.method === "GET" || request.method === "POST")
@@ -1771,13 +1826,49 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       // Daily QStash schedule (audit fix 1): each active discovery source
       // runs at most once per 24h. Scheduler-signed like the worker tick.
       await requireScheduler(request);
+      const admin = createAdminClient();
       response = json({
         data: await runScheduledDiscovery(
-          createAdminClient() as unknown as Parameters<
+          admin as unknown as Parameters<
             typeof runScheduledDiscovery
           >[0],
         ),
       });
+      await recordQstashSuccess(
+        admin as unknown as AlertSqlClient,
+        schedulerWorkspaceId(),
+        await schedulerName(request),
+      );
+    } else if (
+      pathname === "/api/v1/qstash/failure" &&
+      request.method === "POST"
+    ) {
+      await requireScheduler(request);
+      const payload = QstashFailureSchema.parse(await bodyJson(request));
+      const transition = await recordQstashFailure(
+        createAdminClient() as unknown as AlertSqlClient,
+        schedulerWorkspaceId(),
+        payload,
+      );
+      response = json({ data: { accepted: true, transition } }, 202);
+    } else if (
+      pathname === "/api/v1/operations/evaluate" &&
+      (request.method === "GET" || request.method === "POST")
+    ) {
+      await requireScheduler(request);
+      const admin = createAdminClient();
+      response = json({
+        data: {
+          transitions: await checkOperationalAlerts(
+            admin as unknown as AlertSqlClient,
+          ),
+        },
+      });
+      await recordQstashSuccess(
+        admin as unknown as AlertSqlClient,
+        schedulerWorkspaceId(),
+        await schedulerName(request),
+      );
     } else if (
       pathname === "/api/v1/feedback/events" &&
       request.method === "POST"

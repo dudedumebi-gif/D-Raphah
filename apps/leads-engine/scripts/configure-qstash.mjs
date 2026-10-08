@@ -13,7 +13,9 @@ const schedules = [
   {
     scheduleId: "raphah-lead-worker-v1",
     destination: `${baseUrl}/api/v1/worker/tick`,
-    cron: "*/5 * * * *",
+    // Four-minute cadence leaves measurable headroom below the strict
+    // scheduled-start p95 target of five minutes.
+    cron: "*/4 * * * *",
     label: "lead-engine-worker",
   },
   {
@@ -21,6 +23,12 @@ const schedules = [
     destination: `${baseUrl}/api/v1/canary/run`,
     cron: "0 * * * *",
     label: "lead-engine-canary",
+  },
+  {
+    scheduleId: "raphah-lead-monitor-v1",
+    destination: `${baseUrl}/api/v1/operations/evaluate`,
+    cron: "*/5 * * * *",
+    label: "lead-engine-operations-monitor",
   },
   {
     scheduleId: "raphah-lead-discovery-v1",
@@ -45,6 +53,7 @@ for (const schedule of schedules) {
     method: "POST",
     retries: 3,
     timeout: 300,
+    failureCallback: `${baseUrl}/api/v1/qstash/failure`,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ trigger: "qstash", schedule: schedule.scheduleId }),
   });

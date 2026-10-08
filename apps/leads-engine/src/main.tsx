@@ -2260,6 +2260,8 @@ function LeadTable({
 
 function Operations({ data }: { data: BootstrapData }) {
   const { operations } = data;
+  const alerts = operations.alerts ?? [];
+  const openAlerts = alerts.filter((alert) => alert.status === "open");
   return (
     <div className="content">
       <section className="metrics">
@@ -2287,6 +2289,42 @@ function Operations({ data }: { data: BootstrapData }) {
           value={String(operations.workers.length)}
           detail={operations.workers[0]?.status ?? "No heartbeat"}
         />
+        <Metric
+          label="Open incidents"
+          value={String(openAlerts.length)}
+          detail={
+            openAlerts.some((alert) => alert.severity === "critical")
+              ? "Critical attention required"
+              : "Slack transition alerts enabled"
+          }
+        />
+      </section>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Operational incidents</h3>
+            <p>
+              Neon is the durable incident record; Slack receives opens,
+              reminders, and recoveries.
+            </p>
+          </div>
+        </div>
+        <div className="record-list">
+          {alerts.length ? alerts.slice(0, 20).map((alert) => (
+            <div className="record-row" key={alert.id}>
+              <div>
+                <b>{alert.alert_type.replaceAll("_", " ")}</b>
+                <small>
+                  {alert.severity} · {alert.reason} · notified {alert.occurrence_count}x
+                </small>
+              </div>
+              <Status value={alert.status} />
+              <time>{new Date(alert.last_observed_at).toLocaleString()}</time>
+            </div>
+          )) : (
+            <p className="empty-state">No operational incidents recorded.</p>
+          )}
+        </div>
       </section>
       <section className="panel">
         <div className="panel-head">

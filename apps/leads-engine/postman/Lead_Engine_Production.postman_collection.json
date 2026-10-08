@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Raphah Lead Engine - Production Lifecycle",
-    "description": "Observe the permitted-source scrape lifecycle in Postman. Sign in through the Lead Engine UI and paste the Neon Auth access token into accessToken; Postman is not the identity provider. workerSecret is optional and enables a manual diagnostic tick. Vercel runtime logs and Sentry remain authoritative telemetry. Reset the collection idempotencyKey only for a new logical scrape. Repeat Queue with the same key to verify replay.",
+    "description": "Observe the permitted-source scrape and operational-alert lifecycle in Postman. Sign in through the Lead Engine UI and paste the Neon Auth access token into accessToken; Postman is not the identity provider. workerSecret is optional and enables a manual diagnostic tick. Vercel runtime logs and Sentry remain authoritative telemetry; Slack is the operator notification channel. Reset the collection idempotencyKey only for a new logical scrape. Repeat Queue with the same key to verify replay.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -338,7 +338,9 @@
                   "pm.test('Metrics available', () => pm.response.to.have.status(200));",
                   "const data = pm.response.json().data;",
                   "pm.test('p95 field present', () => pm.expect(data.jobs).to.have.property('scheduledStartP95Ms'));",
-                  "pm.test('canary rate present', () => pm.expect(data.canary).to.have.property('completionRate'));"
+                  "pm.test('canary rate present', () => pm.expect(data.canary).to.have.property('completionRate'));",
+                  "pm.test('incident lifecycle visible', () => pm.expect(data.alerts).to.be.an('array'));",
+                  "pm.test('incident rows expose state, not secrets', () => (data.alerts || []).forEach(row => { pm.expect(row).to.have.property('status'); pm.expect(JSON.stringify(row)).not.to.include('hooks.slack.com'); }));"
                 ]
               }
             }

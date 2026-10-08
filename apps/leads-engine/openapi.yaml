@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Raphah Lead Engine API
-  version: 3.3.0
+  version: 3.3.3
   description: Permitted-source discovery, collection, structured evidence, scoring, lead, audit, and operational lifecycle API with isolated demo, pilot, and production data modes.
 servers:
   - url: https://d-raphah-leads-engine.vercel.app
@@ -271,10 +271,56 @@ paths:
     get:
       summary: Inspect workers, 72-hour completion, and schedule-start p95
       responses: { "200": { description: Operational snapshot } }
+  /api/v1/worker/tick:
+    post:
+      security: [{ qstashSignature: [] }]
+      summary: Run one durable worker and operational-alert evaluation tick
+      responses:
+        "200": { description: Worker tick completed }
+        "401": { description: QStash signature or worker credential invalid }
+  /api/v1/canary/run:
+    post:
+      security: [{ qstashSignature: [] }]
+      summary: Idempotently enqueue the current hourly canary
+      responses:
+        "202": { description: Canary accepted }
+        "401": { description: QStash signature or worker credential invalid }
+  /api/v1/qstash/failure:
+    post:
+      security: [{ qstashSignature: [] }]
+      summary: Receive a signed QStash final-delivery failure callback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: integer }
+                retried: { type: integer }
+                maxRetries: { type: integer }
+                sourceMessageId: { type: string }
+                scheduleId: { type: string }
+                dlqId: { type: string }
+                url: { type: string, format: uri }
+                sourceBody:
+                  { type: string, description: Base64-encoded original body }
+      responses:
+        "202": { description: Failure accepted and incident reconciled }
+        "401": { description: QStash signature invalid }
+  /api/v1/operations/evaluate:
+    post:
+      security: [{ qstashSignature: [] }]
+      summary: Independently evaluate and reconcile operational alert state
+      responses:
+        "200": { description: Alert evaluation completed }
+        "401": { description: QStash signature invalid }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
     workspaceId: { type: apiKey, in: header, name: X-Workspace-ID }
+    qstashSignature:
+      { type: apiKey, in: header, name: Upstash-Signature }
   parameters:
     IdempotencyKey:
       {

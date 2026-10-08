@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-08
 
-Target release: Lead Engine schema/API `3.3.2`
+Target release: Lead Engine schema/API `3.3.3`
 
 Status: **pilot release candidate deployed; production database migrated; telemetry and live soak gates remain**
 
@@ -22,6 +22,10 @@ This is the operational handover for the Lead Engine’s permitted-source discov
 - Audit triggers for new candidate, checkpoint, and source-link records.
 - Postman requests for terms, adapter registration, runs, candidates, and the mode-specific funnel.
 - RLS verification extended to discovery candidates.
+- Stateful production incidents for stale workers, stuck/failed canaries,
+  dead-letter jobs, target mismatch, scheduled-start p95, exhausted QStash
+  delivery, and the passed 72-hour soak. Neon persists and audits every
+  transition; Slack receives opens, cooldown reminders, and recoveries.
 
 ## Source adapters
 
@@ -93,7 +97,7 @@ The user/operator will execute this after implementation review.
    pnpm --filter @raphah/leads-engine-app test:rls:neon
    ```
 
-4. Confirm schema version `3.3.2`, expected indexes, RLS policies, and audit triggers.
+4. Confirm schema version `3.3.3`, expected indexes, RLS policies, and audit triggers.
 5. Deploy the application against the disposable branch and exercise both adapters in `pilot` mode.
 6. Create the linked collection source with **Permit public domains discovered by approved adapters** selected, then approve its policy. Registering an adapter without this explicit permission must fail.
 7. Review candidate provenance, unresolved candidates, deduplication, evidence, signals, score explanations, retries, and audit events.
@@ -165,6 +169,9 @@ For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_U
 - [x] Canada Job Bank terms reviewed and accepted by a human operator.
 - [x] Migration rehearsed on a disposable Neon branch.
 - [x] Production Neon migrated and verified at schema `3.3.2`.
+- [ ] Rehearse and apply additive operational-incident migration `3.3.3`.
+- [ ] Reconfigure all QStash schedules with the signed final-failure callback and four-minute worker cadence.
+- [ ] Verify one disposable Slack incident open and recovery in `#ops-alert` without exposing secrets.
 - [x] Database-role RLS behavior passes all 13 assertions.
 - [ ] Two-user Data API RLS isolation test passes.
 - [ ] One permitted source completes discovery → candidate → evidence → signals → score → persistent lead.
