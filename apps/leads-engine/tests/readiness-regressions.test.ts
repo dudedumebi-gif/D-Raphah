@@ -439,6 +439,13 @@ describe("production-readiness implementation", () => {
     ),
     "utf8",
   );
+  const canaryRecoveryMigration = readFileSync(
+    new URL(
+      "../neon/migrations/202610080001_canary_worker_recovery.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
   const worker = readFileSync(
     new URL("../api/_lib/worker.ts", import.meta.url),
     "utf8",
@@ -462,6 +469,17 @@ describe("production-readiness implementation", () => {
     expect(worker.indexOf("reserve_source_collection")).toBeLessThan(
       worker.indexOf("collectUrl("),
     );
+  });
+
+  it("uses the real geocode timestamp and keeps canary work in demo mode", () => {
+    expect(canaryRecoveryMigration).toContain(
+      "where resolved_at < p_now - interval '90 days'",
+    );
+    expect(canaryRecoveryMigration).not.toContain(
+      "geocode_cache where updated_at",
+    );
+    expect(canaryRecoveryMigration).toContain("set data_mode='demo'");
+    expect(worker).toContain("${run.id}::uuid, 'demo'");
   });
 
   it("persists discovery lineage with RLS, audit, data modes, and atomic resolution", () => {

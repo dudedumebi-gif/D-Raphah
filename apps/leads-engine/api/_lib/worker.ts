@@ -554,11 +554,12 @@ export async function enqueueCanary(client = createAdminClient()) {
   await client`
     insert into public.scrape_jobs(
       workspace_id, source_id, target_url, status, priority, scheduled_for,
-      idempotency_key, criteria_snapshot, max_attempts, canary_run_id
+      idempotency_key, criteria_snapshot, max_attempts, canary_run_id,
+      data_mode
     ) values (
       ${workspaceId}::uuid, ${sourceId}::uuid, ${targetUrl}, 'queued', 100,
       ${scheduledAt.toISOString()}::timestamptz, ${key},
-      ${JSON.stringify(criteria)}::jsonb, 3, ${run.id}::uuid
+      ${JSON.stringify(criteria)}::jsonb, 3, ${run.id}::uuid, 'demo'
     ) on conflict (idempotency_key) do nothing
   `;
   const jobRows = (await client`
