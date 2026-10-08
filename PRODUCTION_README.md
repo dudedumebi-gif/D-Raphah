@@ -1,12 +1,12 @@
 # Raphah Lead Engine — Production README
 
-Last updated: 2026-09-30
+Last updated: 2026-10-08
 
-Target release: Lead Engine schema/API `3.3.1`
+Target release: Lead Engine schema/API `3.3.2`
 
-Status: **pilot release candidate; disposable-branch migration and SQL RLS checks pass; live release gates remain**
+Status: **pilot release candidate deployed; production database migrated; telemetry and live soak gates remain**
 
-This is the operational handover for the Lead Engine’s permitted-source discovery pipeline. It records what is implemented, what must remain human-controlled, and the exact gates for moving Pilot data into Production. It does not authorize source collection or a production database migration.
+This is the operational handover for the Lead Engine’s permitted-source discovery pipeline. It records what is implemented, what must remain human-controlled, and the exact gates for moving Pilot data into Production. Source authorization and Pilot-to-Production promotion remain explicit human decisions.
 
 ## Delivered in this release
 
@@ -82,7 +82,7 @@ The user/operator will execute this after implementation review.
 
 1. Create a disposable Neon branch from the target database.
 2. Apply all migrations in timestamp order, ending with:
-   `apps/leads-engine/neon/migrations/202609290002_single_source_leasing.sql`.
+   `apps/leads-engine/neon/migrations/202610080001_canary_worker_recovery.sql`.
 3. Run:
 
    ```bash
@@ -93,7 +93,7 @@ The user/operator will execute this after implementation review.
    pnpm --filter @raphah/leads-engine-app test:rls:neon
    ```
 
-4. Confirm schema version `3.3.1`, expected indexes, RLS policies, and audit triggers.
+4. Confirm schema version `3.3.2`, expected indexes, RLS policies, and audit triggers.
 5. Deploy the application against the disposable branch and exercise both adapters in `pilot` mode.
 6. Create the linked collection source with **Permit public domains discovered by approved adapters** selected, then approve its policy. Registering an adapter without this explicit permission must fail.
 7. Review candidate provenance, unresolved candidates, deduplication, evidence, signals, score explanations, retries, and audit events.
@@ -150,11 +150,21 @@ For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_U
 - Both accounts received successful Preview bootstrap responses against the rehearsal database.
 - This proves independent positive-session initialization. The release gate remains open until the automated Data API test also proves that each genuine session is denied access to the other account's workspace.
 
+### Production cutover evidence — 2026-10-08
+
+- Toronto Open Data `ogl-toronto-1.0@2026-09-29` and Canada Job Bank `ogl-canada-2.0@2026-09-29` were accepted by `dudedumebi@gmail.com` for the production workspace and are stored in the audited `terms_acceptances` table.
+- Neon production migrated from schema `3.1.0` through `3.3.1`, then to `3.3.2` for the canary worker recovery. Required tables, RLS enablement, policies, audit triggers, function privileges, and acceptance records passed post-migration inspection.
+- Recovery points are snapshot `snap-curly-dust-avqzu2b4` (pre-3.3.1) and no-compute branch `br-bold-mountain-av2njseg` (pre-3.3.2).
+- PR #16 delivered the adapters and reviewed acceptance dialog; PR #17 repaired the schema compatibility guard; PR #18 repaired retention and demo-mode canary isolation. Each merged only after green CI and green Lead Engine Preview deployment.
+- Production Lead Engine deployment `ca71e539a8d23e6982588772f6ed4173bff85652` is live. The repaired worker completed a previously stuck canary, and the stale pre-soak queue was preserved as failed/dead-letter history with audit events.
+- The 72-hour clock has **not** started. Production readiness currently reports missing `SENTRY_DSN`, and `LEAD_ENGINE_CANARY_URL` must be set to the owned deterministic `https://d-raphah-leads-engine.vercel.app/canary-source.html` target before the first measured run.
+
 ## Production release gates
 
-- [ ] Toronto Open Data terms reviewed and accepted by a human operator.
-- [ ] Canada Job Bank terms reviewed and accepted by a human operator.
+- [x] Toronto Open Data terms reviewed and accepted by a human operator.
+- [x] Canada Job Bank terms reviewed and accepted by a human operator.
 - [x] Migration rehearsed on a disposable Neon branch.
+- [x] Production Neon migrated and verified at schema `3.3.2`.
 - [x] Database-role RLS behavior passes all 13 assertions.
 - [ ] Two-user Data API RLS isolation test passes.
 - [ ] One permitted source completes discovery → candidate → evidence → signals → score → persistent lead.
