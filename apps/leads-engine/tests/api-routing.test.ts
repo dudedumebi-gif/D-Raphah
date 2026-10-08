@@ -37,6 +37,8 @@ const ROUTER_PATHS = [
   "/api/v1/operations",
   "/api/v1/worker/tick",
   "/api/v1/canary/run",
+  "/api/v1/qstash/failure",
+  "/api/v1/operations/evaluate",
   "/api/v1/feedback/events",
 ];
 
@@ -49,6 +51,8 @@ function matchesFunction(pathname: string): boolean {
     seg[0] === "v1" &&
     ((seg[1] === "worker" && seg[2] === "tick") ||
       (seg[1] === "canary" && seg[2] === "run") ||
+      (seg[1] === "qstash" && seg[2] === "failure") ||
+      (seg[1] === "operations" && seg[2] === "evaluate") ||
       (seg[1] === "feedback" && seg[2] === "events"))
   )
     return true;

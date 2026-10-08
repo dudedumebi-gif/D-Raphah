@@ -278,6 +278,21 @@ export interface OperationsRecord {
     last_heartbeat_at: string;
     deployment_id: string | null;
   }>;
+  alerts: Array<{
+    id: string;
+    alert_type: string;
+    severity: "critical" | "warning" | "info";
+    status: "open" | "resolved";
+    resource_type: string;
+    resource_id: string;
+    reason: string;
+    payload: Record<string, unknown>;
+    first_observed_at: string;
+    last_observed_at: string;
+    last_notified_at: string | null;
+    resolved_at: string | null;
+    occurrence_count: number;
+  }>;
 }
 
 export interface BootstrapData {

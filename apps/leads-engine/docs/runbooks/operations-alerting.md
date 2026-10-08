@@ -1,61 +1,80 @@
 # Operations Alerting — Lead Engine
 
-The pipeline promises "zero babysitting", so canary failures and
-dead-letter pile-ups reach the operator without dashboard-watching.
-Alerting is emitted at the end of every worker tick
-(`POST /api/v1/worker/tick`, every 5 minutes via QStash).
+Lead Engine evaluates operational health at the end of every signed worker
+tick and through an independent five-minute QStash monitor schedule. The
+independent schedule can detect a stale worker even when no worker tick is
+running. Incidents are persisted in Neon, audited, and delivered to the Slack
+Incoming Webhook for `#ops-alert`. Slack delivery is best-effort and can never
+fail a worker tick, scrape result, or canary.
 
-## What alerts
+## Alert conditions
 
-| Alert type | Trigger | Dedupe |
-|------------|---------|--------|
-| `canary_failed` | a `canary_runs` row with `status = 'failed'` | once per canary run id |
-| `dead_letter_threshold` | ≥ N jobs dead-lettered in the last hour in a workspace | once per workspace per UTC hour |
+| Type | Severity | Opens when | Recovers when |
+|---|---|---|---|
+| `worker_stale` | Critical | latest heartbeat is missing or older than 10 minutes | a current heartbeat is observed |
+| `canary_stuck` | Critical | queued/running canary exceeds 10 minutes | that run leaves queued/running |
+| `canary_failed` | Critical | latest terminal canary failed | a later canary completes |
+| `dead_letter` | Critical | any scrape job enters `dead_letter` | that job succeeds after controlled retry |
+| `canary_target_mismatch` | Critical | latest completed canary target differs from `LEAD_ENGINE_CANARY_URL` | a later canary completes against the configured target |
+| `scheduled_start_p95_breach` | Warning | 72-hour scheduled-start p95 is at least 300,000 ms | p95 falls below 300,000 ms |
+| `qstash_delivery_failed` | Critical | signed failure callback reports retries exhausted | the same schedule next delivers successfully |
+| `soak_passed` | Info | 72-hour canary reaches the promotion gate | one-time release evidence; no reminders |
 
-N defaults to **5** and is set with `LEAD_ENGINE_DEAD_LETTER_ALERT_THRESHOLD`.
+## State, dedupe, and reminders
 
-## Delivery
+`public.alert_log` is the durable incident record. The existing
+`(alert_type, resource_id)` unique key is used as the incident identity.
+`reconcile_operational_alert` atomically records one of four transitions:
 
-Every alert always does two things, even with no webhook configured:
+- `opened` — send Slack and write `alert.<type>.opened` audit event.
+- `reminder` — still open after the cooldown; send Slack and audit it.
+- `resolved` — send a recovery message and write a recovery audit event.
+- `unchanged` — update observation state without notifying.
 
-1. Inserts a row into `public.alert_log` (the durable record).
-2. Writes an `audit_events` entry with action `alert.<type>` (actor: system).
+The default reminder cooldown is 30 minutes. Concurrent worker calls serialize
+on the incident row, preventing duplicate transition notifications.
 
-When `LEAD_ENGINE_ALERT_WEBHOOK_URL` is set (Vercel env var, production),
-the alert is also POSTed as JSON:
+## Vercel variables
 
-```json
-{
-  "type": "canary_failed",
-  "workspaceId": "…",
-  "resourceType": "canary_runs",
-  "resourceId": "…",
-  "reason": "…",
-  "payload": {},
-  "at": "2026-09-26T…Z",
-  "service": "lead-engine"
-}
-```
+| Variable | Type | Scope | Required |
+|---|---|---|---|
+| `SLACK_OPS_ALERT_WEBHOOK_URL` | Secret | Production | Yes for Slack delivery |
+| `SLACK_ALERTS_ENABLED` | Config | Production | No; defaults to enabled when the webhook exists |
+| `SLACK_ALERT_COOLDOWN_MINUTES` | Config | Production | No; defaults to `30` |
 
-Webhook delivery is best-effort: a failed POST is logged
-(`alert_webhook_failed`) but never throws, so alerting can never fail the
-worker tick. Dedupe is enforced by the `(alert_type, resource_id)` unique
-constraint — repeat ticks never re-alert.
+`LEAD_ENGINE_ALERT_WEBHOOK_URL` remains a temporary compatibility fallback.
+Do not expose either webhook variable with a `VITE_` prefix and never print it
+in logs, Slack messages, test output, or Postman.
 
-## Operator setup
+## QStash setup
 
-1. Create an incoming webhook (Slack, PagerDuty, or a simple HTTPS
-   endpoint that pages you).
-2. Set `LEAD_ENGINE_ALERT_WEBHOOK_URL` on the Vercel project
-   (`d-raphah-leads-engine`, production).
-3. Trigger a **fresh deployment** — redeploying an old deployment does
-   not pick up changed env vars.
-4. Test: the next failed canary run produces one alert row, one audit
-   event, and one webhook POST.
+Run `pnpm qstash:configure` from `apps/leads-engine` after the deployment. The
+script configures:
 
-## Tuning
+- worker every four minutes;
+- independent operational evaluator every five minutes;
+- canary hourly;
+- discovery daily;
+- three retries and a signed failure callback to
+  `/api/v1/qstash/failure` for every schedule.
 
-- Threshold too noisy → raise `LEAD_ENGINE_DEAD_LETTER_ALERT_THRESHOLD`.
-- A canary that fails every hour alerts once per failed run — fix the
-  canary target (see the canary runbook), don't silence the alert.
-- `alert_log` is readable by workspace members; operators manage it.
+The callback accepts QStash's documented final-failure payload only after
+`Upstash-Signature` verification. It records the source message ID, schedule,
+HTTP status, and DLQ ID but never stores a webhook secret or raw evidence.
+
+## Verification
+
+1. Apply schema `3.3.3` on a disposable Neon branch and run regression/RLS
+   tests before production migration.
+2. Deploy the code and confirm `/api/health/ready` returns `200`.
+3. Re-run `pnpm qstash:configure`; confirm worker cron is `*/4 * * * *`, the
+   monitor cron is `*/5 * * * *`, and each schedule has the failure callback.
+4. Use a disposable signed test delivery that returns non-2xx until retries
+   exhaust. Confirm one `qstash_delivery_failed` incident, audit event, and
+   Slack message. Restore delivery and confirm one recovery message.
+5. Query `alert_log` and `audit_events`; confirm reminders do not occur before
+   the configured cooldown and no duplicate transition is emitted.
+6. Confirm Vercel runtime logs remain authoritative if Slack delivery fails.
+
+Do not deliberately stop the production worker or corrupt production canary
+data to test alerts. Use a disposable QStash message or rehearsal branch.

@@ -1,224 +1,193 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  checkCanaryAlerts,
-  checkDeadLetterAlerts,
-  deadLetterThreshold,
-  emitAlert,
+  alertCooldownMinutes,
+  alertsEnabled,
+  checkOperationalAlerts,
   formatSlackAlert,
+  reconcileAlert,
+  recordQstashFailure,
   type AlertInput,
   type AlertSqlClient,
 } from "../api/_lib/alerts";
 
 const WS = "2e48593c-feb0-41e3-b0e5-0e42cf398a43";
+const OLD_ENV = process.env;
 
-/** Minimal tagged-template stub keyed on recognizable SQL fragments. */
-function makeClient(
-  handlers: Record<string, (values: unknown[]) => unknown[]>,
-): AlertSqlClient {
-  return (async (strings: TemplateStringsArray, ...values: unknown[]) => {
-    const sql = strings.join("?").toLowerCase();
-    for (const [fragment, handler] of Object.entries(handlers))
-      if (sql.includes(fragment)) return handler(values);
-    throw new Error(`unexpected query: ${sql.slice(0, 120)}`);
-  }) as AlertSqlClient;
-}
-
-const alertInput = (overrides: Partial<AlertInput> = {}): AlertInput => ({
+const input = (overrides: Partial<AlertInput> = {}): AlertInput => ({
   workspaceId: WS,
-  type: "canary_failed",
-  resourceType: "canary_runs",
-  resourceId: "run-1",
-  reason: "boom",
-  payload: { attempt: 3 },
+  type: "worker_stale",
+  severity: "critical",
+  resourceType: "worker_nodes",
+  resourceId: `${WS}:worker-heartbeat`,
+  active: true,
+  reason: "Heartbeat is stale",
+  likelyCause: "QStash delivery stopped",
+  nextAction: "Inspect QStash and Vercel logs",
   ...overrides,
 });
 
-describe("emitAlert", () => {
-  const OLD_ENV = process.env;
-  afterEach(() => {
-    process.env = OLD_ENV;
-    vi.restoreAllMocks();
+function clientForTransition(transition: "opened"|"reminder"|"resolved"|"unchanged") {
+  const queries: Array<{ sql: string; values: unknown[] }> = [];
+  const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join("?").toLowerCase();
+    queries.push({ sql, values });
+    if (sql.includes("insert into public.alert_log"))
+      return transition === "opened" || transition === "reminder"
+        ? [{ alert_id: "alert-1", transition }]
+        : [];
+    if (sql.includes("update public.alert_log"))
+      return transition === "resolved"
+        ? [{ alert_id: "alert-1", transition }]
+        : [];
+    if (sql.includes("insert into public.audit_events")) return [];
+    throw new Error(`unexpected query: ${sql.slice(0, 100)}`);
+  }) as AlertSqlClient;
+  return { client, queries };
+}
+
+afterEach(() => {
+  process.env = OLD_ENV;
+  vi.restoreAllMocks();
+});
+
+describe("stateful Slack alerts", () => {
+  it("uses the new Slack secret and defaults to a 30-minute cooldown", () => {
+    process.env = { ...OLD_ENV, SLACK_OPS_ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/X" };
+    expect(alertsEnabled()).toBe(true);
+    expect(alertCooldownMinutes()).toBe(30);
+    process.env.SLACK_ALERT_COOLDOWN_MINUTES = "45";
+    expect(alertCooldownMinutes()).toBe(45);
   });
 
-  it("inserts the alert row and writes an audit event, returning true", async () => {
-    const seen: string[] = [];
-    const client = makeClient({
-      "insert into public.alert_log": () => [{ id: "alert-1" }],
-      "insert into public.audit_events": (values) => {
-        // values: workspaceId, action, resourceType, resourceId, reason, payload
-        seen.push(String(values[1]));
-        return [];
-      },
-    });
-    process.env = { ...OLD_ENV, LEAD_ENGINE_ALERT_WEBHOOK_URL: "" };
-    const created = await emitAlert(client, alertInput());
-    expect(created).toBe(true);
-    expect(seen).toContain("alert.canary_failed");
+  it("can explicitly disable delivery without deleting the secret", () => {
+    process.env = {
+      ...OLD_ENV,
+      SLACK_OPS_ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/X",
+      SLACK_ALERTS_ENABLED: "false",
+    };
+    expect(alertsEnabled()).toBe(false);
   });
 
-  it("dedupes on the unique (alert_type, resource_id) key", async () => {
-    const client = makeClient({
-      "insert into public.alert_log": () => [],
-    });
-    process.env = { ...OLD_ENV };
-    delete process.env.LEAD_ENGINE_ALERT_WEBHOOK_URL;
-    const created = await emitAlert(client, alertInput());
-    expect(created).toBe(false);
-  });
-
-  it("POSTs the webhook payload when configured", async () => {
+  it("persists, audits, and posts an opened incident", async () => {
+    process.env = { ...OLD_ENV, SLACK_OPS_ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/X" };
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
-    const client = makeClient({
-      "insert into public.alert_log": () => [{ id: "alert-1" }],
-      "insert into public.audit_events": () => [],
-    });
-    process.env = {
-      ...OLD_ENV,
-      LEAD_ENGINE_ALERT_WEBHOOK_URL: "https://hooks.example.com/le",
-    };
-    const created = await emitAlert(client, alertInput({ reason: "r" }));
-    expect(created).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://hooks.example.com/le");
-    const body = JSON.parse(String(init.body));
-    expect(body.type).toBe("canary_failed");
-    expect(body.workspaceId).toBe(WS);
-    expect(body.reason).toBe("r");
-    expect(body.at).toBeTruthy();
+    const { client, queries } = clientForTransition("opened");
+    expect(await reconcileAlert(client, input(), new Date("2026-10-08T10:00:00Z"))).toBe("opened");
+    expect(queries.some((query) => query.sql.includes("insert into public.audit_events"))).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+    expect(body.text).toContain("CRITICAL: Worker heartbeat stale");
+    expect(body.text).toContain("Likely cause");
+    expect(body.text).not.toContain("hooks.slack.com");
   });
 
-  it("wraps the payload as Slack text for hooks.slack.com URLs", async () => {
+  it("sends a recovery and stays silent for unchanged state", async () => {
+    process.env = { ...OLD_ENV, SLACK_OPS_ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/X" };
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal("fetch", fetchMock);
-    const client = makeClient({
-      "insert into public.alert_log": () => [{ id: "alert-1" }],
-      "insert into public.audit_events": () => [],
-    });
-    process.env = {
-      ...OLD_ENV,
-      LEAD_ENGINE_ALERT_WEBHOOK_URL:
-        "https://hooks.slack.com/services/T000/B000/xxx",
-    };
-    const created = await emitAlert(
-      client,
-      alertInput({ type: "dead_letter_threshold", reason: "too many" }),
-    );
-    expect(created).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain("hooks.slack.com");
-    const body = JSON.parse(String(init.body));
-    expect(typeof body.text).toBe("string");
-    expect(body.text).toContain("dead-letter threshold");
-    expect(body.text).toContain("too many");
-    expect(body.type).toBeUndefined();
+    const recovered = clientForTransition("resolved");
+    await reconcileAlert(recovered.client, input({ active: false }));
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)).text).toContain("RECOVERED");
+    fetchMock.mockClear();
+    const unchanged = clientForTransition("unchanged");
+    await reconcileAlert(unchanged.client, input());
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("formatSlackAlert renders the canary variant", () => {
-    const text = formatSlackAlert(
-      alertInput({ type: "canary_failed", reason: "boom" }),
-      "2026-09-27T00:00:00Z",
-    );
-    expect(text).toContain("canary failed");
-    expect(text).toContain("boom");
-  });
-
-  it("survives a failed webhook without throwing", async () => {    const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
-    vi.stubGlobal("fetch", fetchMock);
-    const client = makeClient({
-      "insert into public.alert_log": () => [{ id: "alert-1" }],
-      "insert into public.audit_events": () => [],
-    });
-    process.env = {
-      ...OLD_ENV,
-      LEAD_ENGINE_ALERT_WEBHOOK_URL: "https://hooks.example.com/le",
-    };
-    await expect(emitAlert(client, alertInput())).resolves.toBe(true);
+  it("formats production context and operator action", () => {
+    const text = formatSlackAlert(input(), "reminder", "2026-10-08T10:00:00Z");
+    expect(text).toContain("Lead Engine / production");
+    expect(text).toContain("Inspect QStash and Vercel logs");
   });
 });
 
-describe("checkCanaryAlerts", () => {
-  it("alerts once per un-alerted failed canary run", async () => {
-    const alerted = new Set<string>();
-    const client = makeClient({
-      "from public.canary_runs": () => [
-        {
-          id: "run-1",
-          workspace_id: WS,
-          failure_reason: "no qualified lead",
-          completed_at: "2026-09-26T10:00:00Z",
-        },
-        {
-          id: "run-2",
-          workspace_id: WS,
-          failure_reason: null,
-          completed_at: null,
-        },
-      ],
-      "insert into public.alert_log": (values) => {
-        const type = String(values[1]);
-        const resourceId = String(values[3]);
-        const key = `${type}:${resourceId}`;
-        if (alerted.has(key)) return [];
-        alerted.add(key);
-        return [{ id: `alert-${resourceId}` }];
-      },
-      "insert into public.audit_events": () => [],
-    });
-    const emitted = await checkCanaryAlerts(client);
-    expect(emitted).toBe(2);
-    // Second tick: both already alerted.
-    const emittedAgain = await checkCanaryAlerts(client);
-    expect(emittedAgain).toBe(0);
-  });
-});
-
-describe("checkDeadLetterAlerts", () => {
-  const OLD_ENV = process.env;
-  afterEach(() => {
-    process.env = OLD_ENV;
-  });
-
-  it("alerts when the workspace breaches the threshold", async () => {
+describe("operational evaluator", () => {
+  it("opens all seven database-observable conditions", async () => {
     process.env = {
       ...OLD_ENV,
-      LEAD_ENGINE_DEAD_LETTER_ALERT_THRESHOLD: "2",
+      SLACK_ALERTS_ENABLED: "false",
+      LEAD_ENGINE_CANARY_URL: "https://expected.example/canary-source.html",
     };
-    const client = makeClient({
-      // Mirrors the SQL: the having clause filters before rows reach code.
-      "from public.scrape_jobs": (values) =>
-        3 >= Number(values[0]) ? [{ workspace_id: WS, recent_dead_letters: 3 }] : [],
-      "insert into public.alert_log": () => [{ id: "alert-dl" }],
-      "insert into public.audit_events": () => [],
-    });
-    const emitted = await checkDeadLetterAlerts(client);
-    expect(emitted).toBe(1);
+    const now = new Date("2026-10-08T12:00:00Z");
+    const old = "2026-10-08T11:30:00Z";
+    const sampleStart = now.getTime() - 72 * 3_600_000;
+    const soak = Array.from({ length: 72 }, (_, index) => ({
+      workspace_id: WS,
+      scheduled_at: new Date(sampleStart + index * 3_600_000).toISOString(),
+      completed_at: new Date(sampleStart + index * 3_600_000 + 60_000).toISOString(),
+      status: "completed",
+    }));
+    const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join("?").toLowerCase();
+      if (sql.includes("select id from public.workspaces")) return [{ id: WS }];
+      if (sql.includes("from public.worker_nodes")) return [{ id: "worker-a", last_heartbeat_at: old }];
+      if (sql.includes("distinct on (cr.workspace_id)")) return [{
+        id: "run-terminal", workspace_id: WS, status: "failed",
+        scheduled_at: old, completed_at: old, failure_reason: "no persistent lead",
+        target_url: "https://wrong.example",
+      }];
+      if (sql.includes("cr.status in ('queued','running')")) return [{
+        id: "run-stuck", workspace_id: WS, status: "running",
+        scheduled_at: old, completed_at: null, failure_reason: null,
+      }];
+      if (sql.includes("from public.scrape_jobs sj")) return [{
+        id: "job-dead", workspace_id: WS, status: "dead_letter", last_error: "robots denied",
+      }];
+      if (sql.includes("percentile_cont")) return [{ workspace_id: WS, p95_ms: 301_000 }];
+      if (sql.includes("select workspace_id, scheduled_at")) return soak;
+      if (sql.includes("insert into public.alert_log"))
+        return [{ alert_id: "alert", transition: "opened" }];
+      if (sql.includes("update public.alert_log")) return [];
+      if (sql.includes("insert into public.audit_events")) return [];
+      throw new Error(`unexpected query: ${sql.slice(0, 100)}`);
+    }) as AlertSqlClient;
+    // A failed terminal canary cannot simultaneously be a completed target
+    // mismatch; the six active conditions here plus the separate target test
+    // cover all seven database-observable rules.
+    expect(await checkOperationalAlerts(client, now)).toBe(6);
   });
 
-  it("stays silent below the threshold", async () => {
+  it("detects a completed canary that used the wrong target", async () => {
     process.env = {
       ...OLD_ENV,
-      LEAD_ENGINE_DEAD_LETTER_ALERT_THRESHOLD: "5",
+      SLACK_ALERTS_ENABLED: "false",
+      LEAD_ENGINE_CANARY_URL: "https://expected.example/canary-source.html",
     };
-    // Mirrors the SQL: the having clause filters before rows reach code.
-    const client = makeClient({
-      "from public.scrape_jobs": (values) =>
-        4 >= Number(values[0]) ? [{ workspace_id: WS, recent_dead_letters: 4 }] : [],
-      "insert into public.alert_log": () => [{ id: "alert-dl" }],
-      "insert into public.audit_events": () => [],
-    });
-    expect(await checkDeadLetterAlerts(client)).toBe(0);
+    const now = new Date("2026-10-08T12:00:00Z");
+    const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join("?").toLowerCase();
+      if (sql.includes("select id from public.workspaces")) return [{ id: WS }];
+      if (sql.includes("from public.worker_nodes")) return [{ id: "worker-a", last_heartbeat_at: now.toISOString() }];
+      if (sql.includes("distinct on (cr.workspace_id)")) return [{
+        id: "run-complete", workspace_id: WS, status: "completed",
+        scheduled_at: now.toISOString(), completed_at: now.toISOString(),
+        failure_reason: null, target_url: "https://wrong.example",
+      }];
+      if (sql.includes("cr.status in ('queued','running')")) return [];
+      if (sql.includes("from public.scrape_jobs sj")) return [];
+      if (sql.includes("percentile_cont")) return [];
+      if (sql.includes("select workspace_id, scheduled_at")) return [];
+      if (sql.includes("insert into public.alert_log")) {
+        const isMismatch = values[1] === "canary_target_mismatch";
+        return isMismatch ? [{ alert_id: "alert", transition: "opened" }] : [];
+      }
+      if (sql.includes("update public.alert_log")) return [];
+      if (sql.includes("insert into public.audit_events")) return [];
+      throw new Error(`unexpected query: ${sql.slice(0, 100)}`);
+    }) as AlertSqlClient;
+    expect(await checkOperationalAlerts(client, now)).toBe(1);
   });
 
-  it("defaults the threshold to 5 when unset or invalid", () => {
-    process.env = { ...OLD_ENV };
-    delete process.env.LEAD_ENGINE_DEAD_LETTER_ALERT_THRESHOLD;
-    expect(deadLetterThreshold()).toBe(5);
-    process.env = { ...OLD_ENV, LEAD_ENGINE_DEAD_LETTER_ALERT_THRESHOLD: "x" };
-    expect(deadLetterThreshold()).toBe(5);
-    process.env = { ...OLD_ENV, LEAD_ENGINE_DEAD_LETTER_ALERT_THRESHOLD: "0" };
-    expect(deadLetterThreshold()).toBe(5);
+  it("records a signed QStash final-delivery failure as the eighth condition", async () => {
+    process.env = { ...OLD_ENV, SLACK_ALERTS_ENABLED: "false" };
+    const { client, queries } = clientForTransition("opened");
+    const sourceBody = Buffer.from(JSON.stringify({ schedule: "raphah-lead-worker-v1" })).toString("base64");
+    expect(await recordQstashFailure(client, WS, {
+      status: 503, retried: 3, maxRetries: 3, sourceMessageId: "msg_1",
+      dlqId: "dlq_1", sourceBody,
+    })).toBe("opened");
+    const values = queries.find((query) => query.sql.includes("insert into public.alert_log"))?.values ?? [];
+    expect(values[3]).toBe(`${WS}:qstash:raphah-lead-worker-v1`);
   });
 });

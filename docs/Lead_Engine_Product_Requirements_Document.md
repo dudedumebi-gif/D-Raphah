@@ -283,7 +283,7 @@ Core tables (Neon Postgres, `public` schema):
 - `maturity_assessments`, `opportunities` — scoring
 - `lead_feedback` — operator feedback for criteria tuning
 - `consent_records` — CASL consent basis per organization/opportunity (basis type, evidence reference, timestamp), audit-logged
-- `alert_log` — operator alerts (canary failures, dead-letter threshold breaches), deduplicated
+- `alert_log` — stateful operator incidents with atomic dedupe, cooldown reminders, and recovery transitions
 - `terms_acceptances` — workspace acceptance of third-party terms (Overpass/OSM), owner/admin recorded
 - `canary_runs` — 72-hour production canary
 - `audit_events` — the complete audit trail
@@ -313,7 +313,7 @@ Lead Engine (Neon Postgres) ──signed handoff──▶ Delivery Factory (Neon
 - **Auditability:** every state change writes an audit event with before/after state; runs are reconstructible.
 - **Security:** RLS on all tenant tables; secrets in Vercel env / Secure Vault, never in code or logs; credential-bearing URLs are never stored or reproduced.
 - **Performance:** scrape attempts time out at 15s; long waits are clamped in serverless; multi-day sequences chain scheduled workflows.
-- **Operability (alerting):** canary failures and dead-letter threshold breaches emit operator alerts — durable `alert_log` + audit entries, plus an optional webhook POST to `LEAD_ENGINE_ALERT_WEBHOOK_URL`. Dead-letter threshold defaults to 5 per workspace per hour (env-tunable). Alert checks run failure-isolated inside the worker tick so a broken alerter can never break the pipeline.
+- **Operability (alerting):** stale workers, stuck/failed canaries, dead-letter jobs, canary target mismatch, scheduled-start p95 breaches, exhausted QStash deliveries, and a passed 72-hour soak emit state-transition alerts — durable `alert_log` + audit entries plus Slack delivery through `SLACK_OPS_ALERT_WEBHOOK_URL`. Opens, 30-minute reminders, and recoveries are atomically deduplicated. Alert checks run failure-isolated inside the worker tick so a broken alerter can never break the pipeline.
 - **Recoverability:** backup/restore drill runbook (`docs/runbooks/backup-restore-drill.md`) covers the Neon point-in-time restore path with verification queries and an operator drill log.
 - **Cost governance:** the CAD 150/month spend gate is backed by a billing-alert runbook (`docs/runbooks/spend-gate-billing-alerts.md`) with per-service (Neon/Vercel/QStash) alert setup and breach response, surfaced in the Operations view.
 - **Portability:** the same API handlers run on Vercel or in Docker/Compose via the Node adapter (handover options documented).
@@ -357,7 +357,7 @@ Bulk-release policy: changes ship in batched releases to conserve the Vercel API
 | Automated-outreach legal exposure (CASL) | Draft-only MVP; outreach readiness checklist; human sends |
 | Platform dependence (Vercel/Neon/QStash) | Docker/Compose handover path kept warm; 12-function limit respected |
 | Vercel Hobby-tier commercial use | Owner decision pending: confirm time-boxed exception or budget paid plan before 72h canary sign-off |
-| Silent pipeline failure (canary/dead-letter unnoticed) | Webhook alerting on canary failure and dead-letter threshold breach; alert_log + audit trail |
+| Silent pipeline failure | Slack transition alerting across worker, canary, queue, target, p95, QStash, and soak gates; alert_log + audit trail |
 | Spend overrun against CAD 150/mo gate | Billing alerts per spend-gate runbook; Operations Spend-gate card |
 | Credential exposure | Vault storage, rotation runbooks, no secrets in code/logs/chat |
 | Single-operator bottleneck | Durable jobs + schedules + canary; the pipeline runs unattended |
