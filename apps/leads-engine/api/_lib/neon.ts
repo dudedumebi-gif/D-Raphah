@@ -38,6 +38,14 @@ export function configurationStatus() {
   return { configured: missing.length === 0, missing };
 }
 
+export function isCompatibleSchemaVersion(version: string | undefined): boolean {
+  if (!version) return false;
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!match) return false;
+  const [, major, minor, patch] = match.map(Number);
+  return major === 3 && (minor > 3 || (minor === 3 && patch >= 1));
+}
+
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing required environment variable ${name}`);
@@ -174,6 +182,6 @@ export async function assertDatabaseReady(
     where service = 'lead-engine'
     limit 1
   `) as unknown as Array<{ version: string }>;
-  if (rows[0]?.version !== "3.2.0")
+  if (!isCompatibleSchemaVersion(rows[0]?.version))
     throw new Error("Database readiness failed: incompatible schema version");
 }

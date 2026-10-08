@@ -13,7 +13,10 @@ import {
   assertUrlAllowed,
   type CollectionPolicy,
 } from "../api/_lib/collection";
-import { requireScheduler } from "../api/_lib/neon";
+import {
+  isCompatibleSchemaVersion,
+  requireScheduler,
+} from "../api/_lib/neon";
 
 describe("workspace bootstrap UI safety", () => {
   const source = readFileSync(
@@ -62,6 +65,15 @@ describe("database environment isolation", () => {
   it("prefers the Lead Engine-specific database URL without replacing production DATABASE_URL", () => {
     expect(source).toContain("process.env.LEAD_ENGINE_DATABASE_URL ??");
     expect(source).toContain('requiredEnvironment("DATABASE_URL")');
+  });
+
+  it("accepts the migrated 3.3.1 schema and compatible 3.x successors", () => {
+    expect(isCompatibleSchemaVersion("3.3.1")).toBe(true);
+    expect(isCompatibleSchemaVersion("3.3.2")).toBe(true);
+    expect(isCompatibleSchemaVersion("3.4.0")).toBe(true);
+    expect(isCompatibleSchemaVersion("3.2.0")).toBe(false);
+    expect(isCompatibleSchemaVersion("4.0.0")).toBe(false);
+    expect(isCompatibleSchemaVersion(undefined)).toBe(false);
   });
 });
 
