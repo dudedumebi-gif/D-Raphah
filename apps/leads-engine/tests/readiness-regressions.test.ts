@@ -65,6 +65,36 @@ describe("database environment isolation", () => {
   });
 });
 
+describe("human source-terms acceptance", () => {
+  const uiSource = readFileSync(
+    new URL("../src/main.tsx", import.meta.url),
+    "utf8",
+  );
+  const termsSource = readFileSync(
+    new URL("../api/_lib/discovery/terms.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("requires review and explicit acknowledgement before recording acceptance", () => {
+    expect(uiSource).toContain("Review and accept terms");
+    expect(uiSource).toContain('role="dialog"');
+    expect(uiSource).toContain("Recorded version:");
+    expect(uiSource).toContain("termsAcknowledged");
+    expect(uiSource).toContain("disabled={!termsAcknowledged}");
+    expect(uiSource).toContain("Record acceptance");
+  });
+
+  it("keeps authoritative review links and optional notes in the audited flow", () => {
+    expect(termsSource).toContain("https://open.toronto.ca/open-data-license/");
+    expect(termsSource).toContain(
+      "https://open.canada.ca/en/open-government-licence-canada",
+    );
+    expect(uiSource).toContain("Acceptance notes (optional)");
+    expect(uiSource).toContain("notes: termsNotes.trim()");
+    expect(uiSource).toContain('rel="noreferrer"');
+  });
+});
+
 describe("geographic qualification", () => {
   it("does not mistake the word 'on' for Ontario", () => {
     expect(evaluateGeography("We focus on customer service", {}).eligible).toBe(

@@ -27,16 +27,44 @@ export const DISCOVERY_TERMS = {
     id: OVERPASS_OSM_TERMS_ID,
     version: OVERPASS_OSM_TERMS_VERSION,
     label: "Overpass API usage policy and OpenStreetMap ODbL attribution",
+    summary:
+      "Public Overpass instances impose usage limits, and OpenStreetMap data requires attribution under the ODbL.",
+    reviewLinks: [
+      {
+        label: "Review Overpass API usage guidance",
+        href: "https://wiki.openstreetmap.org/wiki/Overpass_API#Public_Overpass_API_instances",
+      },
+      {
+        label: "Review OpenStreetMap copyright and licence",
+        href: "https://www.openstreetmap.org/copyright",
+      },
+    ],
   },
   toronto_open_data: {
     id: TORONTO_OPEN_DATA_TERMS_ID,
     version: TORONTO_OPEN_DATA_TERMS_VERSION,
     label: "Open Government Licence – Toronto",
+    summary:
+      "Review the City of Toronto licence, including attribution, permitted use, exemptions, and non-endorsement requirements.",
+    reviewLinks: [
+      {
+        label: "Review Open Government Licence – Toronto",
+        href: "https://open.toronto.ca/open-data-license/",
+      },
+    ],
   },
   job_bank: {
     id: JOB_BANK_OPEN_DATA_TERMS_ID,
     version: JOB_BANK_OPEN_DATA_TERMS_VERSION,
     label: "Open Government Licence – Canada (Job Bank open data)",
+    summary:
+      "Review the Government of Canada licence, including attribution, permitted use, exemptions, and non-endorsement requirements.",
+    reviewLinks: [
+      {
+        label: "Review Open Government Licence – Canada",
+        href: "https://open.canada.ca/en/open-government-licence-canada",
+      },
+    ],
   },
 } as const;
 

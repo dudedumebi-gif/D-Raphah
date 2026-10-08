@@ -34,6 +34,7 @@ import {
   parseSourceCsv,
   type SourceImportRow,
 } from "../api/_lib/source-import";
+import { DISCOVERY_TERMS } from "../api/_lib/discovery/terms";
 import "./styles.css";
 import "./functionality.css";
 
@@ -1215,17 +1216,17 @@ const DISCOVERY_CITIES = ["Toronto", "Ottawa", "Montreal", "Custom"];
 const DISCOVERY_ADAPTERS = {
   overpass: {
     label: "OpenStreetMap / Overpass",
-    termsId: "overpass-osm",
+    terms: DISCOVERY_TERMS.overpass,
     detail: "Business place discovery with public websites and coordinates.",
   },
   toronto_open_data: {
     label: "Toronto Open Data",
-    termsId: "toronto-open-data",
+    terms: DISCOVERY_TERMS.toronto_open_data,
     detail: "Municipal business licence and permit records from Toronto CKAN.",
   },
   job_bank: {
     label: "Canada Job Bank",
-    termsId: "canada-job-bank-open-data",
+    terms: DISCOVERY_TERMS.job_bank,
     detail:
       "Employer and hiring signals from the Government of Canada catalogue.",
   },
@@ -1266,6 +1267,10 @@ export function Discovery({
   const [runningId, setRunningId] = useState<string | null>(null);
   const [adapterId, setAdapterId] = useState<DiscoveryAdapterId>("overpass");
   const [acceptedTerms, setAcceptedTerms] = useState<Set<string>>(new Set());
+  const [termsDialogAdapterId, setTermsDialogAdapterId] =
+    useState<DiscoveryAdapterId | null>(null);
+  const [termsAcknowledged, setTermsAcknowledged] = useState(false);
+  const [termsNotes, setTermsNotes] = useState("");
   const [resolvingCandidateId, setResolvingCandidateId] = useState<
     string | null
   >(null);
@@ -1315,13 +1320,31 @@ export function Discovery({
   const role = data.actor.role ?? "";
   const canAcceptTerms = role === "owner" || role === "administrator";
 
-  async function acceptTerms(termsId: string) {
-    await mutate(
+  function closeTermsDialog() {
+    setTermsDialogAdapterId(null);
+    setTermsAcknowledged(false);
+    setTermsNotes("");
+  }
+
+  async function acceptTerms(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!termsDialogAdapterId || !termsAcknowledged) return;
+    const adapter = DISCOVERY_ADAPTERS[termsDialogAdapterId];
+    const result = await mutate(
       "/api/v1/terms/accept",
-      { method: "POST", body: JSON.stringify({ termsId }) },
-      `${DISCOVERY_ADAPTERS[adapterId].label} terms accepted — its discovery runs are unblocked.`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          termsId: adapter.terms.id,
+          ...(termsNotes.trim() ? { notes: termsNotes.trim() } : {}),
+        }),
+      },
+      `${adapter.label} terms accepted — its discovery runs are unblocked.`,
     );
-    await refresh();
+    if (result) {
+      closeTermsDialog();
+      await refresh();
+    }
   }
 
   const approvedSources = data.sources.filter((s) => s.status === "active");
@@ -1431,7 +1454,7 @@ export function Discovery({
               </p>
             </div>
           </div>
-          {!acceptedTerms.has(DISCOVERY_ADAPTERS[adapterId].termsId) ? (
+          {!acceptedTerms.has(DISCOVERY_ADAPTERS[adapterId].terms.id) ? (
             <div className="notice">
               <div>
                 <b>
@@ -1444,12 +1467,11 @@ export function Discovery({
               </div>
               {canAcceptTerms ? (
                 <button
+                  type="button"
                   className="row-action"
-                  onClick={() =>
-                    void acceptTerms(DISCOVERY_ADAPTERS[adapterId].termsId)
-                  }
+                  onClick={() => setTermsDialogAdapterId(adapterId)}
                 >
-                  Accept terms
+                  Review and accept terms
                 </button>
               ) : (
                 <span className="muted">
@@ -1664,6 +1686,97 @@ export function Discovery({
           </form>
         </section>
       </div>
+      {termsDialogAdapterId ? (
+        <div className="modal-backdrop">
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="terms-dialog-title"
+          >
+            <div className="modal-head">
+              <div>
+                <h2 id="terms-dialog-title">Review source terms</h2>
+                <p className="muted">
+                  {DISCOVERY_ADAPTERS[termsDialogAdapterId].label}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close terms acceptance"
+                onClick={closeTermsDialog}
+              >
+                ×
+              </button>
+            </div>
+            <form onSubmit={(event) => void acceptTerms(event)}>
+              <div className="terms-review">
+                <b>
+                  {DISCOVERY_ADAPTERS[termsDialogAdapterId].terms.label}
+                </b>
+                <span>
+                  Recorded version: {" "}
+                  <code>
+                    {DISCOVERY_ADAPTERS[termsDialogAdapterId].terms.version}
+                  </code>
+                </span>
+                <p>
+                  {DISCOVERY_ADAPTERS[termsDialogAdapterId].terms.summary}
+                </p>
+                <div className="terms-links">
+                  {DISCOVERY_ADAPTERS[
+                    termsDialogAdapterId
+                  ].terms.reviewLinks.map((link) => (
+                    <a
+                      key={link.href}
+                      href={link.href}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {link.label} ↗
+                    </a>
+                  ))}
+                </div>
+              </div>
+              <label className="terms-acknowledgement">
+                <input
+                  type="checkbox"
+                  checked={termsAcknowledged}
+                  onChange={(event) =>
+                    setTermsAcknowledged(event.target.checked)
+                  }
+                />
+                <span>
+                  I confirm that I am authorized to accept this version for
+                  the workspace and have reviewed the linked terms.
+                </span>
+              </label>
+              <label>
+                Acceptance notes (optional)
+                <textarea
+                  value={termsNotes}
+                  maxLength={2000}
+                  onChange={(event) => setTermsNotes(event.target.value)}
+                  placeholder="Review reference, approver context, or operational constraints"
+                />
+              </label>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={closeTermsDialog}
+                >
+                  Cancel
+                </button>
+                <button className="primary" disabled={!termsAcknowledged}>
+                  Record acceptance
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
       <div className="content">
         <section className="panel">
           <div className="panel-head">
