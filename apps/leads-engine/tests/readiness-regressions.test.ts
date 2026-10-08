@@ -77,6 +77,39 @@ describe("database environment isolation", () => {
   });
 });
 
+describe("operational alert migration safety", () => {
+  const alertsSource = readFileSync(
+    new URL("../api/_lib/alerts.ts", import.meta.url),
+    "utf8",
+  );
+  const incidentMigration = readFileSync(
+    new URL(
+      "../neon/migrations/202610080002_operational_alert_incidents.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const correctionMigration = readFileSync(
+    new URL(
+      "../neon/migrations/202610080003_close_legacy_alert_incidents.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+
+  it("does not import append-only history as open incidents", () => {
+    expect(incidentMigration).toContain("and last_notified_at is null");
+    expect(incidentMigration).toContain("last_transition = 'resolved'");
+    expect(correctionMigration).toContain("alert.legacy_history.corrected");
+    expect(correctionMigration).toContain("version = '3.3.3'");
+  });
+
+  it("opens dead-letter incidents only within the evaluator lookback", () => {
+    expect(alertsSource).toContain("now.getTime() - 15 * 60_000");
+    expect(alertsSource).toContain("coalesce(sj.completed_at,sj.updated_at,sj.created_at)");
+  });
+});
+
 describe("human source-terms acceptance", () => {
   const uiSource = readFileSync(
     new URL("../src/main.tsx", import.meta.url),

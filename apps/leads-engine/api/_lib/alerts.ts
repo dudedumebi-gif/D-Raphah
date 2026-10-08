@@ -286,7 +286,9 @@ export async function checkOperationalAlerts(
       client`
         select sj.id, sj.workspace_id, sj.status, sj.last_error
         from public.scrape_jobs sj
-        where sj.status='dead_letter'
+        where (sj.status='dead_letter'
+              and coalesce(sj.completed_at,sj.updated_at,sj.created_at)
+                  >= ${new Date(now.getTime() - 15 * 60_000).toISOString()}::timestamptz)
            or exists (
              select 1 from public.alert_log al
              where al.alert_type='dead_letter'
