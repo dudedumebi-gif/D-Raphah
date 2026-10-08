@@ -143,6 +143,13 @@ Postman is an inspection client. Vercel logs/traces and Sentry are the authorita
 
 For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_URL`, `NEON_AUTH_URL`, `NEON_DATA_API_URL`, `NEON_RLS_TEST_USER_A_EMAIL`, `NEON_RLS_TEST_USER_A_PASSWORD`, `NEON_RLS_TEST_USER_B_EMAIL`, and `NEON_RLS_TEST_USER_B_PASSWORD`. The two accounts must be dedicated synthetic users with different identities. Short-lived JWT inputs remain supported for one-off local runs but should not be stored as durable CI secrets.
 
+### Genuine-session UI evidence — 2026-10-07
+
+- Synthetic Account A authenticated through Neon Auth and loaded only workspace `890cbeb9-84c7-49a4-bb4b-df14e3b087ec`.
+- Synthetic Account B authenticated through Neon Auth and loaded only workspace `77fc4cef-b628-4a1d-a0c5-6a3d75db33ea`.
+- Both accounts received successful Preview bootstrap responses against the rehearsal database.
+- This proves independent positive-session initialization. The release gate remains open until the automated Data API test also proves that each genuine session is denied access to the other account's workspace.
+
 ## Production release gates
 
 - [ ] Toronto Open Data terms reviewed and accepted by a human operator.

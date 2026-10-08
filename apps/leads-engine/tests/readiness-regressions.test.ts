@@ -43,6 +43,7 @@ describe("workspace bootstrap UI safety", () => {
     expect(workspace).toContain("Retry initialization");
     expect(workspace).toContain("Sign out");
     expect(workspace).toContain('localStorage.removeItem("raphah.lead.workspace")');
+    expect(workspace).toContain('window.location.replace("/")');
   });
 
   it("does not reuse another account's remembered workspace", () => {

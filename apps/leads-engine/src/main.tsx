@@ -214,6 +214,7 @@ function Workspace({ session }: { session: Session }) {
   const signOut = useCallback(async () => {
     localStorage.removeItem("raphah.lead.workspace");
     await neonClient!.auth.signOut();
+    window.location.replace("/");
   }, []);
 
   useEffect(() => {
