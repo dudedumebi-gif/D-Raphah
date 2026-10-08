@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-08
 
-Target release: Lead Engine schema/API `3.3.3`
+Target release: Lead Engine schema/API `3.3.4`
 
 Status: **pilot release candidate deployed; production database migrated; telemetry and live soak gates remain**
 
@@ -97,7 +97,7 @@ The user/operator will execute this after implementation review.
    pnpm --filter @raphah/leads-engine-app test:rls:neon
    ```
 
-4. Confirm schema version `3.3.3`, expected indexes, RLS policies, and audit triggers.
+4. Confirm schema version `3.3.4`, expected indexes, RLS policies, and audit triggers.
 5. Deploy the application against the disposable branch and exercise both adapters in `pilot` mode.
 6. Create the linked collection source with **Permit public domains discovered by approved adapters** selected, then approve its policy. Registering an adapter without this explicit permission must fail.
 7. Review candidate provenance, unresolved candidates, deduplication, evidence, signals, score explanations, retries, and audit events.
@@ -143,7 +143,7 @@ Postman is an inspection client. Vercel logs/traces and Sentry are the authorita
 - `job_lifecycle_v3.sql` passed all **15/15** assertions, including source-scoped leasing, duplicate schedule idempotency, ownership fencing, expired-lease recovery, retry, and dead-letter behavior.
 - `rls_behavior_v3.sql` passed all **13/13** assertions using PostgreSQL's `authenticated` role and JWT-claim context, including tenant read/write isolation, fail-closed missing claims, audit visibility, queue idempotency, and denial of worker lease RPCs.
 - Neon Auth and the Data API are enabled on the rehearsal branch. The separate two-genuine-session Data API test remains mandatory because it proves the HTTP/Auth integration in addition to the database policies.
-- The production branch remains at schema `3.1.0`; no production migration or Pilot-to-Production data promotion has been performed.
+- Production is at schema `3.3.4`; schema migration does not promote Pilot rows into Production mode.
 
 For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_URL`, `NEON_AUTH_URL`, `NEON_DATA_API_URL`, `NEON_RLS_TEST_USER_A_EMAIL`, `NEON_RLS_TEST_USER_A_PASSWORD`, `NEON_RLS_TEST_USER_B_EMAIL`, and `NEON_RLS_TEST_USER_B_PASSWORD`. The two accounts must be dedicated synthetic users with different identities. Short-lived JWT inputs remain supported for one-off local runs but should not be stored as durable CI secrets.
 
@@ -157,19 +157,19 @@ For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_U
 ### Production cutover evidence — 2026-10-08
 
 - Toronto Open Data `ogl-toronto-1.0@2026-09-29` and Canada Job Bank `ogl-canada-2.0@2026-09-29` were accepted by `dudedumebi@gmail.com` for the production workspace and are stored in the audited `terms_acceptances` table.
-- Neon production migrated from schema `3.1.0` through `3.3.1`, then to `3.3.2` for the canary worker recovery. Required tables, RLS enablement, policies, audit triggers, function privileges, and acceptance records passed post-migration inspection.
+- Neon production migrated from schema `3.1.0` through `3.3.4`, including canary worker recovery, stateful operational incidents, and the audited legacy-alert correction. Required tables, RLS enablement, policies, audit triggers, function privileges, and acceptance records passed post-migration inspection.
 - Recovery points are snapshot `snap-curly-dust-avqzu2b4` (pre-3.3.1) and no-compute branch `br-bold-mountain-av2njseg` (pre-3.3.2).
-- PR #16 delivered the adapters and reviewed acceptance dialog; PR #17 repaired the schema compatibility guard; PR #18 repaired retention and demo-mode canary isolation. Each merged only after green CI and green Lead Engine Preview deployment.
-- Production Lead Engine deployment `ca71e539a8d23e6982588772f6ed4173bff85652` is live. The repaired worker completed a previously stuck canary, and the stale pre-soak queue was preserved as failed/dead-letter history with audit events.
-- The 72-hour clock has **not** started. Production readiness currently reports missing `SENTRY_DSN`, and `LEAD_ENGINE_CANARY_URL` must be set to the owned deterministic `https://d-raphah-leads-engine.vercel.app/canary-source.html` target before the first measured run.
+- PR #16 delivered the adapters and reviewed acceptance dialog; PR #17 repaired the schema compatibility guard; PR #18 repaired retention and demo-mode canary isolation; PR #20 added stateful Slack operations alerts. Each merged only after green CI and green Lead Engine Preview deployment.
+- Production Lead Engine deployment `7bf334cc64213588bd8d695c8eafcdb940e49930` is live. The repaired worker completed a previously stuck canary, and stale pre-soak work remains failed/dead-letter history with audit events rather than active incidents.
+- The 72-hour soak is in progress. At the 2026-10-08 verification snapshot it had 4/72 completed runs (5.56%) with p95 completion near 303 seconds, so the release correctly remains Pilot.
 
 ## Production release gates
 
 - [x] Toronto Open Data terms reviewed and accepted by a human operator.
 - [x] Canada Job Bank terms reviewed and accepted by a human operator.
 - [x] Migration rehearsed on a disposable Neon branch.
-- [x] Production Neon migrated and verified at schema `3.3.2`.
-- [ ] Rehearse and apply additive operational-incident migration `3.3.3`.
+- [x] Production Neon migrated and verified at schema `3.3.4`.
+- [x] Rehearse and apply operational-incident migrations through `3.3.4`.
 - [ ] Reconfigure all QStash schedules with the signed final-failure callback and four-minute worker cadence.
 - [ ] Verify one disposable Slack incident open and recovery in `#ops-alert` without exposing secrets.
 - [x] Database-role RLS behavior passes all 13 assertions.
@@ -182,7 +182,7 @@ For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_U
 - [ ] Signed versioned Delivery Factory handoff and replay protection pass.
 - [ ] 72-hour canary completion is at least 99%.
 - [ ] Scheduled-run start p95 is below five minutes.
-- [ ] Vercel production deployment is Ready with no material build/runtime errors.
+- [x] Vercel production deployment is Ready with no material build/runtime errors.
 - [ ] Sentry shows no unresolved release-blocking exceptions.
 
 Until every box is checked, the release remains Pilot and must not be represented as production-ready.

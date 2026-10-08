@@ -24,7 +24,7 @@ pnpm --filter @raphah/leads-engine-app build
 ## Provisioning order
 
 1. In the personal Vercel Hobby scope, add a Neon integration and an Upstash QStash integration to the Lead Engine project. Do not create or use a Vercel Team.
-2. In Neon, enable Auth and the Data API. Apply every migration under `neon/migrations/` in timestamp order against a disposable branch first, ending with schema `3.3.3`; apply to production only after rehearsal.
+2. In Neon, enable Auth and the Data API. Apply every migration under `neon/migrations/` in timestamp order against a disposable branch first, ending with schema `3.3.4`; apply to production only after rehearsal.
 3. Run `neon/tests/job_lifecycle_v3.sql` and `neon/tests/rls_behavior_v3.sql` against the disposable branch, then run `pnpm test:rls:neon` with two genuine Neon Auth sessions through the Data API. CI can obtain fresh sessions from two dedicated synthetic users through protected email/password secrets; short-lived tokens are also accepted for ad hoc local runs.
 4. Configure the variables in `.env.example` in the Lead Engine Vercel project. Keep `DATABASE_URL`, QStash keys, and `WORKER_SECRET` server-only.
 5. Deploy, create the first operator account, then approve the Raphah-controlled `/canary-source.html` fixture as a static-HTML source. Never substitute a third-party page for this deterministic production probe.

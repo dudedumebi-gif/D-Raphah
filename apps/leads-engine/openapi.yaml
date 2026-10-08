@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Raphah Lead Engine API
-  version: 3.3.3
+  version: 3.3.4
   description: Permitted-source discovery, collection, structured evidence, scoring, lead, audit, and operational lifecycle API with isolated demo, pilot, and production data modes.
 servers:
   - url: https://d-raphah-leads-engine.vercel.app

@@ -64,7 +64,7 @@ HTTP status, and DLQ ID but never stores a webhook secret or raw evidence.
 
 ## Verification
 
-1. Apply schema `3.3.3` on a disposable Neon branch and run regression/RLS
+1. Apply schema `3.3.4` on a disposable Neon branch and run regression/RLS
    tests before production migration.
 2. Deploy the code and confirm `/api/health/ready` returns `200`.
 3. Re-run `pnpm qstash:configure`; confirm worker cron is `*/4 * * * *`, the

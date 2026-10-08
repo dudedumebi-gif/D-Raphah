@@ -16,6 +16,16 @@ alter table public.alert_log
   add column if not exists occurrence_count integer not null default 1
     check (occurrence_count > 0);
 
+-- Rows created before this migration were append-only notifications, not
+-- stateful incidents. Close them before last_notified_at is backfilled so a
+-- fresh migration does not present historical alerts as currently open.
+update public.alert_log
+set status = 'resolved',
+    resolved_at = coalesce(resolved_at, created_at),
+    last_transition = 'resolved'
+where status = 'open'
+  and last_notified_at is null;
+
 update public.alert_log
 set last_notified_at = coalesce(last_notified_at, created_at),
     first_observed_at = coalesce(first_observed_at, created_at),
