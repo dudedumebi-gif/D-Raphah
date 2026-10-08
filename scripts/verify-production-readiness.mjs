@@ -18,6 +18,9 @@ const [
   dfMigration,
   dfReady,
   postman,
+  adapterMigration,
+  adapterRegistry,
+  productionReadme,
 ] = await Promise.all([
   read("package.json"),
   read(".github/workflows/ci.yml"),
@@ -31,6 +34,11 @@ const [
   read(
     "apps/leads-engine/postman/Lead_Engine_Production.postman_collection.json",
   ),
+  read(
+    "apps/leads-engine/neon/migrations/202609290001_source_adapters_and_data_modes.sql",
+  ),
+  read("apps/leads-engine/api/_lib/discovery/registry.ts"),
+  read("PRODUCTION_README.md"),
 ]);
 
 check(
@@ -63,6 +71,29 @@ check(
 check(
   "Postman covers signed handoff",
   postman.includes("Signed Delivery Factory handoff"),
+);
+check(
+  "Toronto and Job Bank adapters registered",
+  adapterRegistry.includes("toronto_open_data") &&
+    adapterRegistry.includes("job_bank"),
+);
+check(
+  "discovery candidates are durable and mode isolated",
+  adapterMigration.includes("discovery_candidates") &&
+    adapterMigration.includes("data_mode") &&
+    adapterMigration.includes("resolve_discovery_candidate"),
+);
+check(
+  "Postman covers discovery lifecycle",
+  postman.includes("Inspect persistent candidates") &&
+    postman.includes("Human-resolve candidate website and queue"),
+);
+check(
+  "production handover documents explicit gates",
+  productionReadme.includes("72-hour canary completion is at least 99%") &&
+    productionReadme.includes(
+      "terms reviewed and accepted by a human operator",
+    ),
 );
 
 if (process.argv.includes("--live")) {

@@ -32,11 +32,13 @@ jobs:
     env:
       LEAD_ENGINE_PRODUCTION_URL: ${{ vars.LEAD_ENGINE_PRODUCTION_URL }}
       DELIVERY_FACTORY_PRODUCTION_URL: ${{ vars.DELIVERY_FACTORY_PRODUCTION_URL }}
+      DATABASE_URL: ${{ secrets.NEON_RLS_DATABASE_URL }}
+      NEON_AUTH_URL: ${{ secrets.NEON_AUTH_URL }}
       NEON_DATA_API_URL: ${{ secrets.NEON_DATA_API_URL }}
-      NEON_RLS_TEST_TOKEN_A: ${{ secrets.NEON_RLS_TEST_TOKEN_A }}
-      NEON_RLS_TEST_TOKEN_B: ${{ secrets.NEON_RLS_TEST_TOKEN_B }}
-      NEON_RLS_WORKSPACE_A: ${{ secrets.NEON_RLS_WORKSPACE_A }}
-      NEON_RLS_WORKSPACE_B: ${{ secrets.NEON_RLS_WORKSPACE_B }}
+      NEON_RLS_TEST_USER_A_EMAIL: ${{ secrets.NEON_RLS_TEST_USER_A_EMAIL }}
+      NEON_RLS_TEST_USER_A_PASSWORD: ${{ secrets.NEON_RLS_TEST_USER_A_PASSWORD }}
+      NEON_RLS_TEST_USER_B_EMAIL: ${{ secrets.NEON_RLS_TEST_USER_B_EMAIL }}
+      NEON_RLS_TEST_USER_B_PASSWORD: ${{ secrets.NEON_RLS_TEST_USER_B_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

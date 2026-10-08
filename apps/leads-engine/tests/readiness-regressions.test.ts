@@ -15,6 +15,86 @@ import {
 } from "../api/_lib/collection";
 import { requireScheduler } from "../api/_lib/neon";
 
+describe("workspace bootstrap UI safety", () => {
+  const source = readFileSync(
+    new URL("../src/main.tsx", import.meta.url),
+    "utf8",
+  );
+  const workspace = source.slice(
+    source.indexOf("function Workspace("),
+    source.indexOf("function funnelDiagnosis("),
+  );
+
+  it("declares every workspace hook before the initializing return", () => {
+    const initializingReturn = workspace.indexOf(
+      "if (!memberships.length && !data)",
+    );
+    expect(initializingReturn).toBeGreaterThan(0);
+    expect(workspace.indexOf("const visibleData = useMemo")).toBeLessThan(
+      initializingReturn,
+    );
+    expect(
+      workspace.lastIndexOf("useEffect(", initializingReturn),
+    ).toBeLessThan(initializingReturn);
+    expect(workspace.indexOf("useEffect(", initializingReturn)).toBe(-1);
+  });
+
+  it("lets a trapped user retry or sign out during initialization", () => {
+    expect(workspace).toContain("Retry initialization");
+    expect(workspace).toContain("Sign out");
+    expect(workspace).toContain('localStorage.removeItem("raphah.lead.workspace")');
+    expect(workspace).toContain('window.location.replace("/")');
+  });
+
+  it("does not reuse another account's remembered workspace", () => {
+    expect(workspace).toContain(
+      "rows.some((row) => row.workspace_id === current)",
+    );
+  });
+});
+
+describe("database environment isolation", () => {
+  const source = readFileSync(
+    new URL("../api/_lib/neon.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("prefers the Lead Engine-specific database URL without replacing production DATABASE_URL", () => {
+    expect(source).toContain("process.env.LEAD_ENGINE_DATABASE_URL ??");
+    expect(source).toContain('requiredEnvironment("DATABASE_URL")');
+  });
+});
+
+describe("human source-terms acceptance", () => {
+  const uiSource = readFileSync(
+    new URL("../src/main.tsx", import.meta.url),
+    "utf8",
+  );
+  const termsSource = readFileSync(
+    new URL("../api/_lib/discovery/terms.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("requires review and explicit acknowledgement before recording acceptance", () => {
+    expect(uiSource).toContain("Review and accept terms");
+    expect(uiSource).toContain('role="dialog"');
+    expect(uiSource).toContain("Recorded version:");
+    expect(uiSource).toContain("termsAcknowledged");
+    expect(uiSource).toContain("disabled={!termsAcknowledged}");
+    expect(uiSource).toContain("Record acceptance");
+  });
+
+  it("keeps authoritative review links and optional notes in the audited flow", () => {
+    expect(termsSource).toContain("https://open.toronto.ca/open-data-license/");
+    expect(termsSource).toContain(
+      "https://open.canada.ca/en/open-government-licence-canada",
+    );
+    expect(uiSource).toContain("Acceptance notes (optional)");
+    expect(uiSource).toContain("notes: termsNotes.trim()");
+    expect(uiSource).toContain('rel="noreferrer"');
+  });
+});
+
 describe("geographic qualification", () => {
   it("does not mistake the word 'on' for Ontario", () => {
     expect(evaluateGeography("We focus on customer service", {}).eligible).toBe(
@@ -340,6 +420,13 @@ describe("production-readiness implementation", () => {
     ),
     "utf8",
   );
+  const adapterMigration = readFileSync(
+    new URL(
+      "../neon/migrations/202609290001_source_adapters_and_data_modes.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
   const worker = readFileSync(
     new URL("../api/_lib/worker.ts", import.meta.url),
     "utf8",
@@ -363,6 +450,25 @@ describe("production-readiness implementation", () => {
     expect(worker.indexOf("reserve_source_collection")).toBeLessThan(
       worker.indexOf("collectUrl("),
     );
+  });
+
+  it("persists discovery lineage with RLS, audit, data modes, and atomic resolution", () => {
+    expect(adapterMigration).toContain(
+      "create table if not exists public.discovery_candidates",
+    );
+    expect(adapterMigration).toContain("enable row level security");
+    expect(adapterMigration).toContain("audit_discovery_candidates");
+    expect(adapterMigration).toContain("resolve_discovery_candidate");
+    expect(adapterMigration).toContain("allow_discovered_domains");
+    expect(worker).toContain("allowedDomainsForJob");
+    expect(adapterMigration).toContain("discovery_candidate_id");
+    expect(adapterMigration).toContain(
+      "source and job data modes do not match",
+    );
+    expect(adapterMigration).toContain(
+      "organizations_workspace_domain_mode_key",
+    );
+    expect(adapterMigration).toContain("version='3.3.0'");
   });
 
   it("keeps the owned canary deterministic and evidence-backed", () => {

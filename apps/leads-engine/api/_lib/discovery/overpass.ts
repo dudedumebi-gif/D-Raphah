@@ -65,6 +65,7 @@ export function overpassElementToCandidate(
         ? { lat: element.center.lat, lon: element.center.lon }
         : { lat: undefined, lon: undefined };
   return {
+    externalId: `${element.type}:${element.id}`,
     name: tags.name ?? null,
     website: tags.website ?? null,
     address: buildAddress(tags),
@@ -72,6 +73,12 @@ export function overpassElementToCandidate(
     lng: typeof coords.lon === "number" ? coords.lon : null,
     category: tags.shop ?? tags.office ?? tags.amenity ?? null,
     source: "overpass",
+    sourceUrl: `https://www.openstreetmap.org/${element.type}/${element.id}`,
+    observedAt: new Date().toISOString(),
+    evidenceText: Object.entries(tags)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join("\n"),
+    rawRecord: tags,
   };
 }
 

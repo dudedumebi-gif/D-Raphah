@@ -358,6 +358,171 @@
           }
         }
       ]
+    },
+    {
+      "name": "05 - Discovery adapters",
+      "description": "Observe Toronto Open Data or Job Bank discovery through persistent candidates and scrape jobs. Human licence acceptance must be completed explicitly before Run now; do not automate acceptance.",
+      "item": [
+        {
+          "name": "List accepted source terms",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Workspace-ID", "value": "{{workspaceId}}" }],
+            "url": "{{baseUrl}}/api/v1/terms"
+          }
+        },
+        {
+          "name": "Record human source-terms acceptance",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Workspace-ID", "value": "{{workspaceId}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/v1/terms/accept",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"termsId\": \"{{discoveryTermsId}}\",\n  \"notes\": \"Human-reviewed licence acceptance\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Register Toronto Open Data discovery",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Workspace-ID", "value": "{{workspaceId}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/v1/discovery/sources",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Toronto licensed businesses\",\n  \"adapterId\": \"toronto_open_data\",\n  \"geo\": { \"city\": \"Toronto\", \"radiusKm\": 50 },\n  \"adapterConfig\": { \"categories\": [], \"activeOnly\": true, \"maxRecords\": 100 },\n  \"dataMode\": \"{{dataMode}}\",\n  \"sourceId\": \"{{sourceId}}\",\n  \"campaignId\": \"{{campaignId}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Discovery source created', () => pm.response.to.have.status(201));",
+                  "pm.environment.set('discoverySourceId', pm.response.json().data.id);",
+                  "pm.environment.set('discoveryTermsId', 'toronto-open-data');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register Job Bank discovery",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Workspace-ID", "value": "{{workspaceId}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/v1/discovery/sources",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Toronto manual-work hiring signals\",\n  \"adapterId\": \"job_bank\",\n  \"geo\": { \"city\": \"Toronto\", \"region\": \"Ontario\", \"radiusKm\": 50 },\n  \"adapterConfig\": { \"keywords\": [\"administrative\", \"data entry\", \"coordinator\"], \"postedWithinDays\": 30, \"maxRecords\": 100 },\n  \"dataMode\": \"{{dataMode}}\",\n  \"sourceId\": \"{{sourceId}}\",\n  \"campaignId\": \"{{campaignId}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Discovery source created', () => pm.response.to.have.status(201));",
+                  "pm.environment.set('discoverySourceId', pm.response.json().data.id);",
+                  "pm.environment.set('discoveryTermsId', 'canada-job-bank-open-data');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Run selected discovery source",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "X-Workspace-ID", "value": "{{workspaceId}}" }],
+            "url": "{{baseUrl}}/api/v1/discovery/sources/{{discoverySourceId}}/run"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Discovery accepted', () => pm.expect([202,409]).to.include(pm.response.code));",
+                  "if (pm.response.code === 202) pm.environment.set('discoveryRunId', pm.response.json().data.runId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inspect persistent candidates",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Workspace-ID", "value": "{{workspaceId}}" }],
+            "url": "{{baseUrl}}/api/v1/discovery/candidates?mode={{dataMode}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Candidate store is visible', () => pm.response.to.have.status(200));",
+                  "pm.test('Mode is isolated', () => (pm.response.json().data || []).forEach(row => pm.expect(row.data_mode).to.eql(pm.environment.get('dataMode'))));",
+                  "const unresolved = (pm.response.json().data || []).find(row => !row.resolved_website);",
+                  "if (unresolved) pm.environment.set('candidateId', unresolved.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Human-resolve candidate website and queue",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Workspace-ID", "value": "{{workspaceId}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{baseUrl}}/api/v1/discovery/candidates/{{candidateId}}/resolve",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"website\": \"{{resolvedWebsite}}\",\n  \"notes\": \"Human-validated business website\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Candidate resolved and job queued', () => pm.response.to.have.status(202));",
+                  "if (pm.response.code === 202) pm.environment.set('jobId', pm.response.json().data.jobId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inspect discovery runs",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Workspace-ID", "value": "{{workspaceId}}" }],
+            "url": "{{baseUrl}}/api/v1/discovery/runs?source_id={{discoverySourceId}}"
+          }
+        },
+        {
+          "name": "Inspect mode-specific funnel",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Workspace-ID", "value": "{{workspaceId}}" }],
+            "url": "{{baseUrl}}/api/v1/funnel?mode={{dataMode}}&windowDays=30"
+          }
+        }
+      ]
     }
   ],
   "event": [

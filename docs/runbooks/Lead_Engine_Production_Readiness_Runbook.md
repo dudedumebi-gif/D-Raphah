@@ -4,14 +4,14 @@
 
 This runbook moves Lead Engine v3 from a buildable release candidate to a production-approved service on Vercel Hobby, Neon Free, and Upstash QStash Free. Passing local tests is necessary but does not replace the database isolation test, live collection test, or 72-hour canary.
 
-## Verified checkpoint — 2026-09-28
+## Verified checkpoint — 2026-09-30
 
-**Status: release candidate implemented; live gates pending; do not promote.** Code readiness does not replace disposable-Neon execution, genuine-token RLS proof, the deployed Postman lifecycle, or the 72-hour canary.
+**Status: pilot release candidate; Neon migration, lifecycle SQL, and database-role RLS rehearsal pass; do not promote.** These checks do not replace genuine-session Data API proof, the deployed Postman lifecycle, or the 72-hour canary.
 
 - Lead Engine and Delivery Factory typechecks and Vite production builds pass.
-- The frozen-lockfile release regression has **364 passing tests**: Lead Engine 213, Delivery Factory 117, shared handoff contract 22, and legacy compatibility suites 12.
+- The frozen-lockfile release regression has **373 passing tests**: Lead Engine 222, Delivery Factory 117, shared handoff contract 22, and legacy compatibility suites 12.
 - The complete monorepo typecheck and build pass, and the static production-readiness verifier confirms CI builds, source budgets/pacing, audit coverage, scoring v2.1, readiness, and the Postman handoff lifecycle.
-- Lead Engine schema `3.2.0`, Delivery Factory schema `1.1.0`, a genuine-token Data API/RLS harness, and job-lifecycle SQL assertions are prepared but **not executed against Neon in this release session**.
+- Lead Engine schema `3.3.1` was rehearsed on the Neon rehearsal branch. The complete migration footprint, RLS/policy coverage, and audit triggers pass inspection. `job_lifecycle_v3.sql` passes **15/15** and `rls_behavior_v3.sql` passes **13/13**. Neon Auth and the Data API are active; the two-genuine-session HTTP/Data API harness remains a release gate.
 - `VERCEL_TOKEN` authentication and access to `d-raphah`, `d-raphah-leads-engine`, and `d-raphah-delivery-factory` were verified through the Vercel REST API using IPv4. The OAuth connector remains incorrectly scoped to an inaccessible team, so it is not accepted as deployment evidence. No environment mutation or production telemetry review has been performed.
 - No 72-hour soak, persistent restart experiment, concurrent database integration test, or live Postman lifecycle has passed yet.
 
@@ -28,8 +28,8 @@ This runbook moves Lead Engine v3 from a buildable release candidate to a produc
 
 ### Remaining live-evidence gates
 
-1. Apply Lead Engine schema `3.2.0` and Delivery Factory schema `1.1.0` to disposable Neon branches, then production after SQL assertions pass.
-2. Run database concurrency, restart, tenant-isolation, retry/DLQ, source-budget, and full-pipeline tests against the disposable branches.
+1. Run the two-genuine-session Data API harness against the Lead Engine rehearsal branch, then apply Lead Engine schema `3.3.1` and Delivery Factory schema `1.1.0` to production only after every live gate passes.
+2. Run process-restart, source-budget, and full-pipeline tests against the disposable/rehearsal branches. Database tenant isolation, lease ownership, expiry, idempotency, retry, and DLQ assertions already pass.
 3. Run Postman through qualified lead → human acceptance → signed Delivery Factory handoff and verify both audit streams.
 4. Review deployed Vercel runtime logs and Sentry releases for both independent products.
 5. Run the owned `/canary-source.html` hourly for 72 elapsed hours; require completion `>=99%` and scheduled-start p95 `<300,000 ms`.
@@ -54,28 +54,29 @@ The job queue, attempts, leases, evidence metadata, signals, assessments, opport
 
 ## Release gates
 
-| Gate               | Verification                                                  | Required result                                            |
-| ------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
-| Build integrity    | Typecheck, Vitest, Vite build                                 | All pass                                                   |
-| Policy enforcement | Create source, try job before and after approval              | Pre-approval blocked; approved public source runs          |
-| Full pipeline      | Source → evidence → signals → score → lead                    | Evidence and assessment persisted; qualifying lead appears |
-| Restart durability | Queue job, interrupt worker, invoke next tick                 | Job remains and resumes/retries                            |
-| Lease recovery     | Expire a leased fixture, invoke tick                          | Requeued or dead-lettered by attempt count                 |
-| Idempotency        | Submit same `Idempotency-Key` twice                           | One job and one lead per workspace/organization            |
-| RLS                | Run `pnpm test:rls:neon` with two genuine Auth tokens         | Isolation, denial, audit, worker-RPC denial pass           |
-| Job transactions   | Run `job_lifecycle_v3.sql` and concurrent/restart experiments | Replay, lease ownership, expiry and durability verified    |
-| Audit              | Mutate source, campaign, job, feedback                        | Trigger-generated audit event for each persisted mutation  |
-| Retry/DLQ          | Use a controlled transient failure, then a permanent failure  | Backoff retry and manual DLQ recovery demonstrated         |
-| Canary             | Hourly controlled scrape for 72 hours                         | At least 72 runs and completion `>=99%`                    |
-| Scheduler SLO      | `/api/v1/operations`                                          | Start p95 `<300,000 ms`                                    |
-| Telemetry          | Vercel errors plus Sentry release                             | No material unhandled runtime error                        |
-| API inspection     | Postman production collection                                 | Auth, job lifecycle, SSE, audit, leads, SLO requests pass  |
+| Gate               | Verification                                                 | Required result                                            |
+| ------------------ | ------------------------------------------------------------ | ---------------------------------------------------------- |
+| Build integrity    | Typecheck, Vitest, Vite build                                | All pass                                                   |
+| Policy enforcement | Create source, try job before and after approval             | Pre-approval blocked; approved public source runs          |
+| Full pipeline      | Source → evidence → signals → score → lead                   | Evidence and assessment persisted; qualifying lead appears |
+| Restart durability | Queue job, interrupt worker, invoke next tick                | Job remains and resumes/retries                            |
+| Lease recovery     | Expire a leased fixture, invoke tick                         | Requeued or dead-lettered by attempt count                 |
+| Idempotency        | Submit same `Idempotency-Key` twice                          | One job and one lead per workspace/organization            |
+| SQL RLS behavior   | Run `rls_behavior_v3.sql` as database owner                  | 13/13 isolation, fail-closed, audit and RPC checks pass    |
+| Data API RLS       | Run `pnpm test:rls:neon` with two genuine Auth sessions      | HTTP isolation, denial, audit and worker-RPC denial pass   |
+| Job transactions   | Run `job_lifecycle_v3.sql` and process-restart experiment    | 15/15 SQL checks pass; process replacement preserves work  |
+| Audit              | Mutate source, campaign, job, feedback                       | Trigger-generated audit event for each persisted mutation  |
+| Retry/DLQ          | Use a controlled transient failure, then a permanent failure | Backoff retry and manual DLQ recovery demonstrated         |
+| Canary             | Hourly controlled scrape for 72 hours                        | At least 72 runs and completion `>=99%`                    |
+| Scheduler SLO      | `/api/v1/operations`                                         | Start p95 `<300,000 ms`                                    |
+| Telemetry          | Vercel errors plus Sentry release                            | No material unhandled runtime error                        |
+| API inspection     | Postman production collection                                | Auth, job lifecycle, SSE, audit, leads, SLO requests pass  |
 
 ## Provision Neon and QStash
 
 1. In the personal Vercel Hobby scope, attach Neon and Upstash QStash Marketplace integrations to the Lead Engine project. Do not create a Vercel Team.
-2. Enable Neon Auth and Data API, then apply every Lead Engine migration through `202609270001_source_budget_and_audit.sql` to a disposable branch in filename order.
-3. Run `job_lifecycle_v3.sql` on that branch and `pnpm test:rls:neon` using two real Neon Auth sessions. Apply the migration to production only after both pass.
+2. Enable Neon Auth and Data API, then apply every Lead Engine migration through `202609290002_single_source_leasing.sql` to a disposable branch in filename order.
+3. Run `job_lifecycle_v3.sql` and `rls_behavior_v3.sql` on that branch, then run `pnpm test:rls:neon` using two real Neon Auth sessions. Apply the migration to production only after all three pass.
 4. Set `LEAD_ENGINE_BASE_URL` and `QSTASH_TOKEN`, then run `pnpm qstash:configure`. Stable schedule IDs make the command safely repeatable.
 5. Confirm QStash shows the five-minute worker schedule and hourly canary schedule, with signed delivery and three retries.
 
