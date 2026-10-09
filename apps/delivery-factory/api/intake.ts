@@ -59,7 +59,8 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
       createDeliveryDb(),
       env,
       {
-        onHandoffAccepted: (pkg) => triggerLeadHandoffWorkflows(getDb(), pkg),
+        onHandoffAccepted: (pkg, environment) =>
+          triggerLeadHandoffWorkflows(getDb(), pkg, environment),
       },
     );
     log("info", "handoff_intake_completed", {

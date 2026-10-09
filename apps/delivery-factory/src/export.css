@@ -1,0 +1,135 @@
+/* Export panel (Phase 4) — dark workflows surface. */
+.export-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 18, 0.66);
+  z-index: 70;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 28px 16px;
+}
+.export-panel {
+  width: min(1060px, 96vw);
+  background: #101527;
+  border: 1px solid #263157;
+  border-radius: 14px;
+  color: #dbe2f5;
+  padding: 22px 24px 26px;
+}
+.export-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.export-head h3 {
+  margin: 4px 0 6px;
+  color: #eef1fb;
+  font-size: 19px;
+}
+.export-formats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 16px 0 12px;
+}
+.export-formats button {
+  background: #1a2340;
+  border: 1px solid #31407a;
+  color: #aebadd;
+  border-radius: 999px;
+  padding: 7px 14px;
+  font: 600 12.5px Manrope, sans-serif;
+  cursor: pointer;
+}
+.export-formats button.active {
+  background: #4f7cff;
+  border-color: #4f7cff;
+  color: #fff;
+}
+.export-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.export-filename {
+  color: #9db4e8;
+  font-size: 13px;
+  margin-right: auto;
+}
+.export-preview {
+  background: #0a0f1f;
+  border: 1px solid #232c49;
+  border-radius: 10px;
+  padding: 14px 16px;
+  max-height: 340px;
+  overflow: auto;
+  font: 12.5px/1.55 "DM Mono", monospace;
+  color: #c6d2f2;
+  white-space: pre;
+}
+.export-table-title {
+  margin: 20px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8b93ad;
+}
+.export-table-wrap {
+  overflow-x: auto;
+}
+.export-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.export-table th,
+.export-table td {
+  border-bottom: 1px solid #232c49;
+  padding: 9px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.export-table th {
+  color: #8b93ad;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.fidelity {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: #2a2f45;
+  color: #aab2cc;
+  white-space: nowrap;
+}
+.fidelity-native {
+  background: #123f2b;
+  color: #4ade80;
+}
+.fidelity-approximate {
+  background: #2c2a12;
+  color: #ffd479;
+}
+.fidelity-manual {
+  background: #3f1d1d;
+  color: #f0a3a3;
+}
+.export-note {
+  display: block;
+  margin-top: 5px;
+  color: #8b93ad;
+  line-height: 1.45;
+}
+.export-footnote {
+  margin-top: 12px;
+  line-height: 1.6;
+}

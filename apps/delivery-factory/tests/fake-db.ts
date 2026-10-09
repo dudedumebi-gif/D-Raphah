@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
-import type {
-  ClarificationRow,
-  DeliveryDb,
-  FeedbackEventRow,
-  InboxRow,
-  MilestoneRow,
-  MonitoringSnapshot,
-  ProjectRow,
+import {
+  KPI_MEASUREMENT_METHOD,
+  type ClarificationRow,
+  type DeliveryDb,
+  type DeliveryEnvironment,
+  type DemoResetSummary,
+  type FeedbackEventRow,
+  type InboxRow,
+  type MilestoneRow,
+  type MonitoringSnapshot,
+  type ProjectKpiRow,
+  type ProjectRow,
 } from "../api/_lib/db.js";
 import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
 
@@ -19,6 +23,7 @@ export class FakeDeliveryDb implements DeliveryDb {
   nonces = new Set<string>();
   inboxes = new Map<string, InboxRow & { project_id: string | null }>();
   projects = new Map<string, ProjectRow>();
+  kpis = new Map<string, ProjectKpiRow[]>();
   milestones = new Map<string, MilestoneRow[]>();
   clarifications = new Map<string, ClarificationRow[]>();
   events: Array<{ projectId: string | null; event: Record<string, unknown> }> =
@@ -61,6 +66,7 @@ export class FakeDeliveryDb implements DeliveryDb {
     pkg: LeadEngineHandoffPackage;
     manifestChecksum: string;
     signature: string;
+    environment: DeliveryEnvironment;
   }): Promise<{ inboxId: string; project: ProjectRow }> {
     if (this.inboxes.has(input.idempotencyKey)) {
       throw new Error("duplicate idempotency key");
@@ -77,6 +83,7 @@ export class FakeDeliveryDb implements DeliveryDb {
       organization_name: pkg.organization.name,
       name: pkg.organization.name,
       status: "active",
+      environment: input.environment,
       current_stage: "intake",
       baseline_version: pkg.requirementBaseline.version,
       requirements_count: pkg.requirementBaseline.requirements.length,
@@ -91,10 +98,30 @@ export class FakeDeliveryDb implements DeliveryDb {
       manifest_checksum: input.manifestChecksum,
       signature: input.signature,
       status: "processed",
+      environment: input.environment,
       received_at: new Date().toISOString(),
       project_id: projectId,
     });
     this.projects.set(projectId, project);
+    this.kpis.set(
+      projectId,
+      (pkg.successMeasures ?? [])
+        .filter((m) => m?.metric)
+        .map((m) => ({
+          id: randomUUID(),
+          project_id: projectId,
+          metric: m.metric,
+          target: m.target,
+          measurement: KPI_MEASUREMENT_METHOD,
+          status: "pending" as const,
+          measured_value: null,
+          verify_note: null,
+          verified_by: null,
+          verified_at: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })),
+    );
     this.milestones.set(
       projectId,
       [
@@ -115,8 +142,72 @@ export class FakeDeliveryDb implements DeliveryDb {
     return { inboxId, project };
   }
 
+  async resetDemoEnvironment(): Promise<DemoResetSummary> {
+    // The fake keeps no workflow_runs store; runs are covered by the
+    // engine-level fakes in the workflow suites.
+    let projects = 0;
+    for (const [id, project] of this.projects) {
+      if (project.environment !== "demo") continue;
+      this.projects.delete(id);
+      this.kpis.delete(id);
+      this.milestones.delete(id);
+      this.clarifications.delete(id);
+      projects += 1;
+    }
+    let inbox = 0;
+    for (const [key, row] of this.inboxes) {
+      if (row.environment !== "demo") continue;
+      this.inboxes.delete(key);
+      inbox += 1;
+    }
+    return { workflowRuns: 0, projects, inbox };
+  }
+
   async getProject(id: string): Promise<ProjectRow | null> {
     return this.projects.get(id) ?? null;
+  }
+
+  async getProjectPackage(projectId: string): Promise<{
+    package: LeadEngineHandoffPackage;
+    manifestChecksum: string;
+    receivedAt: string;
+  } | null> {
+    const project = this.projects.get(projectId);
+    if (!project) return null;
+    const inbox = [...this.inboxes.values()].find(
+      (row) => row.id === project.inbox_id,
+    );
+    if (!inbox) return null;
+    return {
+      package: inbox.package,
+      manifestChecksum: inbox.manifest_checksum,
+      receivedAt: inbox.received_at,
+    };
+  }
+
+  async listProjectKpis(projectId: string): Promise<ProjectKpiRow[]> {
+    return this.kpis.get(projectId) ?? [];
+  }
+
+  async verifyProjectKpi(input: {
+    projectId: string;
+    kpiId: string;
+    status: "met" | "missed";
+    measuredValue?: string;
+    note?: string;
+    verifiedBy: string;
+  }): Promise<ProjectKpiRow> {
+    const kpi = this.kpis
+      .get(input.projectId)
+      ?.find((k) => k.id === input.kpiId);
+    if (!kpi) throw new Error("KPI not found");
+    kpi.status = input.status;
+    kpi.measured_value = input.measuredValue ?? null;
+    kpi.verify_note = input.note ?? null;
+    kpi.verified_by = input.verifiedBy;
+    kpi.verified_at = new Date().toISOString();
+    kpi.updated_at = new Date().toISOString();
+    return kpi;
   }
 
   async listMilestones(projectId: string): Promise<MilestoneRow[]> {
@@ -243,6 +334,7 @@ export class FakeDeliveryDb implements DeliveryDb {
           opportunityId: pkg.opportunityId,
           organizationName: pkg.organization.name,
           status: inbox.status,
+          environment: inbox.environment,
           receivedAt: inbox.received_at,
           projectId: project?.id ?? null,
           projectStage: project?.current_stage ?? null,

@@ -16,6 +16,29 @@ import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
 
 export type NeonClient = ReturnType<typeof neon>;
 
+/**
+ * Environment scope for Delivery Factory records (Phase 0 environment
+ * separation). Every client-data row — workflow, run, delivery project,
+ * handoff inbox entry — belongs to exactly one environment. 'demo' holds
+ * the pilot/demo fixtures and anything accepted by a non-production intake
+ * deployment; 'production' holds real client work. The scopes never mix:
+ * list endpoints filter by environment, and lead_handoff automation only
+ * fires inside the scope a package was accepted into.
+ */
+export type DeliveryEnvironment = "demo" | "production";
+
+/** Parse an untrusted value into a DeliveryEnvironment, or null. */
+export function parseDeliveryEnvironment(
+  value: unknown,
+): DeliveryEnvironment | null {
+  return value === "demo" || value === "production" ? value : null;
+}
+
+/** Normalize a stored row value; pre-Phase-0 rows read as production. */
+export function rowEnvironment(value: unknown): DeliveryEnvironment {
+  return value === "demo" ? "demo" : "production";
+}
+
 let database: NeonClient | null = null;
 
 function requiredEnv(name: string): string {
@@ -36,7 +59,7 @@ export async function assertDeliveryDatabaseReady(
     select version from public.schema_versions
     where service='delivery-factory' limit 1
   `) as unknown as Array<{ version: string }>;
-  if (rows[0]?.version !== "1.1.0")
+  if (rows[0]?.version !== "1.3.0")
     throw new Error("Database readiness failed: incompatible schema version");
 }
 
@@ -47,6 +70,7 @@ export interface InboxRow {
   manifest_checksum: string;
   signature: string;
   status: string;
+  environment: DeliveryEnvironment;
   received_at: string;
   project_id: string | null;
 }
@@ -60,6 +84,7 @@ export interface ProjectRow {
   organization_name: string;
   name: string | null;
   status: string;
+  environment: DeliveryEnvironment;
   current_stage: string;
   baseline_version: number;
   requirements_count: number;
@@ -77,6 +102,34 @@ export interface MilestoneRow {
   completed_at: string | null;
 }
 
+export type KpiStatus = "pending" | "met" | "missed";
+
+/**
+ * A testable KPI restated from one of the handoff package's
+ * successMeasures at intake (Phase 1). `measurement` records how the KPI
+ * is verified; the verdict fields are written when an operator verifies
+ * the KPI against real run/audit data after the automation ships.
+ */
+export interface ProjectKpiRow {
+  id: string;
+  project_id: string;
+  metric: string;
+  target: string;
+  measurement: string;
+  status: KpiStatus;
+  measured_value: string | null;
+  verify_note: string | null;
+  verified_by: string | null;
+  verified_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** How charter KPIs are measured (stored on every seeded KPI row). */
+export const KPI_MEASUREMENT_METHOD =
+  "Verified by the operator against Delivery Factory workflow run history " +
+  "and the delivery audit log for this project.";
+
 export interface ClarificationRow {
   id: string;
   project_id: string;
@@ -93,6 +146,13 @@ export interface FeedbackEventRow {
   created_at: string;
 }
 
+/** Counts returned by a demo-environment reset. */
+export interface DemoResetSummary {
+  workflowRuns: number;
+  projects: number;
+  inbox: number;
+}
+
 /**
  * Port interface for every database operation the API needs. The Vercel
  * handlers receive a DeliveryDb; unit tests substitute an in-memory fake so
@@ -106,8 +166,35 @@ export interface DeliveryDb {
     pkg: LeadEngineHandoffPackage;
     manifestChecksum: string;
     signature: string;
+    environment: DeliveryEnvironment;
   }): Promise<{ inboxId: string; project: ProjectRow }>;
+  /**
+   * Clear the demo environment's operational data — demo workflow runs,
+   * demo delivery projects, demo handoff inbox entries (child rows follow
+   * via ON DELETE CASCADE). Demo workflow *definitions* are fixtures and
+   * are kept, so the demo is immediately usable again. Production rows are
+   * never touched.
+   */
+  resetDemoEnvironment(): Promise<DemoResetSummary>;
   getProject(id: string): Promise<ProjectRow | null>;
+  /**
+   * The handoff package a project was accepted from (its charter source),
+   * with intake provenance. Null when the project has no inbox package.
+   */
+  getProjectPackage(projectId: string): Promise<{
+    package: LeadEngineHandoffPackage;
+    manifestChecksum: string;
+    receivedAt: string;
+  } | null>;
+  listProjectKpis(projectId: string): Promise<ProjectKpiRow[]>;
+  verifyProjectKpi(input: {
+    projectId: string;
+    kpiId: string;
+    status: "met" | "missed";
+    measuredValue?: string;
+    note?: string;
+    verifiedBy: string;
+  }): Promise<ProjectKpiRow>;
   listMilestones(projectId: string): Promise<MilestoneRow[]>;
   listClarifications(projectId: string): Promise<ClarificationRow[]>;
   listProjectEvents(projectId: string): Promise<FeedbackEventRow[]>;
@@ -168,6 +255,7 @@ export interface MonitoringHandoff {
   opportunityId: string;
   organizationName: string;
   status: string;
+  environment: DeliveryEnvironment;
   receivedAt: string;
   projectId: string | null;
   projectStage: string | null;
@@ -209,7 +297,8 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
     async findInboxByIdempotencyKey(key: string): Promise<InboxRow | null> {
       const rows = (await client`
         select i.id, i.idempotency_key, i.package, i.manifest_checksum,
-               i.signature, i.status, i.received_at, p.id as project_id
+               i.signature, i.status, i.environment, i.received_at,
+               p.id as project_id
         from public.handoff_inbox i
         left join public.delivery_projects p on p.inbox_id = i.id
         where i.idempotency_key = ${key}
@@ -223,18 +312,21 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
       pkg: LeadEngineHandoffPackage;
       manifestChecksum: string;
       signature: string;
+      environment: DeliveryEnvironment;
     }): Promise<{ inboxId: string; project: ProjectRow }> {
       const pkg = input.pkg;
       const inboxRows = (await client`
         insert into public.handoff_inbox(
-          idempotency_key, package, manifest_checksum, signature, status
+          idempotency_key, package, manifest_checksum, signature, status,
+          environment
         )
         values (
           ${input.idempotencyKey},
           ${JSON.stringify(pkg)}::jsonb,
           ${input.manifestChecksum},
           ${input.signature},
-          'processed'
+          'processed',
+          ${input.environment}
         )
         on conflict (idempotency_key) do nothing
         returning id
@@ -254,7 +346,7 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
       const projectRows = (await client`
         insert into public.delivery_projects(
           inbox_id, package_id, package_version, opportunity_id,
-          organization_name, name, current_stage,
+          organization_name, name, current_stage, environment,
           baseline_version, requirements_count, features_count
         )
         values (
@@ -265,6 +357,7 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
           ${pkg.organization.name},
           ${pkg.organization.name},
           'intake',
+          ${input.environment},
           ${pkg.requirementBaseline.version},
           ${pkg.requirementBaseline.requirements.length},
           ${pkg.requirementBaseline.features.length}
@@ -278,6 +371,17 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
           values (${project.id}::uuid, ${title})
         `;
       }
+      // Charter KPIs: restate the package's success measures as testable
+      // KPI rows (Phase 1). The package stays the source of truth; these
+      // rows carry the post-build verification verdicts.
+      for (const measure of pkg.successMeasures ?? []) {
+        if (!measure?.metric) continue;
+        await client`
+          insert into public.project_kpis(project_id, metric, target, measurement)
+          values (${project.id}::uuid, ${measure.metric}, ${measure.target},
+                  ${KPI_MEASUREMENT_METHOD})
+        `;
+      }
       await client`
         insert into public.stage_history(project_id, from_stage, to_stage, changed_by)
         values (${project.id}::uuid, 'intake', 'intake', 'system:intake')
@@ -285,11 +389,93 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
       return { inboxId, project };
     },
 
+    async resetDemoEnvironment(): Promise<DemoResetSummary> {
+      // Child rows (run steps, milestones, stage history, clarifications,
+      // feedback events, linked projects) follow via ON DELETE CASCADE.
+      // Demo workflow definitions are fixtures and intentionally kept.
+      const runs = (await client`
+        delete from public.workflow_runs
+        where environment = 'demo'
+        returning id
+      `) as unknown as Array<{ id: string }>;
+      const projects = (await client`
+        delete from public.delivery_projects
+        where environment = 'demo'
+        returning id
+      `) as unknown as Array<{ id: string }>;
+      const inbox = (await client`
+        delete from public.handoff_inbox
+        where environment = 'demo'
+        returning id
+      `) as unknown as Array<{ id: string }>;
+      return {
+        workflowRuns: runs.length,
+        projects: projects.length,
+        inbox: inbox.length,
+      };
+    },
+
     async getProject(id: string): Promise<ProjectRow | null> {
       const rows = (await client`
         select * from public.delivery_projects where id = ${id}::uuid limit 1
       `) as unknown as ProjectRow[];
       return rows[0] ?? null;
+    },
+
+    async getProjectPackage(projectId: string): Promise<{
+      package: LeadEngineHandoffPackage;
+      manifestChecksum: string;
+      receivedAt: string;
+    } | null> {
+      const rows = (await client`
+        select i.package, i.manifest_checksum, i.received_at
+        from public.delivery_projects p
+        join public.handoff_inbox i on i.id = p.inbox_id
+        where p.id = ${projectId}::uuid
+        limit 1
+      `) as unknown as Array<{
+        package: LeadEngineHandoffPackage;
+        manifest_checksum: string;
+        received_at: string;
+      }>;
+      const row = rows[0];
+      if (!row) return null;
+      return {
+        package: row.package,
+        manifestChecksum: row.manifest_checksum,
+        receivedAt: String(row.received_at),
+      };
+    },
+
+    async listProjectKpis(projectId: string): Promise<ProjectKpiRow[]> {
+      return (await client`
+        select * from public.project_kpis
+        where project_id = ${projectId}::uuid
+        order by created_at
+      `) as unknown as ProjectKpiRow[];
+    },
+
+    async verifyProjectKpi(input: {
+      projectId: string;
+      kpiId: string;
+      status: "met" | "missed";
+      measuredValue?: string;
+      note?: string;
+      verifiedBy: string;
+    }): Promise<ProjectKpiRow> {
+      const rows = (await client`
+        update public.project_kpis
+        set status = ${input.status},
+            measured_value = ${input.measuredValue ?? null},
+            verify_note = ${input.note ?? null},
+            verified_by = ${input.verifiedBy},
+            verified_at = now(),
+            updated_at = now()
+        where id = ${input.kpiId}::uuid and project_id = ${input.projectId}::uuid
+        returning *
+      `) as unknown as ProjectKpiRow[];
+      if (rows.length === 0) throw new Error("KPI not found");
+      return rows[0];
     },
 
     async listMilestones(projectId: string): Promise<MilestoneRow[]> {
@@ -447,7 +633,7 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
                (i.package->>'packageVersion')::int as package_version,
                (i.package->>'opportunityId') as opportunity_id,
                (i.package->'organization'->>'name') as organization_name,
-               i.status, i.received_at,
+               i.status, i.environment, i.received_at,
                p.id as project_id, p.current_stage as project_stage
         from public.handoff_inbox i
         left join public.delivery_projects p on p.inbox_id = i.id
@@ -461,6 +647,7 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
         opportunity_id: string | null;
         organization_name: string | null;
         status: string;
+        environment: string | null;
         received_at: string | Date;
         project_id: string | null;
         project_stage: string | null;
@@ -484,6 +671,7 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
           opportunityId: h.opportunity_id ?? "",
           organizationName: h.organization_name ?? "",
           status: h.status,
+          environment: rowEnvironment(h.environment),
           receivedAt:
             h.received_at instanceof Date
               ? h.received_at.toISOString()

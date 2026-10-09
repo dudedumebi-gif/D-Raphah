@@ -9,7 +9,7 @@ import {
   type DeliveryFeedbackEventV1,
   type LeadEngineHandoffPackage,
 } from "@raphah/handoff-contract";
-import type { DeliveryDb } from "./db.js";
+import type { DeliveryDb, DeliveryEnvironment } from "./db.js";
 
 /**
  * Intake verification for POST /api/intake.
@@ -58,13 +58,29 @@ export interface IntakeResult {
 export interface IntakeHooks {
   /**
    * Best-effort automation after a 201 accept: offer the accepted package to
-   * published lead_handoff workflows. Invoked only on fresh accepts — never
-   * on idempotent replays. May throw; handleIntake isolates the failure so
-   * the accepted intake still returns 201.
+   * published lead_handoff workflows *in the environment scope the package
+   * was accepted into*. Invoked only on fresh accepts — never on idempotent
+   * replays. May throw; handleIntake isolates the failure so the accepted
+   * intake still returns 201.
    */
   onHandoffAccepted?: (
     pkg: LeadEngineHandoffPackage,
+    environment: DeliveryEnvironment,
   ) => Promise<unknown>;
+}
+
+/**
+ * Environment scope for an accepted package (Phase 0 separation). The
+ * scope derives from this deployment's own intake environment: a
+ * production deployment accepts into 'production'; local/preview/test
+ * deployments accept into 'demo'. A test handoff therefore can never
+ * pollute production data or fire production automation, and production
+ * automation only ever sees production accepts.
+ */
+export function intakeEnvironmentScope(
+  env: IntakeEnv,
+): DeliveryEnvironment {
+  return env.environment === "production" ? "production" : "demo";
 }
 
 export function readIntakeEnv(): IntakeEnv {
@@ -399,6 +415,7 @@ export async function handleIntake(
   }
 
   // (f) Idempotency: a known key is a replay of an already-accepted package.
+  const scope = intakeEnvironmentScope(env);
   const existing = await db.findInboxByIdempotencyKey(idempotencyKey);
   if (existing?.project_id) {
     return {
@@ -409,6 +426,7 @@ export async function handleIntake(
         projectId: existing.project_id,
         packageId: pkg.packageId,
         packageVersion: pkg.packageVersion,
+        environment: existing.environment ?? scope,
         message: "Package already accepted (idempotent replay).",
       },
     };
@@ -419,6 +437,7 @@ export async function handleIntake(
     pkg,
     manifestChecksum,
     signature,
+    environment: scope,
   });
   await db.enqueueFeedbackEvent({
     projectId: project.id,
@@ -438,7 +457,7 @@ export async function handleIntake(
   // earlier, so they never re-execute workflows.
   if (hooks.onHandoffAccepted) {
     try {
-      await hooks.onHandoffAccepted(pkg);
+      await hooks.onHandoffAccepted(pkg, scope);
     } catch (error) {
       await db.enqueueFeedbackEvent({
         projectId: project.id,
@@ -465,6 +484,7 @@ export async function handleIntake(
       packageId: pkg.packageId,
       packageVersion: pkg.packageVersion,
       schemaVersion: HANDOFF_SCHEMA_VERSION,
+      environment: scope,
       message: "Handoff package accepted.",
     },
   };

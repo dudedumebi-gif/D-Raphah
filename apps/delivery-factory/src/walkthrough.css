@@ -1,0 +1,256 @@
+/* Demo walkthrough mode (Phase 3) — dark workflows surface. */
+.wt {
+  color: #dbe2f5;
+  background: #0d1226;
+  border-radius: 14px;
+  padding: 22px;
+}
+.wt-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.wt-head h2 {
+  margin: 4px 0 6px;
+  font-size: 22px;
+  color: #eef1fb;
+}
+.wt-case {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 900px) {
+  .wt-case {
+    grid-template-columns: 1fr;
+  }
+}
+.wt-case-main,
+.wt-manual,
+.wt-runbar,
+.wt-player {
+  background: #141a2e;
+  border: 1px solid #232c49;
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+.wt-case-main h3 {
+  margin: 0 0 8px;
+  color: #eef1fb;
+}
+.wt-case-main p {
+  line-height: 1.6;
+}
+.wt-inquiry {
+  margin: 14px 0;
+  padding: 12px 16px;
+  border-left: 3px solid #4f7cff;
+  background: #101a33;
+  border-radius: 0 8px 8px 0;
+  line-height: 1.6;
+}
+.wt-inquiry footer {
+  margin-top: 6px;
+  color: #8b93ad;
+  font-size: 12.5px;
+}
+.wt-measures h4,
+.wt-manual h4 {
+  margin: 12px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8b93ad;
+}
+.wt-measures ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+.wt-manual-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 12px;
+}
+.wt-manual-list li {
+  line-height: 1.5;
+}
+.wt-manual-list li span {
+  display: block;
+  color: #a5adca;
+}
+.wt-manual-list li.eliminated {
+  opacity: 0.75;
+}
+.wt-manual-list li.eliminated b {
+  text-decoration: line-through;
+  text-decoration-color: #f08a8a;
+}
+.wt-runbar {
+  margin-top: 16px;
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.wt-runbar label {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  color: #8b93ad;
+}
+.wt-runbar select {
+  background: #0c1122;
+  border: 1px solid #2c3760;
+  border-radius: 7px;
+  color: #e6ebfa;
+  padding: 9px 11px;
+  font: 500 13.5px Manrope, sans-serif;
+  min-width: 300px;
+}
+.wt-run {
+  padding: 11px 20px;
+  font-size: 14px;
+}
+.wt-player-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.wt-dots {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0 18px;
+}
+.wt-dot {
+  width: 30px;
+  height: 8px;
+  border-radius: 99px;
+  border: 0;
+  background: #2a2f45;
+  cursor: pointer;
+  padding: 0;
+}
+.wt-dot.completed {
+  background: #2c5c46;
+}
+.wt-dot.failed {
+  background: #6e2b2b;
+}
+.wt-dot.active {
+  background: #4f7cff;
+}
+.wt-dot.finale {
+  background: #3c3464;
+}
+.wt-dot.finale.active {
+  background: #8b75d1;
+}
+.wt-step-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.wt-step-head h3 {
+  margin: 0;
+  color: #eef1fb;
+}
+.wt-approval {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #ffd479;
+  background: #3a2f14;
+  border: 1px solid #6b5518;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.wt-versus {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 14px;
+}
+@media (max-width: 900px) {
+  .wt-versus {
+    grid-template-columns: 1fr;
+  }
+}
+.wt-side {
+  border-radius: 10px;
+  padding: 14px 16px;
+  line-height: 1.6;
+}
+.wt-side h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.wt-side.manual {
+  background: #1d1626;
+  border: 1px solid #3d2b4d;
+}
+.wt-side.manual h4 {
+  color: #c9a0dc;
+}
+.wt-side.auto {
+  background: #0f1d33;
+  border: 1px solid #23406e;
+}
+.wt-side.auto h4 {
+  color: #7fb0ff;
+}
+.wt-output {
+  margin: 12px 0 0;
+  display: grid;
+  gap: 8px;
+}
+.wt-output div {
+  background: #0c1425;
+  border-radius: 8px;
+  padding: 8px 11px;
+}
+.wt-output dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #7d94c4;
+}
+.wt-output dd {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wt-step-error {
+  color: #f0a3a3;
+}
+.wt-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+}
+.wt-finale-block {
+  margin-top: 18px;
+}
+.wt-finale-block h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8b93ad;
+}
+.wt-audit {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.8;
+}
+.wt-measures-check {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.8;
+}

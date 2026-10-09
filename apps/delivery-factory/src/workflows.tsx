@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAuthToken, notifyUnauthorized } from "./auth";
+import type { DeliveryEnvironment } from "./environment";
+import { WalkthroughView } from "./walkthrough";
+import { ExportPanel } from "./export-panel";
 
 /* ── Types (mirror api/_lib/workflows.ts) ─────────────────────────────── */
 
@@ -46,6 +49,7 @@ interface WorkflowSummary {
   id: string;
   name: string;
   status: "draft" | "published" | "archived";
+  environment: DeliveryEnvironment;
   trigger_type: string;
   updated_at: string;
 }
@@ -71,6 +75,7 @@ interface RunStep {
 interface WorkflowRun {
   id: string;
   status: string;
+  environment: DeliveryEnvironment;
   trigger_type: string;
   error: string | null;
   started_at: string;
@@ -113,6 +118,8 @@ function WorkflowList(props: {
   onOpen: (id: string) => void;
   onNew: () => void;
   refreshToken: number;
+  environment: DeliveryEnvironment;
+  onWalkthrough?: () => void;
 }) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -120,7 +127,9 @@ function WorkflowList(props: {
 
   useEffect(() => {
     setLoading(true);
-    api<{ workflows: WorkflowSummary[] }>("/api/workflows")
+    api<{ workflows: WorkflowSummary[] }>(
+      `/api/workflows?environment=${props.environment}`,
+    )
       .then((d) => {
         setWorkflows(d.workflows);
         setError(null);
@@ -129,7 +138,7 @@ function WorkflowList(props: {
         setError(e instanceof Error ? e.message : "Failed to load"),
       )
       .finally(() => setLoading(false));
-  }, [props.refreshToken]);
+  }, [props.refreshToken, props.environment]);
 
   return (
     <div className="wf-list">
@@ -138,19 +147,28 @@ function WorkflowList(props: {
           <h2>Automation workflows</h2>
           <p className="muted">
             Visual, auditable automations — triggers, actions and logic gates.
-            Every run is recorded step by step.
+            Every run is recorded step by step. Showing the{" "}
+            <strong>{props.environment}</strong> environment — demo and
+            production workflows never mix.
           </p>
         </div>
-        <button className="btn-primary" onClick={props.onNew}>
-          + New workflow
-        </button>
+        <div className="wf-list-actions">
+          {props.onWalkthrough ? (
+            <button className="btn-ghost" onClick={props.onWalkthrough}>
+              ▶ Demo walkthrough
+            </button>
+          ) : null}
+          <button className="btn-primary" onClick={props.onNew}>
+            + New workflow
+          </button>
+        </div>
       </div>
       {loading && <p className="muted">Loading…</p>}
       {error && <p className="wf-error">{error}</p>}
       {!loading && !error && workflows.length === 0 && (
         <p className="muted">
-          No workflows yet. Create one to automate lead follow-up, status
-          updates, notifications and more.
+          No workflows in the {props.environment} environment yet. Create one
+          to automate lead follow-up, status updates, notifications and more.
         </p>
       )}
       <div className="wf-cards">
@@ -163,7 +181,7 @@ function WorkflowList(props: {
             <span className={`wf-badge wf-badge-${w.status}`}>{w.status}</span>
             <span className="wf-card-name">{w.name}</span>
             <span className="wf-card-meta">
-              {w.trigger_type} · updated{" "}
+              {w.trigger_type} · {w.environment} · updated{" "}
               {new Date(w.updated_at).toLocaleString()}
             </span>
           </button>
@@ -803,9 +821,13 @@ function RunHistory(props: { workflowId: string }) {
 
 /* ── Top-level section ───────────────────────────────────────────────── */
 
-export function WorkflowsSection() {
+export function WorkflowsSection(props: {
+  environment: DeliveryEnvironment;
+}) {
   const [catalog, setCatalog] = useState<NodeSpec[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [walkthroughOpen, setWalkthroughOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [workflow, setWorkflow] = useState<WorkflowDetail | null>(null);
   const [tab, setTab] = useState<"builder" | "runs">("builder");
   const [name, setName] = useState("");
@@ -838,6 +860,7 @@ export function WorkflowsSection() {
       method: "POST",
       body: JSON.stringify({
         name: "Untitled workflow",
+        environment: props.environment,
         trigger_type: "manual",
         nodes: [],
         edges: [],
@@ -850,7 +873,7 @@ export function WorkflowsSection() {
       .catch((e: unknown) =>
         setNotice(e instanceof Error ? e.message : "Failed to create"),
       );
-  }, [open]);
+  }, [open, props.environment]);
 
   const save = useCallback(async () => {
     if (!workflow) return;
@@ -924,6 +947,14 @@ export function WorkflowsSection() {
     setRefreshToken((t) => t + 1);
   };
 
+  if (walkthroughOpen && props.environment === "demo" && !openId) {
+    return (
+      <div className="wf-section">
+        <WalkthroughView onClose={() => setWalkthroughOpen(false)} />
+      </div>
+    );
+  }
+
   if (!openId || !workflow) {
     return (
       <div className="wf-section">
@@ -932,6 +963,12 @@ export function WorkflowsSection() {
           onOpen={open}
           onNew={createNew}
           refreshToken={refreshToken}
+          environment={props.environment}
+          onWalkthrough={
+            props.environment === "demo"
+              ? () => setWalkthroughOpen(true)
+              : undefined
+          }
         />
       </div>
     );
@@ -955,6 +992,7 @@ export function WorkflowsSection() {
         <span className={`wf-badge wf-badge-${workflow.status}`}>
           {workflow.status}
         </span>
+        <span className="wf-badge wf-badge-env">{workflow.environment}</span>
         <div className="wf-tabs">
           <button
             className={tab === "builder" ? "active" : ""}
@@ -970,6 +1008,9 @@ export function WorkflowsSection() {
           </button>
         </div>
         <div className="wf-actions">
+          <button className="btn-ghost" onClick={() => setExportOpen(true)}>
+            Export
+          </button>
           <button
             className="btn-ghost"
             onClick={save}
@@ -1013,6 +1054,12 @@ export function WorkflowsSection() {
       ) : (
         <RunHistory workflowId={workflow.id} />
       )}
+      {exportOpen ? (
+        <ExportPanel
+          workflow={workflow}
+          onClose={() => setExportOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

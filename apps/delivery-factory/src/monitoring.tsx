@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getAuthToken, notifyUnauthorized } from "./auth";
+import { CharterPanel } from "./charter";
 
 /* ── Monitoring view ────────────────────────────────────────────────────
  * Service liveness, readiness, handoff intake activity, feedback outbox
@@ -37,6 +38,7 @@ interface HandoffRow {
   opportunityId: string;
   organizationName: string;
   status: string;
+  environment: string;
   receivedAt: string;
   projectId: string | null;
   projectStage: string | null;
@@ -148,6 +150,7 @@ export function MonitoringSection() {
   const [readyDetail, setReadyDetail] = useState("Checking…");
   const [snapshot, setSnapshot] = useState<MonitoringSnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [charterProjectId, setCharterProjectId] = useState<string | null>(null);
   const [lastPoll, setLastPoll] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
 
@@ -459,6 +462,7 @@ export function MonitoringSection() {
                   </td>
                   <td>
                     <span className={`mon-pill ${h.status}`}>{h.status}</span>
+                    <small> · {h.environment}</small>
                   </td>
                   <td>
                     {h.projectId ? (
@@ -467,6 +471,13 @@ export function MonitoringSection() {
                         {h.projectStage ? (
                           <small> · {h.projectStage}</small>
                         ) : null}
+                        <button
+                          type="button"
+                          className="mon-charter-btn"
+                          onClick={() => setCharterProjectId(h.projectId)}
+                        >
+                          Charter
+                        </button>
                       </span>
                     ) : (
                       "—"
@@ -478,6 +489,12 @@ export function MonitoringSection() {
           </table>
         )}
       </div>
+      {charterProjectId ? (
+        <CharterPanel
+          projectId={charterProjectId}
+          onClose={() => setCharterProjectId(null)}
+        />
+      ) : null}
     </div>
   );
 }
