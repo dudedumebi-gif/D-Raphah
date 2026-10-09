@@ -355,15 +355,40 @@ function outputHighlights(
   return entries;
 }
 
-function draftTextBefore(stages: Stage[], upto: number): string | null {
-  for (let i = upto - 1; i >= 0; i--) {
-    const out = stages[i].step?.output;
-    if (!out) continue;
+/**
+ * The draft the admin reviews at the gate. Drafts are composed either
+ * by an ai_assist step before the send (look backward) or by the send
+ * step itself in draft-first mode (its recorded output IS the held
+ * draft — look forward to the first send step after the gate).
+ */
+function draftForApproval(stages: Stage[], idx: number): string | null {
+  const from = (s: Stage): string | null => {
+    const out = s.step?.output;
+    if (!out) return null;
     for (const key of ["draft", "message", "text", "body"]) {
       if (typeof out[key] === "string" && out[key]) return out[key] as string;
     }
+    return null;
+  };
+  for (let i = idx - 1; i >= 0; i--) {
+    const t = from(stages[i]);
+    if (t) return t;
+  }
+  for (let i = idx + 1; i < stages.length; i++) {
+    const s = stages[i];
+    if (s.kind === "step" && s.step && SEND_KINDS.has(s.step.node_kind)) {
+      const t = from(s);
+      if (t) return t;
+    }
   }
   return null;
+}
+
+interface DraftVersion {
+  text: string;
+  /** The admin note that produced this version (null for the engine's). */
+  note: string | null;
+  provider: "engine" | "llm" | "stub";
 }
 
 function runSeconds(run: WorkflowRun): number | null {
@@ -454,6 +479,12 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
   const [approval, setApproval] = useState<
     "pending" | "approved" | "changes" | null
   >(null);
+  const [draftVersions, setDraftVersions] = useState<DraftVersion[]>([]);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [revising, setRevising] = useState(false);
+  const [reviseError, setReviseError] = useState<string | null>(null);
+  const [gateLog, setGateLog] = useState<string[]>([]);
 
   const demoCase = CASES.find((c) => c.id === caseId) ?? CASES[0];
 
@@ -513,8 +544,71 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
             Math.min(stageIndex, demoCase.manualSteps.length - 1)
         ]
       : null;
-  const pendingDraft =
-    stage?.kind === "approval" ? draftTextBefore(stages, stageIndex) : null;
+  const currentDraft: DraftVersion | null =
+    draftVersions[draftVersions.length - 1] ?? null;
+  const draftVersionNo = draftVersions.length;
+
+  // Seed the gate with the draft the engine recorded for this run.
+  useEffect(() => {
+    if (!run) return;
+    const idx = stages.findIndex((s) => s.kind === "approval");
+    const text = idx >= 0 ? draftForApproval(stages, idx) : null;
+    setDraftVersions(
+      text ? [{ text, note: null, provider: "engine" }] : [],
+    );
+    setGateLog([]);
+    setFeedbackOpen(false);
+    setFeedbackText("");
+    setReviseError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run]);
+
+  const submitRevision = useCallback(async () => {
+    const note = feedbackText.trim();
+    if (!note || !currentDraft || !run) return;
+    setRevising(true);
+    setReviseError(null);
+    try {
+      const r = await api<{
+        revision: {
+          revisedDraft: string | null;
+          provider: "llm" | "stub";
+          note: string;
+        };
+      }>("/api/workflows/drafts/revise", {
+        method: "POST",
+        body: JSON.stringify({
+          draft: currentDraft.text,
+          feedback: note,
+          runId: run.id,
+          workflowId: selectedId,
+        }),
+      });
+      const nextNo = draftVersions.length + 1;
+      setDraftVersions((v) => [
+        ...v,
+        {
+          text: r.revision.revisedDraft ?? currentDraft.text,
+          note,
+          provider: r.revision.provider,
+        },
+      ]);
+      setGateLog((l) => [
+        ...l,
+        r.revision.provider === "llm"
+          ? `Admin requested changes: “${note}” — the AI redrafted it (draft v${nextNo}).`
+          : `Admin requested changes: “${note}” — no AI provider is configured, so the note is recorded with the draft and the text is unchanged.`,
+      ]);
+      setFeedbackText("");
+      setFeedbackOpen(false);
+    } catch (e: unknown) {
+      setReviseError(
+        e instanceof Error ? e.message : "The redraft request failed",
+      );
+    } finally {
+      setRevising(false);
+    }
+  }, [feedbackText, currentDraft, run, selectedId, draftVersions.length]);
 
   const execute = useCallback(async () => {
     if (!selectedId) return;
@@ -523,6 +617,8 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
     setRun(null);
     setStageIndex(0);
     setApproval(null);
+    setDraftVersions([]);
+    setGateLog([]);
     try {
       const started = await api<{ run: WorkflowRun }>(
         `/api/workflows/${selectedId}/execute`,
@@ -546,6 +642,10 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
     setRun(null);
     setStageIndex(0);
     setApproval(null);
+    setDraftVersions([]);
+    setGateLog([]);
+    setFeedbackOpen(false);
+    setFeedbackText("");
   };
 
   return (
@@ -629,7 +729,8 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
             <ProcessMap stages={planStages} current={null} approval={null} />
             <p className="muted">
               The admin approval stage is the draft-first gate: the engine
-              records the draft, and a human releases it. You will play the
+              records the draft, and a human releases it — or sends it
+              back with a note for the AI to redraft. You will play the
               admin during the run.
             </p>
           </section>
@@ -716,35 +817,102 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
                   <p className="wt-stage-lead">
                     The engine has recorded this draft and is holding it.
                     In live operation an admin approves it here —{" "}
-                    <b>you are the admin now</b>. Approving releases the
-                    message step; requesting changes holds it, and nothing
-                    is sent.
+                    <b>you are the admin now</b>. Read the draft: approving
+                    releases the message step. If it needs work, send it
+                    back with a note — the AI redrafts it with your note
+                    and you decide again. Holding the send means nothing
+                    goes out.
                   </p>
-                  {pendingDraft ? (
-                    <blockquote className="wt-draft-card">
-                      “{pendingDraft}”
-                    </blockquote>
-                  ) : null}
-                  {approval == null ? (
-                    <div className="wt-approval-actions">
-                      <button
-                        className="btn-primary"
-                        onClick={() => setApproval("approved")}
-                      >
-                        ✓ Approve draft
-                      </button>
-                      <button
-                        className="btn-ghost"
-                        onClick={() => setApproval("changes")}
-                      >
-                        Request changes — hold the send
-                      </button>
+                  {currentDraft ? (
+                    <div className="wt-draft-wrap">
+                      <div className="wt-draft-label">
+                        {currentDraft.provider === "engine"
+                          ? "The draft under review — exactly as the engine recorded it"
+                          : currentDraft.provider === "llm"
+                            ? `Revised draft v${draftVersionNo} — redrafted with your note`
+                            : `Draft v${draftVersionNo} — redraft pending a provider`}
+                      </div>
+                      <blockquote className="wt-draft-card">
+                        “{currentDraft.text}”
+                      </blockquote>
+                      {currentDraft.note ? (
+                        <p className="wt-draft-note">
+                          Your note: “{currentDraft.note}”
+                          {currentDraft.provider === "stub"
+                            ? " — recorded with the draft. No AI provider is configured in this environment, so the text above is unchanged; with a provider connected, the AI returns a revised draft here."
+                            : " — applied in the revision above."}
+                        </p>
+                      ) : null}
                     </div>
+                  ) : (
+                    <p className="muted">
+                      The engine did not record draft text for this run.
+                    </p>
+                  )}
+                  {approval == null ? (
+                    !feedbackOpen ? (
+                      <div className="wt-approval-actions">
+                        <button
+                          className="btn-primary"
+                          onClick={() => setApproval("approved")}
+                        >
+                          ✓ Approve draft
+                          {draftVersionNo > 1 ? ` v${draftVersionNo}` : ""}
+                        </button>
+                        <button
+                          className="btn-ghost"
+                          onClick={() => setFeedbackOpen(true)}
+                        >
+                          Request changes…
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="wt-feedback">
+                        <label htmlFor="wt-feedback-text">
+                          What should the AI change? Your note goes to the
+                          model with the draft, and the revised draft
+                          comes back here for your decision.
+                        </label>
+                        <textarea
+                          id="wt-feedback-text"
+                          rows={3}
+                          value={feedbackText}
+                          onChange={(e) => setFeedbackText(e.target.value)}
+                          placeholder="e.g. Make it warmer, mention the Oct 28 closing date, and drop the fee estimate."
+                        />
+                        {reviseError ? (
+                          <p className="wf-error">{reviseError}</p>
+                        ) : null}
+                        <div className="wt-approval-actions">
+                          <button
+                            className="btn-primary"
+                            disabled={
+                              revising || !feedbackText.trim() || !currentDraft
+                            }
+                            onClick={() => void submitRevision()}
+                          >
+                            {revising ? "Redrafting…" : "↻ Redraft with my note"}
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            onClick={() => setApproval("changes")}
+                          >
+                            Hold the send instead
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            onClick={() => setFeedbackOpen(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )
                   ) : (
                     <p className="wt-decision">
                       {approval === "approved"
-                        ? "✓ Approved — the message step is released."
-                        : "✎ Changes requested — the send is held. Nothing goes out; the draft returns to the queue with your note."}
+                        ? `✓ Approved — draft v${draftVersionNo} is released to the message step.`
+                        : "✎ The send is held. Nothing goes out; the draft and your notes stay on the record for rework."}
                     </p>
                   )}
                 </>
@@ -781,6 +949,19 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
                       <p className="wt-step-error">
                         Held by the admin — this step did not release. The
                         draft stays recorded for rework.
+                      </p>
+                    ) : null}
+                    {stage?.kind === "step" &&
+                    stageStep &&
+                    SEND_KINDS.has(stageStep.node_kind) &&
+                    approval === "approved" &&
+                    draftVersionNo > 1 &&
+                    currentDraft ? (
+                      <p>
+                        Released: draft v{draftVersionNo}
+                        {currentDraft.provider === "llm"
+                          ? " — the revision the admin approved at the gate."
+                          : " — approved at the gate with the admin's note attached."}
                       </p>
                     ) : null}
                     {stageStep?.error ? (
@@ -831,7 +1012,9 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
               <p className="wt-decision">
                 {approval === "changes"
                   ? "Outcome: the draft was held at the approval gate — nothing was sent. The automation still did its job: drafted in seconds, gated by a human, fully logged."
-                  : "Outcome: drafted, approved by a human, released, and logged — end to end."}
+                  : draftVersionNo > 1
+                    ? `Outcome: drafted, sent back and revised at the gate (v${draftVersionNo}), approved by a human, released, and logged — end to end.`
+                    : "Outcome: drafted, approved by a human, released, and logged — end to end."}
               </p>
               <div className="wt-versus">
                 <div className="wt-side manual">
@@ -871,10 +1054,19 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
                       {s.error ? ` · ${s.error}` : ""}
                     </li>
                   ))}
+                  {gateLog.map((line, i) => (
+                    <li key={`gate-${i}`}>
+                      <code>gate</code> {line}
+                    </li>
+                  ))}
                   {approval ? (
                     <li>
                       <code>gate</code> Admin approval (played by you) —{" "}
-                      <b>{approval === "approved" ? "approved" : "changes requested"}</b>
+                      <b>
+                        {approval === "approved"
+                          ? `approved (draft v${draftVersionNo})`
+                          : "send held"}
+                      </b>
                     </li>
                   ) : null}
                 </ul>

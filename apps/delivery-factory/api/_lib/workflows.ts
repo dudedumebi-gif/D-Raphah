@@ -742,6 +742,66 @@ export interface ExecutionHooks {
   auditLog?: (args: { message: string; level: string }) => Promise<void>;
 }
 
+/* ── Draft revision (the approval gate's redraft loop) ───────────────
+   When an admin sends a draft back with a note, the note and the
+   current draft go to the same AI provider seam the ai_assist node
+   uses. With no provider configured the result is the same honest
+   stub the engine records for ai_assist: the note is preserved
+   verbatim and no revised text is fabricated. */
+
+export interface DraftRevision {
+  revisedDraft: string | null;
+  provider: "llm" | "stub";
+  model: string;
+  note: string;
+}
+
+export async function reviseDraft(
+  args: { draft: string; feedback: string; model?: string },
+  hooks: ExecutionHooks = {},
+): Promise<DraftRevision> {
+  const model = args.model ?? "gpt-4o-mini";
+  if (hooks.aiAssist) {
+    const out = await hooks.aiAssist({
+      model,
+      systemPrompt:
+        "You revise drafted customer messages. Apply the admin's requested changes to the draft and return only the revised message text — no commentary, no surrounding quotes.",
+      userPrompt: `Current draft:\n${args.draft}\n\nAdmin's requested changes:\n${args.feedback}`,
+      maxTokens: 800,
+    });
+    const text =
+      typeof out.output === "string" && out.output
+        ? out.output
+        : typeof out.text === "string" && out.text
+          ? out.text
+          : null;
+    if (text) {
+      return {
+        revisedDraft: text,
+        provider: "llm",
+        model,
+        note: "Revised by the AI provider from the admin's note.",
+      };
+    }
+  }
+  return {
+    revisedDraft: null,
+    provider: "stub",
+    model,
+    note: `[draft stub — no AI provider configured] Revision requested: ${args.feedback.slice(0, 200)}`,
+  };
+}
+
+/** Append a row to the workflow audit log (the engine's own trail). */
+export async function recordWorkflowAudit(
+  db: NeonClient,
+  args: { runId: string; workflowId: string; level: string; message: string },
+): Promise<void> {
+  await q(db)`
+    insert into public.workflow_audit_log (run_id, workflow_id, level, message)
+    values (${args.runId}, ${args.workflowId}, ${args.level}, ${args.message})`;
+}
+
 const DEFAULT_MAX_STEPS = 100;
 
 export async function executeWorkflow(
