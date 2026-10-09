@@ -23,7 +23,8 @@ export type AlertType =
   | "canary_target_mismatch"
   | "scheduled_start_p95_breach"
   | "qstash_delivery_failed"
-  | "soak_passed";
+  | "soak_passed"
+  | "production_gate_passed";
 export type AlertSeverity = "critical" | "warning" | "info";
 export type AlertTransition = "opened" | "reminder" | "resolved" | "unchanged";
 
@@ -84,6 +85,7 @@ function alertTitle(alert: AlertInput, transition: AlertTransition): string {
     scheduled_start_p95_breach: "Scheduled-start p95 breached",
     qstash_delivery_failed: "QStash delivery exhausted retries",
     soak_passed: "72-hour canary soak passed",
+    production_gate_passed: "All production promotion gates passed",
   };
   return `${state}: ${names[alert.type]}`;
 }
@@ -253,13 +255,28 @@ interface CanaryRow {
   target_url?: string | null;
 }
 
+export interface ProductionGateChecks {
+  soakCompletion: boolean;
+  scheduledStartP95: boolean;
+  incidentHealth: boolean;
+  retryRecovery: boolean;
+  auditAndRlsIntegrity: boolean;
+}
+
+export function productionGatePassed(checks: ProductionGateChecks): boolean {
+  return Object.values(checks).every(Boolean);
+}
+
 export async function checkOperationalAlerts(
   client: AlertSqlClient,
   now = new Date(),
 ): Promise<number> {
   const cutoff72h = new Date(now.getTime() - 72 * 3_600_000).toISOString();
   const cutoff73h = new Date(now.getTime() - 73 * 3_600_000).toISOString();
-  const [workspaces, workers, activeCanaries, terminalCanaries, deadLetters, p95Rows, soakRows] =
+  const [
+    workspaces, workers, activeCanaries, terminalCanaries, deadLetters,
+    p95Rows, soakRows, criticalRows, recoveryRows, evidenceRows, integrityRows,
+  ] =
     (await Promise.all([
       client`select id from public.workspaces order by id`,
       client`select id, last_heartbeat_at from public.worker_nodes order by last_heartbeat_at desc limit 1`,
@@ -311,10 +328,80 @@ export async function checkOperationalAlerts(
         where scheduled_at >= ${cutoff73h}::timestamptz
         order by workspace_id, scheduled_at
       `,
+      client`
+        select workspace_id, count(*)::int as critical_open
+        from public.alert_log
+        where status='open' and severity='critical'
+        group by workspace_id
+      `,
+      client`
+        select w.id as workspace_id,
+          count(j.id) filter (
+            where j.attempt_count > 1 and j.status in ('completed','partial')
+          )::int as recovered_count,
+          count(j.id) filter (
+            where j.status='dead_letter'
+              and coalesce(j.completed_at,j.updated_at,j.created_at)
+                  >= ${cutoff72h}::timestamptz
+          )::int as dead_letter_count
+        from public.workspaces w
+        left join public.scrape_jobs j
+          on j.workspace_id=w.id
+         and j.created_at >= ${cutoff72h}::timestamptz
+        group by w.id
+      `,
+      client`
+        select w.id as workspace_id,
+          exists (
+            select 1 from public.audit_events ae
+            where ae.workspace_id=w.id
+              and ae.action='release.retry_dead_letter_recovery.verified'
+          ) as retry_recovery_verified,
+          exists (
+            select 1 from public.audit_events ae
+            where ae.workspace_id=w.id
+              and ae.action='release.rls_behavior.verified'
+          ) as rls_behavior_verified
+        from public.workspaces w
+      `,
+      client`
+        with required_rls(table_name) as (values
+          ('audit_events'), ('discovery_candidates'), ('discovery_checkpoints'),
+          ('discovery_runs'), ('discovery_sources'), ('evidence_artifacts'),
+          ('maturity_assessments'), ('opportunities'),
+          ('organization_source_links'), ('scrape_job_attempts'),
+          ('scrape_jobs'), ('signal_observations'),
+          ('source_collection_reservations'), ('terms_acceptances')
+        ), required_audit(table_name) as (values
+          ('discovery_candidates'), ('discovery_checkpoints'),
+          ('discovery_runs'), ('discovery_sources'), ('evidence_artifacts'),
+          ('maturity_assessments'), ('opportunities'),
+          ('organization_source_links'), ('scrape_job_attempts'),
+          ('scrape_jobs'), ('signal_observations'),
+          ('source_collection_reservations'), ('terms_acceptances')
+        )
+        select
+          (select count(*)=14
+             from required_rls r
+             join pg_class c on c.relname=r.table_name
+             join pg_namespace n on n.oid=c.relnamespace
+            where n.nspname='public' and c.relrowsecurity) as rls_ok,
+          (select count(distinct r.table_name)=13
+             from required_audit r
+             join pg_class c on c.relname=r.table_name
+             join pg_namespace n on n.oid=c.relnamespace
+             join pg_trigger t on t.tgrelid=c.oid
+            where n.nspname='public' and not t.tgisinternal
+              and t.tgname like 'audit_%') as audit_ok
+      `,
     ])) as unknown as [
       WorkspaceRow[], WorkerRow[], CanaryRow[], CanaryRow[],
       Array<{id:string;workspace_id:string;status:string;last_error:string|null}>,
-      Array<{workspace_id:string;p95_ms:number}>, CanaryRow[]
+      Array<{workspace_id:string;p95_ms:number}>, CanaryRow[],
+      Array<{workspace_id:string;critical_open:number}>,
+      Array<{workspace_id:string;recovered_count:number;dead_letter_count:number}>,
+      Array<{workspace_id:string;retry_recovery_verified:boolean;rls_behavior_verified:boolean}>,
+      Array<{rls_ok:boolean;audit_ok:boolean}>
     ];
 
   let notified = 0;
@@ -340,6 +427,7 @@ export async function checkOperationalAlerts(
       nextAction: "Inspect the QStash worker schedule and Vercel function logs, then restore signed deliveries.",
       payload: { workerId: latestWorker?.id ?? null, ageMs: Number.isFinite(ageMs) ? ageMs : null },
     }, now));
+
   }
 
   for (const run of activeCanaries) {
@@ -441,6 +529,51 @@ export async function checkOperationalAlerts(
       payload: soak as unknown as Record<string, unknown>,
       allowReminder: false,
     }, now));
+
+    const p95 = Number(p95Rows.find((row) => row.workspace_id === workspace.id)?.p95_ms);
+    const recovery = recoveryRows.find((row) => row.workspace_id === workspace.id);
+    const evidence = evidenceRows.find((row) => row.workspace_id === workspace.id);
+    const integrity = integrityRows[0];
+    const workerAgeMs = latestWorker
+      ? now.getTime() - new Date(latestWorker.last_heartbeat_at).getTime()
+      : Number.POSITIVE_INFINITY;
+    const currentCritical = workerAgeMs > STALE_AFTER_MS ||
+      activeCanaries.some((run) => run.workspace_id === workspace.id &&
+        ["queued","running"].includes(run.status) &&
+        now.getTime() - new Date(run.scheduled_at).getTime() > STALE_AFTER_MS) ||
+      terminalCanaries.some((run) => run.workspace_id === workspace.id &&
+        (run.status === "failed" || Boolean(expectedTarget && run.target_url !== expectedTarget))) ||
+      deadLetters.some((job) => job.workspace_id === workspace.id && job.status === "dead_letter");
+    const checks: ProductionGateChecks = {
+      soakCompletion: soak.passed,
+      scheduledStartP95: Number.isFinite(p95) && p95 < START_P95_LIMIT_MS,
+      incidentHealth: Number(
+        criticalRows.find((row) => row.workspace_id === workspace.id)?.critical_open ?? 0,
+      ) === 0 && !currentCritical,
+      retryRecovery: (
+        Number(recovery?.recovered_count ?? 0) > 0 ||
+        Boolean(evidence?.retry_recovery_verified)
+      ) &&
+        Number(recovery?.dead_letter_count ?? 0) === 0,
+      auditAndRlsIntegrity: Boolean(
+        integrity?.rls_ok && integrity?.audit_ok && evidence?.rls_behavior_verified,
+      ),
+    };
+    if (productionGatePassed(checks)) {
+      count(await reconcileAlert(client, {
+        workspaceId: workspace.id,
+        type: "production_gate_passed",
+        severity: "info",
+        resourceType: "release_gate",
+        resourceId: `${workspace.id}:production-promotion`,
+        active: true,
+        reason: "All five production promotion checks passed",
+        likelyCause: "The 72-hour soak, latency, incident, recovery, and tenant-control evidence are all green.",
+        nextAction: "Request the product owner's explicit approval before promoting the Lead Engine to production-ready.",
+        payload: { checks, soak, p95Ms: p95, recovery, evidence, integrity },
+        allowReminder: false,
+      }, now));
+    }
   }
   return notified;
 }
