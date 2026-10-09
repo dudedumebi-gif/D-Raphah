@@ -1,6 +1,6 @@
 # Raphah Lead Engine — Production README
 
-Last updated: 2026-10-08
+Last updated: 2026-10-09
 
 Target release: Lead Engine schema/API `3.3.4`
 
@@ -26,6 +26,9 @@ This is the operational handover for the Lead Engine’s permitted-source discov
   dead-letter jobs, target mismatch, scheduled-start p95, exhausted QStash
   delivery, and the passed 72-hour soak. Neon persists and audits every
   transition; Slack receives opens, cooldown reminders, and recoveries.
+- A five-minute production-promotion probe evaluates the complete five-check
+  release gate. It sends one Slack approval request only after all checks are
+  green; it never promotes data or changes the release classification.
 
 ## Source adapters
 
@@ -162,6 +165,28 @@ For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_U
 - PR #16 delivered the adapters and reviewed acceptance dialog; PR #17 repaired the schema compatibility guard; PR #18 repaired retention and demo-mode canary isolation; PR #20 added stateful Slack operations alerts. Each merged only after green CI and green Lead Engine Preview deployment.
 - Production Lead Engine deployment `7bf334cc64213588bd8d695c8eafcdb940e49930` is live. The repaired worker completed a previously stuck canary, and stale pre-soak work remains failed/dead-letter history with audit events rather than active incidents.
 - The 72-hour soak is in progress. At the 2026-10-08 verification snapshot it had 4/72 completed runs (5.56%) with p95 completion near 303 seconds, so the release correctly remains Pilot.
+
+### Automated production-approval probe — 2026-10-09
+
+The independent QStash operations schedule invokes the evaluator every five
+minutes. A one-time `production_gate_passed` Slack alert is created only when
+all five checks below are true for the same workspace:
+
+1. the 72-hour canary evaluator passes at or above 99% completion;
+2. the rolling 72-hour scheduled-start p95 is below 300,000 ms;
+3. no critical incident is open and no current worker, canary, target, or
+   dead-letter condition is critical;
+4. retry/dead-letter recovery has either succeeded in the rolling window or
+   has durable release evidence, and no dead-letter occurred in that window;
+5. all required tables still have RLS, all required mutation tables still
+   have audit triggers, and the RLS behavioural result has durable evidence.
+
+The lifecycle suite's 15/15 result and the RLS suite's 13/13 result were
+recorded idempotently in production `audit_events` as
+`release.retry_dead_letter_recovery.verified` and
+`release.rls_behavior.verified`. The Slack message asks the product owner for
+explicit approval. It is evidence, not authorization: no code path performs an
+automatic Pilot-to-Production promotion.
 
 ## Production release gates
 

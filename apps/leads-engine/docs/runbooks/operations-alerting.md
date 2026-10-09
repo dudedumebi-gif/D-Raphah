@@ -19,6 +19,20 @@ fail a worker tick, scrape result, or canary.
 | `scheduled_start_p95_breach` | Warning | 72-hour scheduled-start p95 is at least 300,000 ms | p95 falls below 300,000 ms |
 | `qstash_delivery_failed` | Critical | signed failure callback reports retries exhausted | the same schedule next delivers successfully |
 | `soak_passed` | Info | 72-hour canary reaches the promotion gate | one-time release evidence; no reminders |
+| `production_gate_passed` | Info | all five promotion checks are green | one-time request for explicit product-owner approval; no reminders or automatic promotion |
+
+## Production-approval probe
+
+The independent five-minute operations run also evaluates the composite
+promotion gate. It requires, for one workspace, a passing 72-hour soak,
+scheduled-start p95 below five minutes, no unresolved critical condition,
+retry/dead-letter recovery evidence with no dead-letter in the rolling window,
+and live RLS/audit catalogue integrity plus durable RLS behavioural evidence.
+
+Passing the probe creates and audits one `production_gate_passed` alert and
+sends it to `#ops-alert`. The notification requests approval; it does not
+change a source, campaign, job, lead, or release mode. The product owner must
+still approve the move from Pilot to Production explicitly.
 
 ## State, dedupe, and reminders
 
