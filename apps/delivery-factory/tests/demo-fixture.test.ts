@@ -80,3 +80,84 @@ describe("demo handoff fixture migration", () => {
     expect(sql).not.toContain("schema_versions");
   });
 });
+
+/**
+ * Fixtures 2 (migration 202610090004): the two round-2 walkthrough cases
+ * seeded the same way as Harbourview, so Monitoring's charter story
+ * covers all three demo businesses.
+ */
+const sql2 = readFileSync(
+  new URL(
+    "../neon/migrations/202610090004_demo_handoff_fixtures_2.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
+
+function fixturePackages2(): Array<Record<string, any>> {
+  const matches = [...sql2.matchAll(/\$pkg\$([\s\S]*?)\$pkg\$/g)];
+  if (matches.length !== 2) {
+    throw new Error(`expected 2 package literals, found ${matches.length}`);
+  }
+  return matches.map((m) => JSON.parse(m[1]) as Record<string, any>);
+}
+
+describe("demo handoff fixtures 2 (Northgate + TrueNorth)", () => {
+  it("embeds contract-shaped v1 packages for both walkthrough cases", () => {
+    const [northgate, truenorth] = fixturePackages2();
+    expect(northgate.organization.name).toBe("Northgate Legal LLP");
+    expect(truenorth.organization.name).toBe("TrueNorth Home Services");
+    for (const pkg of [northgate, truenorth]) {
+      expect(pkg.schemaVersion).toBe("1.0.0");
+      expect(pkg.problemStatement.length).toBeGreaterThanOrEqual(10);
+      expect(pkg.successMeasures).toHaveLength(3);
+      expect(pkg.manifestChecksum).toMatch(/^[a-f0-9]{64}$/);
+      expect(pkg.consentBasis.basisType).toBe("inquiry");
+    }
+    // Distinct ids — no collision with 003 or each other.
+    const ids = [northgate, truenorth].flatMap((p) => [
+      p.packageId,
+      p.opportunityId,
+    ]);
+    expect(new Set(ids).size).toBe(4);
+    expect(ids).not.toContain("d0000000-0000-4000-8000-000000000001");
+  });
+
+  it("keeps both baselines freezable", () => {
+    for (const pkg of fixturePackages2()) {
+      const reqs = pkg.requirementBaseline.requirements as Array<{
+        priority: string;
+        status: string;
+        humanValidatorId?: string;
+        blockingQuestions: string[];
+        acceptanceCriteria: string[];
+      }>;
+      expect(reqs).toHaveLength(3);
+      for (const req of reqs) {
+        expect(req.status).toBe("validated");
+        expect(req.blockingQuestions).toEqual([]);
+        expect(req.acceptanceCriteria.length).toBeGreaterThan(0);
+        if (req.priority === "must") {
+          expect(req.humanValidatorId).toBeTruthy();
+        }
+      }
+      expect(pkg.requirementBaseline.features).toHaveLength(3);
+    }
+  });
+
+  it("seeds demo-scoped rows with per-case KPIs, idempotently", () => {
+    expect(sql2).toContain("'demo-fixture-northgate-v1'");
+    expect(sql2).toContain("'demo-fixture-truenorth-v1'");
+    expect(sql2).not.toContain("'production'");
+    expect(sql2).toContain("sha256(pkg_text::bytea)");
+    expect(sql2).toContain("not a signed LE handoff");
+    expect(sql2).toContain("First response draft within 5 minutes");
+    expect(sql2).toContain(
+      "Review request drafted the same day the job completes",
+    );
+    expect(sql2).not.toContain("schema_versions");
+    // The case content mirrors the walkthrough cases' own problem text.
+    expect(sql2).toContain("first firm that responds");
+    expect(sql2).toContain("nobody can say who was asked");
+  });
+});
