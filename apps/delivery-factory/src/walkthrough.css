@@ -442,6 +442,46 @@
   flex-wrap: wrap;
   margin-top: 6px;
 }
+.wt-draft-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #ffd479;
+  margin-top: 14px;
+}
+.wt-draft-note {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2, #9fb0c9);
+  max-width: 68ch;
+}
+.wt-feedback {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+  max-width: 640px;
+}
+.wt-feedback label {
+  font-size: 14px;
+  line-height: 1.55;
+}
+.wt-feedback textarea {
+  width: 100%;
+  background: #0d1420;
+  border: 1px solid #2a3a55;
+  border-radius: 8px;
+  color: inherit;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.wt-feedback textarea:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: 1px;
+}
 .wt-decision {
   background: #0f1d33;
   border: 1px solid #23406e;

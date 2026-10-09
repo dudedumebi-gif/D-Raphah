@@ -7,6 +7,7 @@ import workflowByIdHandler from "./_workflows/[id].js";
 import executeHandler from "./_workflows/[id]/execute.js";
 import workflowRunsHandler from "./_workflows/[id]/runs.js";
 import runDetailHandler from "./_workflows/runs/[runId].js";
+import draftReviseHandler from "./_workflows/drafts/revise.js";
 
 type Handler = (req: ApiRequest, res: ServerResponse) => Promise<void>;
 
@@ -56,6 +57,12 @@ export default async function wfDispatch(
   } else if (segments.length === 2 && segments[0] === "runs") {
     query.runId = segments[1];
     handler = runDetailHandler as Handler;
+  } else if (
+    segments.length === 2 &&
+    segments[0] === "drafts" &&
+    segments[1] === "revise"
+  ) {
+    handler = draftReviseHandler as Handler;
   } else if (segments.length === 1) {
     query.id = segments[0];
     handler = workflowByIdHandler as Handler;
