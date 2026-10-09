@@ -254,3 +254,198 @@
   padding-left: 18px;
   line-height: 1.8;
 }
+
+/* ── Case picker ──────────────────────────────────────────────────── */
+.wt-cases {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) {
+  .wt-cases {
+    grid-template-columns: 1fr;
+  }
+}
+.wt-case-card {
+  text-align: left;
+  background: #141a2e;
+  border: 1px solid #232c49;
+  border-radius: 12px;
+  padding: 14px 16px;
+  color: #dbe2f5;
+  cursor: pointer;
+  display: grid;
+  gap: 3px;
+  font: 500 13.5px Manrope, sans-serif;
+}
+.wt-case-card b {
+  font-size: 15px;
+  color: #eef1fb;
+}
+.wt-case-card span {
+  color: #8b93ad;
+  font-size: 12.5px;
+}
+.wt-case-card small {
+  color: #7fb0ff;
+  font-size: 12px;
+  margin-top: 4px;
+}
+.wt-case-card.active {
+  border-color: #4f7cff;
+  background: #16223f;
+  box-shadow: 0 0 0 1px #4f7cff inset;
+}
+
+/* ── Process map ──────────────────────────────────────────────────── */
+.wt-plan {
+  background: #141a2e;
+  border: 1px solid #232c49;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-top: 16px;
+}
+.wt-plan h4 {
+  margin: 0 0 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8b93ad;
+}
+.wt-map {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  overflow-x: auto;
+}
+.wt-map-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  position: relative;
+  padding: 4px 0;
+}
+.wt-map-dot {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #232c49;
+  color: #a5adca;
+  font-size: 13px;
+  font-weight: 800;
+  flex: none;
+}
+.wt-map-node.current .wt-map-dot {
+  background: #4f7cff;
+  color: #fff;
+  box-shadow: 0 0 0 4px rgba(79, 124, 255, 0.25);
+}
+.wt-map-node.done .wt-map-dot {
+  background: #2c5c46;
+  color: #7be2ae;
+}
+.wt-map-node.approval .wt-map-dot {
+  background: #3a2f14;
+  color: #ffd479;
+}
+.wt-map-node.current .wt-map-label {
+  color: #eef1fb;
+  font-weight: 700;
+}
+.wt-map-label {
+  font-size: 13px;
+  color: #a5adca;
+  white-space: nowrap;
+}
+.wt-map-label small {
+  color: #ffd479;
+}
+.wt-map-link {
+  width: 26px;
+  height: 2px;
+  background: #2c3760;
+  margin: 0 8px;
+  flex: none;
+  align-self: center;
+}
+
+/* ── Event form card ──────────────────────────────────────────────── */
+.wt-form {
+  background: #101a33;
+  border: 1px solid #23406e;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 12px 0;
+}
+.wt-form-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.wt-form-head span {
+  color: #7d94c4;
+  font-size: 12.5px;
+}
+.wt-form-fields {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 18px;
+}
+.wt-form-fields div {
+  border-bottom: 1px dashed #23406e;
+  padding-bottom: 5px;
+}
+.wt-form-fields dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #7d94c4;
+}
+.wt-form-fields dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+}
+.wt-form-msg {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  background: #0c1425;
+  border-radius: 8px;
+  line-height: 1.55;
+}
+
+/* ── Approval stage ───────────────────────────────────────────────── */
+.wt-stage-lead {
+  line-height: 1.6;
+  max-width: 68ch;
+}
+.wt-draft-card {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border-left: 3px solid #ffd479;
+  background: #241d0e;
+  border-radius: 0 8px 8px 0;
+  line-height: 1.6;
+  font-size: 14.5px;
+}
+.wt-approval-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.wt-decision {
+  background: #0f1d33;
+  border: 1px solid #23406e;
+  border-radius: 8px;
+  padding: 10px 13px;
+  line-height: 1.55;
+}
