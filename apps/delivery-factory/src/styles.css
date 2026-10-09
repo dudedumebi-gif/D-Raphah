@@ -526,3 +526,49 @@ button {
 .env-scope-notice {
   padding: 22px 24px;
 }
+
+/* ── App frame: fixed sidebar + header, content-only scrolling ────────
+ * The shell is viewport-locked: the sidebar and the top header (plus the
+ * status bar) never scroll; only .view-scroll moves. View headers stick
+ * to the top of the scroll region so the page context stays visible. */
+html,
+body,
+#root {
+  height: 100%;
+}
+.app-shell {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.sidebar {
+  flex: none;
+  height: 100dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+main {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.topbar,
+.status-bar {
+  flex: none;
+}
+.view-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.hero-row {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background: #f7f7fb;
+  padding-top: 8px;
+  padding-bottom: 10px;
+}

@@ -2,15 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAuthToken, notifyUnauthorized } from "./auth";
 import "./walkthrough.css";
 
-/* ── Demo walkthrough mode (Phase 3) ───────────────────────────────────
- * A client-presentable story, run live inside the demo environment:
- * a real-shaped case (the manual process a handoff package would carry
- * as currentState) is executed against a published demo workflow on the
- * real engine. The player then walks the recorded run step by step —
- * the manual way versus the automated way, the actual output produced,
- * and the human approval points (draft-first throughout, so nothing
- * sends in front of a client). It ends on the run's audit trail and a
- * time-saved summary tied to the case's success measures.
+/* ── Demo walkthrough mode (Phase 3, upgraded) ─────────────────────────
+ * Client-presentable E2E stories, run live inside the demo environment.
+ * Three cases, each shaped like a handoff package (problem + current
+ * state + success measures). The presenter sees the process map first —
+ * event → draft → ADMIN APPROVAL → send → audit — then runs the
+ * automation on the real engine and walks the recorded run stage by
+ * stage. The approval stage is played by the presenter: nothing is
+ * "sent" until they approve the draft, which is exactly DF's draft-
+ * first contract. Ends on the run's audit trail and a time-saved
+ * summary scored against the case's success measures.
  */
 
 interface RunStep {
@@ -43,6 +44,13 @@ interface WorkflowSummary {
   trigger_type: string;
 }
 
+interface WorkflowNodeLite {
+  node_key: string;
+  type: string;
+  kind: string;
+  label: string;
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -62,90 +70,270 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-/* The sample case: shaped like a handoff package's problem + currentState. */
-const DEMO_CASE = {
-  business: "Harbourview Dental Studio",
-  location: "Toronto",
-  leadName: "Maya Chen",
-  channel: "Website contact form",
-  inquiry:
-    "Hi — do you have any hygiene appointments next week? I work weekdays, so an evening slot would be ideal. Thanks!",
-  problem:
-    "New-patient inquiries arrive by web form and email. The front desk checks twice a day, copies the details into a spreadsheet, and drafts every reply from scratch. Replies typically land the next day — and some inquiries are never answered at all.",
-  input: {
-    organization_name: "Harbourview Dental Studio",
-    lead: { name: "Maya Chen", phone: "+1 416-555-0134", score: 87 },
-  },
-  manualSteps: [
-    {
-      title: "Notice the inquiry",
-      minutes: 240,
-      wait: true,
-      text: "Waits in the inbox until the front desk's next check — twice a day. Average wait: about 4 hours, often overnight.",
-    },
-    {
-      title: "Copy details into the tracker",
-      minutes: 10,
-      text: "Name, phone, and request re-keyed into a spreadsheet by hand.",
-      eliminated: true,
-    },
-    {
-      title: "Draft the reply from scratch",
-      minutes: 15,
-      text: "Staff write each response from a blank page, checking the schedule manually first.",
-    },
-    {
-      title: "Chase approval, then send",
-      minutes: 20,
-      text: "The draft is forwarded to the office manager; it sends only after approval comes back.",
-    },
-    {
-      title: "Log the follow-up",
-      minutes: 5,
-      text: "The spreadsheet is updated by hand — when someone remembers.",
-    },
-  ] as Array<{
-    title: string;
-    minutes: number;
-    text: string;
-    eliminated?: boolean;
-    wait?: boolean;
-  }>,
-  successMeasures: [
-    "First follow-up draft within 5 minutes of intake",
-    "Zero inquiries left unanswered",
-    "Every follow-up leaves an audit record",
-  ],
-};
+/* ── Cases ───────────────────────────────────────────────────────────── */
 
-const MANUAL_BY_KIND: Record<string, number> = {
-  lead_handoff: 0,
-  trigger: 0,
-  condition: 1,
-  ai_assist: 2,
-  send_sms: 3,
-  send_email: 3,
-  log_database: 4,
-};
+interface ManualStep {
+  title: string;
+  minutes: number;
+  text: string;
+  eliminated?: boolean;
+  wait?: boolean;
+}
+
+type MeasureKind = "demonstrated" | "audit" | "process";
+
+interface DemoCase {
+  id: string;
+  business: string;
+  sector: string;
+  location: string;
+  workflowMatch: RegExp;
+  eventTitle: string;
+  eventChannel: string;
+  formFields: Array<[string, string]>;
+  eventText: string;
+  problem: string;
+  unit: string;
+  input: Record<string, unknown>;
+  manualSteps: ManualStep[];
+  manualByKind: Record<string, number>;
+  successMeasures: string[];
+  measureKinds: MeasureKind[];
+}
+
+const CASES: DemoCase[] = [
+  {
+    id: "harbourview",
+    business: "Harbourview Dental Studio",
+    sector: "Dental clinic",
+    location: "Toronto",
+    workflowMatch: /lead follow-up/i,
+    eventTitle: "New patient inquiry",
+    eventChannel: "Website contact form",
+    formFields: [
+      ["Name", "Maya Chen"],
+      ["Phone", "+1 416-555-0134"],
+      ["Service", "Hygiene appointment"],
+      ["Preferred time", "Evenings"],
+    ],
+    eventText:
+      "Hi — do you have any hygiene appointments next week? I work weekdays, so an evening slot would be ideal. Thanks!",
+    problem:
+      "New-patient inquiries arrive by web form and email. The front desk checks twice a day, copies the details into a spreadsheet, and drafts every reply from scratch. Replies typically land the next day — and some inquiries are never answered at all.",
+    unit: "inquiry",
+    input: {
+      organization_name: "Harbourview Dental Studio",
+      lead: { name: "Maya Chen", phone: "+1 416-555-0134", score: 87 },
+    },
+    manualSteps: [
+      { title: "Notice the inquiry", minutes: 240, wait: true, text: "Waits in the inbox until the front desk's next check — twice a day. Average wait: about 4 hours, often overnight." },
+      { title: "Copy details into the tracker", minutes: 10, eliminated: true, text: "Name, phone, and request re-keyed into a spreadsheet by hand." },
+      { title: "Draft the reply from scratch", minutes: 15, text: "Staff write each response from a blank page, checking the schedule manually first." },
+      { title: "Chase approval, then send", minutes: 20, text: "The draft is forwarded to the office manager; it sends only after approval comes back." },
+      { title: "Log the follow-up", minutes: 5, text: "The spreadsheet is updated by hand — when someone remembers." },
+    ],
+    manualByKind: { lead_handoff: 0, webhook: 0, manual: 0, if_else: 1, ai_assist: 2, send_sms: 3, send_email: 3, log_database: 4 },
+    successMeasures: [
+      "First follow-up draft within 5 minutes of intake",
+      "Zero inquiries left unanswered",
+      "Every follow-up leaves an audit record",
+    ],
+    measureKinds: ["demonstrated", "process", "audit"],
+  },
+  {
+    id: "northgate",
+    business: "Northgate Legal LLP",
+    sector: "Law firm",
+    location: "Toronto",
+    workflowMatch: /lead auto-response/i,
+    eventTitle: "After-hours closing inquiry",
+    eventChannel: "Website contact form · 9:47 PM",
+    formFields: [
+      ["Name", "Daniel Okafor"],
+      ["Phone", "+1 416-555-0187"],
+      ["Email", "daniel.okafor@example.com"],
+      ["Matter", "Residential closing — Oct 28"],
+    ],
+    eventText:
+      "We're closing on a house in Leslieville on the 28th and our lawyer just retired. Can your firm handle the closing, and what are your fees?",
+    problem:
+      "Closing inquiries are deadline-driven, but after-hours submissions wait until the next business day and join the same callback queue as general questions. Callers with a closing date often sign with the first firm that responds.",
+    unit: "inquiry",
+    input: {
+      organization_name: "Northgate Legal LLP",
+      lead: {
+        name: "Daniel Okafor",
+        phone: "+1 416-555-0187",
+        email: "daniel.okafor@example.com",
+        score: 82,
+      },
+    },
+    manualSteps: [
+      { title: "Notice the inquiry", minutes: 720, wait: true, text: "Submitted at 9:47 PM; seen when the office opens the next business day." },
+      { title: "Call back and take notes", minutes: 15, text: "The intake assistant phones in queue order and hand-writes the matter details." },
+      { title: "Draft the response from precedents", minutes: 20, text: "The reply is assembled from precedent files, with the fee wording checked manually." },
+      { title: "Partner reviews the fee wording", minutes: 15, text: "The draft waits for a partner's approval before it can go out." },
+      { title: "Log in the intake spreadsheet", minutes: 5, text: "Matter, deadline, and status typed in by hand." },
+    ],
+    manualByKind: { lead_handoff: 0, webhook: 0, manual: 0, if_else: 1, ai_assist: 2, send_email: 2, send_sms: 2, log_database: 4 },
+    successMeasures: [
+      "First response draft within 5 minutes, at any hour",
+      "Zero after-hours inquiries unanswered by 9 AM",
+      "Every response leaves an audit record",
+    ],
+    measureKinds: ["demonstrated", "process", "audit"],
+  },
+  {
+    id: "truenorth",
+    business: "TrueNorth Home Services",
+    sector: "Home services",
+    location: "Toronto",
+    workflowMatch: /review request/i,
+    eventTitle: "Job completed",
+    eventChannel: "Field app webhook",
+    formFields: [
+      ["Customer", "Sarah Lindqvist"],
+      ["Phone", "+1 416-555-0119"],
+      ["Service", "Furnace tune-up"],
+      ["Job", "JOB-2481 · marked complete"],
+    ],
+    eventText:
+      "Job JOB-2481 marked complete in the field app. Technician note: “All checks passed — filter replaced, no issues found.”",
+    problem:
+      "Review requests depend on technicians remembering to ask. Most completed jobs never get one, so the company's Google profile grows slowly despite happy customers — and nobody can say who was asked.",
+    unit: "completed job",
+    input: {
+      business_name: "TrueNorth Home Services",
+      city: "Toronto",
+      service: "Furnace tune-up",
+      job_id: "JOB-2481",
+      review_link: "https://g.page/truenorth.example/review",
+      customer: { name: "Sarah Lindqvist", phone: "+1 416-555-0119" },
+    },
+    manualSteps: [
+      { title: "Notice completed jobs", minutes: 2880, wait: true, text: "The office reviews completed jobs in a weekly report — days after the visit, when the impression is cold." },
+      { title: "Check the job card for a phone", minutes: 5, text: "Someone opens each job card to find a mobile number." },
+      { title: "Text the customer manually", minutes: 5, text: "A review request is typed and sent from the office phone, one job at a time." },
+      { title: "Log who was asked", minutes: 3, text: "A spreadsheet note — if it happens at all." },
+    ],
+    manualByKind: { webhook: 0, lead_handoff: 0, manual: 0, if_else: 1, send_sms: 2, send_email: 2, ai_assist: 2, log_database: 3 },
+    successMeasures: [
+      "Review request drafted the same day the job completes",
+      "Every completed job with a phone number gets a request",
+      "Every request is logged",
+    ],
+    measureKinds: ["demonstrated", "demonstrated", "audit"],
+  },
+];
+
+/* ── Narration ───────────────────────────────────────────────────────── */
 
 const AUTOMATED_NARRATION: Record<string, string> = {
   lead_handoff:
     "The inquiry lands and the automation starts immediately — no inbox waiting, no twice-a-day checks.",
+  webhook:
+    "The field app fires the event the second the job is marked complete — no weekly report, no delay.",
+  manual: "The automation starts the moment the event lands.",
   trigger:
     "The event lands and the automation starts immediately — no inbox waiting.",
+  if_else:
+    "The record is checked automatically — here, a phone number is present, so the request goes out by text.",
   condition:
-    "The lead is routed on its data instantly — here, a qualification score of 87 against the workflow's threshold.",
+    "The record is routed on its data instantly.",
   ai_assist:
-    "The AI drafts the follow-up from the inquiry and the practice's context. It produces a draft only — drafting is its whole job.",
+    "The AI drafts the message from the inquiry and the business's context. It produces a draft only — drafting is its whole job.",
   send_sms:
-    "The message is prepared as a send-ready draft and held. Nothing is sent: a human approves first, every time.",
+    "The text is prepared as a send-ready draft and held. Nothing is sent: a human approves first, every time.",
   send_email:
     "The email is prepared as a send-ready draft and held for human approval — nothing auto-sends.",
   log_database:
     "The run writes its own audit record — what happened, when, and what it produced — with no spreadsheet to remember.",
+  assign_gate:
+    "A review gate is assigned to a named human, who owns the decision from here.",
 };
 
-const APPROVAL_KINDS = new Set(["ai_assist", "send_sms", "send_email"]);
+const SEND_KINDS = new Set(["send_sms", "send_email"]);
+
+/* ── Stages ──────────────────────────────────────────────────────────── */
+
+interface Stage {
+  id: string;
+  title: string;
+  kind: "event" | "step" | "approval" | "outcome";
+  step?: RunStep;
+  nodeKind?: string;
+}
+
+function stageTitleForStep(step: RunStep, isFirst: boolean, c: DemoCase): string {
+  if (isFirst) return c.eventTitle;
+  if (step.node_kind === "ai_assist") return "Draft created";
+  if (step.node_kind === "send_sms") return "Text message";
+  if (step.node_kind === "send_email") return "Email";
+  if (step.node_kind === "log_database") return "Logged & audited";
+  if (step.node_kind === "assign_gate") return "Review gate assigned";
+  if (step.node_kind === "if_else") return "Routing check";
+  return step.node_label;
+}
+
+function buildRunStages(run: WorkflowRun, c: DemoCase): Stage[] {
+  const steps = run.steps ?? [];
+  const stages: Stage[] = [];
+  let approvalInserted = false;
+  steps.forEach((step, i) => {
+    if (!approvalInserted && SEND_KINDS.has(step.node_kind)) {
+      stages.push({
+        id: "approval",
+        title: "Admin approval",
+        kind: "approval",
+        nodeKind: step.node_kind,
+      });
+      approvalInserted = true;
+    }
+    stages.push({
+      id: `step-${step.node_key}-${i}`,
+      title: stageTitleForStep(step, i === 0, c),
+      kind: i === 0 ? "event" : "step",
+      step,
+      nodeKind: step.node_kind,
+    });
+  });
+  stages.push({ id: "outcome", title: "Outcome", kind: "outcome" });
+  return stages;
+}
+
+function buildPlanStages(nodes: WorkflowNodeLite[], c: DemoCase): Stage[] {
+  const stages: Stage[] = [];
+  let approvalInserted = false;
+  const body = nodes.filter((n) => n.type !== "trigger");
+  stages.push({ id: "plan-event", title: c.eventTitle, kind: "event", nodeKind: nodes.find((n) => n.type === "trigger")?.kind });
+  for (const node of body) {
+    if (!approvalInserted && SEND_KINDS.has(node.kind)) {
+      stages.push({ id: "plan-approval", title: "Admin approval", kind: "approval", nodeKind: node.kind });
+      approvalInserted = true;
+    }
+    stages.push({
+      id: `plan-${node.node_key}`,
+      title:
+        node.kind === "ai_assist"
+          ? "Draft created"
+          : node.kind === "send_sms"
+            ? "Text message"
+            : node.kind === "send_email"
+              ? "Email"
+              : node.kind === "log_database"
+                ? "Logged & audited"
+                : node.kind === "assign_gate"
+                  ? "Review gate assigned"
+                  : node.kind === "if_else"
+                    ? "Routing check"
+                    : node.label,
+      kind: "step",
+      nodeKind: node.kind,
+    });
+  }
+  stages.push({ id: "plan-outcome", title: "Outcome", kind: "outcome" });
+  return stages;
+}
 
 function outputHighlights(
   output: Record<string, unknown> | null,
@@ -167,6 +355,17 @@ function outputHighlights(
   return entries;
 }
 
+function draftTextBefore(stages: Stage[], upto: number): string | null {
+  for (let i = upto - 1; i >= 0; i--) {
+    const out = stages[i].step?.output;
+    if (!out) continue;
+    for (const key of ["draft", "message", "text", "body"]) {
+      if (typeof out[key] === "string" && out[key]) return out[key] as string;
+    }
+  }
+  return null;
+}
+
 function runSeconds(run: WorkflowRun): number | null {
   if (!run.completed_at) return null;
   const ms =
@@ -174,24 +373,95 @@ function runSeconds(run: WorkflowRun): number | null {
   return Number.isFinite(ms) ? Math.max(0, ms / 1000) : null;
 }
 
+/* ── Components ──────────────────────────────────────────────────────── */
+
+function ProcessMap({
+  stages,
+  current,
+  approval,
+}: {
+  stages: Stage[];
+  current: number | null;
+  approval: "pending" | "approved" | "changes" | null;
+}) {
+  return (
+    <ol className="wt-map" aria-label="Process map">
+      {stages.map((stage, i) => {
+        const state =
+          current == null
+            ? "plan"
+            : i < current
+              ? "done"
+              : i === current
+                ? "current"
+                : "todo";
+        return (
+          <li key={stage.id} className={`wt-map-node ${state} ${stage.kind}`}>
+            <span className="wt-map-dot">
+              {stage.kind === "approval"
+                ? "✋"
+                : state === "done"
+                  ? "✓"
+                  : i + 1}
+            </span>
+            <span className="wt-map-label">
+              {stage.title}
+              {stage.kind === "approval" && approval === "approved" ? (
+                <small> · approved</small>
+              ) : null}
+              {stage.kind === "approval" && approval === "changes" ? (
+                <small> · changes requested</small>
+              ) : null}
+            </span>
+            {i < stages.length - 1 ? <span className="wt-map-link" /> : null}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function EventCard({ c }: { c: DemoCase }) {
+  return (
+    <div className="wt-form">
+      <div className="wt-form-head">
+        <b>{c.eventTitle}</b>
+        <span>{c.eventChannel}</span>
+      </div>
+      <dl className="wt-form-fields">
+        {c.formFields.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <blockquote className="wt-form-msg">“{c.eventText}”</blockquote>
+    </div>
+  );
+}
+
 export function WalkthroughView({ onClose }: { onClose: () => void }) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
+  const [caseId, setCaseId] = useState(CASES[0].id);
   const [selectedId, setSelectedId] = useState<string>("");
+  const [planNodes, setPlanNodes] = useState<WorkflowNodeLite[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [run, setRun] = useState<WorkflowRun | null>(null);
-  const [stepIndex, setStepIndex] = useState(0);
-  const [showFinale, setShowFinale] = useState(false);
+  const [stageIndex, setStageIndex] = useState(0);
+  const [approval, setApproval] = useState<
+    "pending" | "approved" | "changes" | null
+  >(null);
+
+  const demoCase = CASES.find((c) => c.id === caseId) ?? CASES[0];
 
   useEffect(() => {
     api<{ workflows: WorkflowSummary[] }>("/api/workflows?environment=demo")
       .then((d) => {
         const published = d.workflows.filter((w) => w.status === "published");
         setWorkflows(published);
-        const preferred =
-          published.find((w) => /lead follow-up/i.test(w.name)) ?? published[0];
-        if (preferred) setSelectedId(preferred.id);
       })
       .catch((e: unknown) =>
         setError(e instanceof Error ? e.message : "Failed to load workflows"),
@@ -199,30 +469,66 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
       .finally(() => setLoading(false));
   }, []);
 
+  // Keep the workflow selection matched to the chosen case.
+  useEffect(() => {
+    const preferred =
+      workflows.find((w) => demoCase.workflowMatch.test(w.name)) ?? workflows[0];
+    if (preferred) setSelectedId(preferred.id);
+  }, [demoCase, workflows]);
+
+  // Load the selected workflow's nodes for the plan map.
+  useEffect(() => {
+    if (!selectedId) {
+      setPlanNodes([]);
+      return;
+    }
+    api<{ workflow: { nodes: WorkflowNodeLite[] } }>(
+      `/api/workflows/${selectedId}`,
+    )
+      .then((d) => setPlanNodes(d.workflow.nodes))
+      .catch(() => setPlanNodes([]));
+  }, [selectedId]);
+
   const selected = workflows.find((w) => w.id === selectedId);
-  const steps = useMemo(() => run?.steps ?? [], [run]);
-  const manualTotal = DEMO_CASE.manualSteps.reduce(
-    (sum, s) => sum + s.minutes,
-    0,
+  const stages = useMemo(
+    () => (run ? buildRunStages(run, demoCase) : []),
+    [run, demoCase],
   );
-  const handsOn = DEMO_CASE.manualSteps
-    .filter((s) => !("wait" in s && s.wait))
-    .reduce((sum, s) => sum + s.minutes, 0);
+  const planStages = useMemo(
+    () => buildPlanStages(planNodes, demoCase),
+    [planNodes, demoCase],
+  );
+  const manualTotal = demoCase.manualSteps.reduce((s, x) => s + x.minutes, 0);
+  const handsOn = demoCase.manualSteps
+    .filter((s) => !s.wait)
+    .reduce((s, x) => s + x.minutes, 0);
   const seconds = run ? runSeconds(run) : null;
+  const stage = stages[stageIndex];
+  const isOutcome = stage?.kind === "outcome";
+  const stageStep = stage?.step;
+  const manual =
+    stageStep != null
+      ? demoCase.manualSteps[
+          demoCase.manualByKind[stageStep.node_kind] ??
+            Math.min(stageIndex, demoCase.manualSteps.length - 1)
+        ]
+      : null;
+  const pendingDraft =
+    stage?.kind === "approval" ? draftTextBefore(stages, stageIndex) : null;
 
   const execute = useCallback(async () => {
     if (!selectedId) return;
     setRunning(true);
     setError(null);
     setRun(null);
-    setShowFinale(false);
-    setStepIndex(0);
+    setStageIndex(0);
+    setApproval(null);
     try {
       const started = await api<{ run: WorkflowRun }>(
         `/api/workflows/${selectedId}/execute`,
         {
           method: "POST",
-          body: JSON.stringify({ input: DEMO_CASE.input }),
+          body: JSON.stringify({ input: demoCase.input }),
         },
       );
       const detail = await api<{ run: WorkflowRun }>(
@@ -234,25 +540,23 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
     } finally {
       setRunning(false);
     }
-  }, [selectedId]);
+  }, [selectedId, demoCase]);
 
-  const step = steps[stepIndex];
-  const manual =
-    step != null
-      ? DEMO_CASE.manualSteps[
-          MANUAL_BY_KIND[step.node_kind] ?? Math.min(stepIndex, DEMO_CASE.manualSteps.length - 1)
-        ]
-      : null;
+  const reset = () => {
+    setRun(null);
+    setStageIndex(0);
+    setApproval(null);
+  };
 
   return (
     <div className="wt">
       <div className="wt-head">
         <div>
           <p className="eyebrow accent">Demo walkthrough · Demo environment</p>
-          <h2>The manual process, automated — live</h2>
+          <h2>Watch a manual process become an automation — live</h2>
           <p className="muted">
-            A real case, executed on the real workflow engine. Everything is
-            draft-first: nothing sends in front of a client.
+            Pick a case, see the flow, run it on the real engine, and play
+            the admin at the approval gate. Nothing sends without approval.
           </p>
         </div>
         <button className="btn-ghost" onClick={onClose}>
@@ -264,22 +568,35 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
 
       {!run ? (
         <>
+          <div className="wt-cases" role="radiogroup" aria-label="Demo case">
+            {CASES.map((c) => (
+              <button
+                key={c.id}
+                role="radio"
+                aria-checked={c.id === caseId}
+                className={`wt-case-card ${c.id === caseId ? "active" : ""}`}
+                onClick={() => setCaseId(c.id)}
+              >
+                <b>{c.business}</b>
+                <span>
+                  {c.sector} · {c.location}
+                </span>
+                <small>{c.eventTitle}</small>
+              </button>
+            ))}
+          </div>
+
           <section className="wt-case">
             <div className="wt-case-main">
               <h3>
-                {DEMO_CASE.business} · {DEMO_CASE.location}
+                {demoCase.business} · {demoCase.location}
               </h3>
-              <p>{DEMO_CASE.problem}</p>
-              <blockquote className="wt-inquiry">
-                “{DEMO_CASE.inquiry}”
-                <footer>
-                  — {DEMO_CASE.leadName}, via {DEMO_CASE.channel}
-                </footer>
-              </blockquote>
+              <p>{demoCase.problem}</p>
+              <EventCard c={demoCase} />
               <div className="wt-measures">
                 <h4>What success looks like (the charter)</h4>
                 <ul>
-                  {DEMO_CASE.successMeasures.map((m) => (
+                  {demoCase.successMeasures.map((m) => (
                     <li key={m}>{m}</li>
                   ))}
                 </ul>
@@ -287,14 +604,17 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
             </div>
             <div className="wt-manual">
               <h4>
-                The manual way — ~{Math.round(manualTotal / 60)} hours end to
-                end, {handsOn} min of it hands-on
+                The manual way — ~{Math.round(manualTotal / 60)}h end to end,{" "}
+                {handsOn} min of it hands-on
               </h4>
               <ol className="wt-manual-list">
-                {DEMO_CASE.manualSteps.map((s) => (
+                {demoCase.manualSteps.map((s) => (
                   <li key={s.title} className={s.eliminated ? "eliminated" : ""}>
                     <b>
-                      {s.title} · {s.minutes >= 60 ? `~${Math.round(s.minutes / 60)}h` : `${s.minutes} min`}
+                      {s.title} ·{" "}
+                      {s.minutes >= 60
+                        ? `~${Math.round(s.minutes / 60)}h`
+                        : `${s.minutes} min`}
                       {s.eliminated ? " · eliminated by automation" : ""}
                     </b>
                     <span>{s.text}</span>
@@ -303,6 +623,17 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
               </ol>
             </div>
           </section>
+
+          <section className="wt-plan">
+            <h4>The automated flow</h4>
+            <ProcessMap stages={planStages} current={null} approval={null} />
+            <p className="muted">
+              The admin approval stage is the draft-first gate: the engine
+              records the draft, and a human releases it. You will play the
+              admin during the run.
+            </p>
+          </section>
+
           <section className="wt-runbar">
             <label>
               Automation to run
@@ -323,7 +654,7 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
               onClick={() => void execute()}
               disabled={running || !selectedId}
             >
-              {running ? "Running…" : "▶ Run the automation live"}
+              {running ? "Running…" : "▶ Run Automation"}
             </button>
             {!loading && workflows.length === 0 ? (
               <p className="muted">
@@ -333,59 +664,91 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
             ) : null}
             {selected ? (
               <p className="muted">
-                Runs “{selected.name}” against the case above, on the real
-                engine, in the demo environment.
+                Runs “{selected.name}” against the {demoCase.business} case,
+                on the real engine, in the demo environment.
               </p>
             ) : null}
           </section>
         </>
       ) : (
-        <>
-          <section className="wt-player">
-            <div className="wt-player-head">
-              <b>
-                Run {run.id.slice(0, 8)} · {run.status}
-                {seconds != null ? ` · ${seconds < 1 ? "<1" : seconds.toFixed(1)}s` : ""}
-              </b>
-              <span className="muted">
-                Step {Math.min(stepIndex + 1, steps.length)} of {steps.length}
-              </span>
-            </div>
-            <div className="wt-dots">
-              {steps.map((s, i) => (
-                <button
-                  key={s.node_key + i}
-                  className={`wt-dot ${i === stepIndex && !showFinale ? "active" : ""} ${s.status}`}
-                  onClick={() => {
-                    setStepIndex(i);
-                    setShowFinale(false);
-                  }}
-                  aria-label={`Step ${i + 1}: ${s.node_label}`}
-                />
-              ))}
-              <button
-                className={`wt-dot finale ${showFinale ? "active" : ""}`}
-                onClick={() => setShowFinale(true)}
-                aria-label="Summary"
-              />
-            </div>
+        <section className="wt-player">
+          <div className="wt-player-head">
+            <b>
+              {demoCase.business} · Run {run.id.slice(0, 8)} · {run.status}
+              {seconds != null
+                ? ` · ${seconds < 1 ? "<1" : seconds.toFixed(1)}s`
+                : ""}
+            </b>
+            <span className="muted">
+              Stage {Math.min(stageIndex + 1, stages.length)} of {stages.length}
+            </span>
+          </div>
+          <ProcessMap stages={stages} current={stageIndex} approval={approval} />
 
-            {!showFinale && step ? (
-              <div className="wt-step">
-                <div className="wt-step-head">
-                  <span className={`wf-badge wf-badge-${step.status === "completed" ? "published" : "draft"}`}>
-                    {step.status}
+          {!isOutcome && stage ? (
+            <div className="wt-step">
+              <div className="wt-step-head">
+                <h3>{stage.title}</h3>
+                {stage.kind === "approval" ? (
+                  <span className="wt-approval">
+                    Human approval point — draft-first
                   </span>
-                  <h3>
-                    {step.node_label}{" "}
-                    <small className="muted">({step.node_kind})</small>
-                  </h3>
-                  {APPROVAL_KINDS.has(step.node_kind) ? (
-                    <span className="wt-approval">
-                      Human approval point — draft-first
-                    </span>
+                ) : null}
+                {stageStep ? (
+                  <span
+                    className={`wf-badge wf-badge-${stageStep.status === "completed" ? "published" : "draft"}`}
+                  >
+                    {stageStep.status}
+                  </span>
+                ) : null}
+              </div>
+
+              {stage.kind === "event" ? (
+                <>
+                  <p className="wt-stage-lead">
+                    This is what arrives. The moment it lands, the automation
+                    is already running — no inbox, no waiting.
+                  </p>
+                  <EventCard c={demoCase} />
+                </>
+              ) : stage.kind === "approval" ? (
+                <>
+                  <p className="wt-stage-lead">
+                    The engine has recorded this draft and is holding it.
+                    In live operation an admin approves it here —{" "}
+                    <b>you are the admin now</b>. Approving releases the
+                    message step; requesting changes holds it, and nothing
+                    is sent.
+                  </p>
+                  {pendingDraft ? (
+                    <blockquote className="wt-draft-card">
+                      “{pendingDraft}”
+                    </blockquote>
                   ) : null}
-                </div>
+                  {approval == null ? (
+                    <div className="wt-approval-actions">
+                      <button
+                        className="btn-primary"
+                        onClick={() => setApproval("approved")}
+                      >
+                        ✓ Approve draft
+                      </button>
+                      <button
+                        className="btn-ghost"
+                        onClick={() => setApproval("changes")}
+                      >
+                        Request changes — hold the send
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="wt-decision">
+                      {approval === "approved"
+                        ? "✓ Approved — the message step is released."
+                        : "✎ Changes requested — the send is held. Nothing goes out; the draft returns to the queue with your note."}
+                    </p>
+                  )}
+                </>
+              ) : (
                 <div className="wt-versus">
                   <div className="wt-side manual">
                     <h4>The manual way</h4>
@@ -406,17 +769,28 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
                   <div className="wt-side auto">
                     <h4>The automated way</h4>
                     <p>
-                      {AUTOMATED_NARRATION[step.node_kind] ??
-                        "Executes in the engine, recorded step by step."}
+                      {stageStep
+                        ? (AUTOMATED_NARRATION[stageStep.node_kind] ??
+                          "Executes in the engine, recorded step by step.")
+                        : ""}
                     </p>
-                    {step.error ? (
+                    {stage?.kind === "step" &&
+                    stageStep &&
+                    SEND_KINDS.has(stageStep.node_kind) &&
+                    approval === "changes" ? (
                       <p className="wt-step-error">
-                        Recorded honestly: {step.error}
+                        Held by the admin — this step did not release. The
+                        draft stays recorded for rework.
                       </p>
                     ) : null}
-                    {outputHighlights(step.output).length ? (
+                    {stageStep?.error ? (
+                      <p className="wt-step-error">
+                        Recorded honestly: {stageStep.error}
+                      </p>
+                    ) : null}
+                    {stageStep && outputHighlights(stageStep.output).length ? (
                       <dl className="wt-output">
-                        {outputHighlights(step.output).map(([k, v]) => (
+                        {outputHighlights(stageStep.output).map(([k, v]) => (
                           <div key={k}>
                             <dt>{k}</dt>
                             <dd>{v}</dd>
@@ -426,119 +800,122 @@ export function WalkthroughView({ onClose }: { onClose: () => void }) {
                     ) : null}
                   </div>
                 </div>
-                <div className="wt-nav">
-                  <button
-                    className="btn-ghost"
-                    disabled={stepIndex === 0}
-                    onClick={() => setStepIndex((i) => Math.max(0, i - 1))}
-                  >
-                    ← Previous step
-                  </button>
-                  <button
-                    className="btn-primary"
-                    onClick={() => {
-                      if (stepIndex >= steps.length - 1) setShowFinale(true);
-                      else setStepIndex((i) => i + 1);
-                    }}
-                  >
-                    {stepIndex >= steps.length - 1
-                      ? "See the outcome →"
-                      : "Next step →"}
-                  </button>
-                </div>
-              </div>
-            ) : null}
+              )}
 
-            {showFinale ? (
-              <div className="wt-step">
-                <h3>The outcome</h3>
-                <div className="wt-versus">
-                  <div className="wt-side manual">
-                    <h4>Manual</h4>
-                    <p>
-                      <b>{handsOn} minutes of staff effort</b> per inquiry,
-                      and the patient typically waits hours — often until
-                      the next day — for a reply. Some inquiries are never
-                      answered.
-                    </p>
-                  </div>
-                  <div className="wt-side auto">
-                    <h4>Automated</h4>
-                    <p>
-                      <b>
-                        Draft ready in{" "}
-                        {seconds != null
-                          ? seconds < 1
-                            ? "under a second"
-                            : `${seconds.toFixed(1)} seconds`
-                          : "seconds"}
-                      </b>
-                      ; a person spends ~2 minutes reviewing the draft
-                      before it sends. Roughly{" "}
-                      <b>{handsOn - 2} minutes of staff time returned</b>{" "}
-                      per inquiry — and no inquiry waits in an inbox.
-                    </p>
-                  </div>
-                </div>
-                <section className="wt-finale-block">
-                  <h4>Audit trail — every step, recorded</h4>
-                  <ul className="wt-audit">
-                    {steps.map((s, i) => (
-                      <li key={s.node_key + i}>
-                        <code>{new Date(s.started_at).toLocaleTimeString()}</code>{" "}
-                        {s.node_label} ({s.node_kind}) — <b>{s.status}</b>
-                        {s.error ? ` · ${s.error}` : ""}
-                      </li>
-                    ))}
-                  </ul>
-                  <p className="muted">
-                    This trail is the run's own record in the workflow
-                    audit log — the same evidence a charter KPI is verified
-                    against after go-live.
+              <div className="wt-nav">
+                <button
+                  className="btn-ghost"
+                  disabled={stageIndex === 0}
+                  onClick={() => setStageIndex((i) => Math.max(0, i - 1))}
+                >
+                  ← Previous stage
+                </button>
+                <button
+                  className="btn-primary"
+                  disabled={stage.kind === "approval" && approval == null}
+                  onClick={() =>
+                    setStageIndex((i) => Math.min(stages.length - 1, i + 1))
+                  }
+                >
+                  {stage.kind === "approval" && approval == null
+                    ? "Decide to continue"
+                    : stageIndex >= stages.length - 2
+                      ? "See the outcome →"
+                      : "Next stage →"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="wt-step">
+              <h3>The outcome</h3>
+              <p className="wt-decision">
+                {approval === "changes"
+                  ? "Outcome: the draft was held at the approval gate — nothing was sent. The automation still did its job: drafted in seconds, gated by a human, fully logged."
+                  : "Outcome: drafted, approved by a human, released, and logged — end to end."}
+              </p>
+              <div className="wt-versus">
+                <div className="wt-side manual">
+                  <h4>Manual</h4>
+                  <p>
+                    <b>{handsOn} minutes of staff effort</b> per{" "}
+                    {demoCase.unit}, and the other party typically waits
+                    hours — often until the next day. Some are never
+                    answered at all.
                   </p>
-                </section>
-                <section className="wt-finale-block">
-                  <h4>Against the charter's success measures</h4>
-                  <ul className="wt-measures-check">
-                    <li>
-                      ✓ <b>Draft within 5 minutes</b> — demonstrated by this
-                      run ({seconds != null && seconds < 60 ? "under a minute" : "within the run"}).
-                    </li>
-                    <li>
-                      ✓ <b>Audit record for every follow-up</b> — demonstrated:
-                      the trail above is written automatically.
-                    </li>
-                    <li>
-                      ◐ <b>Zero inquiries unanswered</b> — a process outcome,
-                      verified over time as a charter KPI once live.
-                    </li>
-                  </ul>
-                </section>
-                <div className="wt-nav">
-                  <button
-                    className="btn-ghost"
-                    onClick={() => {
-                      setShowFinale(false);
-                      setStepIndex(0);
-                    }}
-                  >
-                    ← Walk the steps again
-                  </button>
-                  <button
-                    className="btn-primary"
-                    onClick={() => {
-                      setRun(null);
-                      setShowFinale(false);
-                      setStepIndex(0);
-                    }}
-                  >
-                    Run it again
-                  </button>
+                </div>
+                <div className="wt-side auto">
+                  <h4>Automated</h4>
+                  <p>
+                    <b>
+                      Draft ready in{" "}
+                      {seconds != null
+                        ? seconds < 1
+                          ? "under a second"
+                          : `${seconds.toFixed(1)} seconds`
+                        : "seconds"}
+                    </b>
+                    ; a person spends ~2 minutes reviewing at the approval
+                    gate. Roughly{" "}
+                    <b>{handsOn - 2} minutes of staff time returned</b> per{" "}
+                    {demoCase.unit}.
+                  </p>
                 </div>
               </div>
-            ) : null}
-          </section>
-        </>
+              <section className="wt-finale-block">
+                <h4>Audit trail — every step, recorded</h4>
+                <ul className="wt-audit">
+                  {(run.steps ?? []).map((s, i) => (
+                    <li key={s.node_key + i}>
+                      <code>{new Date(s.started_at).toLocaleTimeString()}</code>{" "}
+                      {s.node_label} ({s.node_kind}) — <b>{s.status}</b>
+                      {s.error ? ` · ${s.error}` : ""}
+                    </li>
+                  ))}
+                  {approval ? (
+                    <li>
+                      <code>gate</code> Admin approval (played by you) —{" "}
+                      <b>{approval === "approved" ? "approved" : "changes requested"}</b>
+                    </li>
+                  ) : null}
+                </ul>
+                <p className="muted">
+                  This trail is the run's own record in the workflow audit
+                  log — the same evidence a charter KPI is verified against
+                  after go-live.
+                </p>
+              </section>
+              <section className="wt-finale-block">
+                <h4>Against the charter's success measures</h4>
+                <ul className="wt-measures-check">
+                  {demoCase.successMeasures.map((m, i) => {
+                    const kind = demoCase.measureKinds[i];
+                    return (
+                      <li key={m}>
+                        {kind === "process" ? "◐" : "✓"} <b>{m}</b> —{" "}
+                        {kind === "demonstrated"
+                          ? "demonstrated by this run."
+                          : kind === "audit"
+                            ? "demonstrated: the trail above is written automatically."
+                            : "a process outcome, verified over time as a charter KPI once live."}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+              <div className="wt-nav">
+                <button
+                  className="btn-ghost"
+                  onClick={() => setStageIndex(0)}
+                >
+                  ← Walk the stages again
+                </button>
+                <button className="btn-primary" onClick={reset}>
+                  Run it again
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
       )}
     </div>
   );

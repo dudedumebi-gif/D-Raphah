@@ -897,6 +897,7 @@ function App() {
             </span>
           ) : null}
         </div>
+        <div className="view-scroll">
         {environment === "demo" && (projects.length === 0 || openGates.length === 0) ? (
           <section className="setup-checklist panel" aria-labelledby="df-setup-heading">
             <div><p className="eyebrow accent">Recommended next steps</p><h2 id="df-setup-heading">Prepare a delivery workspace</h2><p className="muted">Create the project, establish a baseline, then collect evidence before release.</p></div>
@@ -940,6 +941,7 @@ function App() {
             onPreview={openPreview}
           />
         )}
+        </div>
       </main>
 
       {showProjectForm ? (
