@@ -480,3 +480,49 @@ button {
     gap: 18px;
   }
 }
+
+/* ── Environment separation (Phase 0) ─────────────────────────────── */
+.env-switch {
+  display: inline-flex;
+  background: #f6f5f8;
+  border: 1px solid #e2dff0;
+  border-radius: 8px;
+  padding: 3px;
+  gap: 3px;
+}
+.env-switch button {
+  padding: 7px 12px;
+  border-radius: 6px;
+  background: transparent;
+  color: #625e74;
+}
+.env-switch button.active {
+  background: #8b75d1;
+  color: #f4f1ff;
+}
+.app-shell.env-production .env-switch button.active {
+  background: #1d6b4f;
+  color: #eafff5;
+}
+.pilot-badge.env-badge-production {
+  background: #1d6b4f;
+  color: #eafff5;
+}
+.app-shell.env-demo .status-bar {
+  box-shadow: inset 3px 0 0 #8b75d1;
+}
+.app-shell.env-production .status-bar {
+  box-shadow: inset 3px 0 0 #1d6b4f;
+  background: #eef7f2;
+}
+.env-scope-notice h3 {
+  margin: 6px 0 10px;
+}
+.env-scope-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+}
+.env-scope-notice {
+  padding: 22px 24px;
+}

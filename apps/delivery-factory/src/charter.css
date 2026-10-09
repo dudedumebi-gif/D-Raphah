@@ -1,0 +1,147 @@
+/* Project charter panel (Phase 1) — rendered from Monitoring. */
+.charter-panel {
+  margin-top: 18px;
+  background: #141a2e;
+  border: 1px solid #232c49;
+  border-radius: 12px;
+  padding: 20px 22px;
+  color: #dbe2f5;
+}
+.charter-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.charter-head h3 {
+  margin: 4px 0 6px;
+  font-size: 18px;
+}
+.charter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+  margin-top: 12px;
+}
+.charter-section {
+  background: #101527;
+  border: 1px solid #20294a;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.charter-section h4 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #8b93ad;
+}
+.charter-section p {
+  margin: 0;
+  line-height: 1.55;
+}
+.charter-wide {
+  grid-column: 1 / -1;
+}
+.charter-list {
+  margin: 0;
+  padding-left: 16px;
+  line-height: 1.55;
+}
+.charter-list li {
+  margin-bottom: 10px;
+}
+.charter-sublist {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: #a7e8c5;
+}
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.kpi-card {
+  background: #0c1122;
+  border: 1px solid #263157;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.kpi-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.kpi-status {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #2a2f45;
+  color: #aab2cc;
+}
+.kpi-status.kpi-met {
+  background: #123f2b;
+  color: #4ade80;
+}
+.kpi-status.kpi-missed {
+  background: #3f1d1d;
+  color: #f08a8a;
+}
+.kpi-target {
+  margin: 8px 0 4px;
+  line-height: 1.5;
+}
+.kpi-measurement {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.kpi-verdict {
+  margin: 0 0 10px;
+  line-height: 1.55;
+  background: #101a30;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.kpi-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.kpi-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #8b93ad;
+}
+.kpi-form input {
+  background: #0a0f1f;
+  border: 1px solid #2c3760;
+  border-radius: 7px;
+  color: #e6ebfa;
+  padding: 8px 10px;
+  font: 500 13px Manrope, sans-serif;
+}
+.kpi-form-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mon-charter-btn {
+  margin-left: 10px;
+  background: #1a2340;
+  border: 1px solid #31407a;
+  color: #9db4e8;
+  border-radius: 6px;
+  padding: 3px 9px;
+  font: 600 11px Manrope, sans-serif;
+  cursor: pointer;
+}
+.mon-charter-btn:hover {
+  border-color: #4f7cff;
+}

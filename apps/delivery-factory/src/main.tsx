@@ -13,7 +13,9 @@ import "./monitoring.css";
 import "./ux-fixes.css";
 import { WorkflowsSection } from "./workflows";
 import { MonitoringSection } from "./monitoring";
-import { AuthProvider, LoginScreen, useAuth } from "./auth";
+import { ReviewDrawer, type ReviewState } from "./review";
+import { AuthProvider, LoginScreen, getAuthToken, useAuth } from "./auth";
+import type { DeliveryEnvironment } from "./environment";
 
 type View =
   | "portfolio"
@@ -26,28 +28,70 @@ type View =
   | "monitoring"
   | "audit"
   | "operations";
-type ProjectStage =
+export type ProjectStage =
   "Discovery" | "Plan" | "Build" | "Ready for release" | "Complete";
 
-type Project = {
+/**
+ * The demo workspace's local charter: the same shape the Lead Engine
+ * handoff package gives a production project (Phase 1) — problem,
+ * objective, success criteria, risks — so every demo decision can be
+ * reviewed against an intended purpose.
+ */
+export type ProjectCharter = {
+  problemStatement: string;
+  objective: string;
+  successCriteria: string[];
+  risks: string[];
+};
+
+export type Project = {
   id: string;
   name: string;
   client: string;
   stage: ProjectStage;
-  progress: number;
   owner: string;
   due: string;
   tone: "violet" | "amber" | "green";
-  evidence: number;
+  charter: ProjectCharter;
 };
 
-type Gate = {
+export type Gate = {
   id: string;
   projectId: string;
   label: string;
   status: "Needs reviewer" | "Client response" | "Ready to review" | "Approved";
+  /** Why this gate exists — the rationale shown before anyone approves. */
+  purpose: string;
+  /** Acceptance criteria (from the project charter) this gate validates. */
+  criteria: string[];
+  /** The stage this gate guards: it must clear before leaving that stage. */
+  stage: ProjectStage;
 };
-type AuditEvent = { id: string; action: string; subject: string; at: string };
+
+/**
+ * A real evidence record (Phase 2). Coverage is derived from records —
+ * a criterion counts as covered when at least one record supports it.
+ */
+export type EvidenceRecord = {
+  id: string;
+  projectId: string;
+  gateId: string | null;
+  title: string;
+  checkpointType: "test-run" | "review" | "document" | "metric" | "sign-off";
+  note: string;
+  criteria: string[];
+  capturedBy: string;
+  at: string;
+};
+
+export type AuditEvent = {
+  id: string;
+  action: string;
+  subject: string;
+  /** Business reading of the decision (rationale, quantified context). */
+  detail?: string;
+  at: string;
+};
 
 const seedProjects: Project[] = [
   {
@@ -55,33 +99,68 @@ const seedProjects: Project[] = [
     name: "Northstar Health",
     client: "Northstar Health · NHS",
     stage: "Build",
-    progress: 72,
     owner: "AM",
     due: "Sep 26",
     tone: "violet",
-    evidence: 86,
+    charter: {
+      problemStatement:
+        "Referral letters and discharge summaries are re-keyed by hand between systems; the delays stall patient flow and bury clinicians in admin.",
+      objective:
+        "Automate referral intake and discharge-summary drafting across Northstar clinics, with clinicians approving every draft.",
+      successCriteria: [
+        "Referral intake runs without manual re-keying",
+        "Discharge drafts are produced for clinician approval within 15 minutes",
+        "Every automated step leaves an audit record",
+        "No patient data leaves the approved region",
+      ],
+      risks: [
+        "Integration access to the legacy EHR is unconfirmed",
+        "Clinician review capacity at go-live",
+      ],
+    },
   },
   {
     id: "project-field-form",
     name: "Field & Form",
     client: "Field & Form · Retail",
     stage: "Discovery",
-    progress: 34,
     owner: "JT",
     due: "Oct 04",
     tone: "amber",
-    evidence: 54,
+    charter: {
+      problemStatement:
+        "Store teams report stock exceptions on paper forms; head office sees them days later, after the shelf has already lost sales.",
+      objective:
+        "Digitize stock-exception capture with automated triage to the right team.",
+      successCriteria: [
+        "Exceptions are captured digitally at the store",
+        "Triage routes exceptions to the right team automatically",
+        "Weekly exception summary is generated without manual collation",
+      ],
+      risks: ["Store Wi-Fi coverage is uneven across locations"],
+    },
   },
   {
     id: "project-atlas",
     name: "Atlas Civic Lab",
     client: "Atlas Civic Lab · Public",
     stage: "Ready for release",
-    progress: 94,
     owner: "SK",
     due: "Sep 20",
     tone: "green",
-    evidence: 100,
+    charter: {
+      problemStatement:
+        "Permit applications arrive by email and are tracked in spreadsheets; applicants cannot see their status and phone the office instead.",
+      objective:
+        "Automate permit intake, status tracking, and applicant notifications — notifications drafted for staff approval, never sent automatically.",
+      successCriteria: [
+        "Applications are registered automatically on receipt",
+        "Applicants can see live status without contacting the office",
+        "Notifications are drafted for staff approval, never sent automatically",
+        "Status history is fully auditable",
+      ],
+      risks: ["Peak-season application volume is untested"],
+    },
   },
 ];
 
@@ -91,26 +170,208 @@ const seedGates: Gate[] = [
     projectId: "project-atlas",
     label: "Release readiness",
     status: "Ready to review",
+    purpose:
+      "Final check that every acceptance criterion has evidence before the automation goes public.",
+    criteria: [
+      "Applications are registered automatically on receipt",
+      "Applicants can see live status without contacting the office",
+      "Notifications are drafted for staff approval, never sent automatically",
+      "Status history is fully auditable",
+    ],
+    stage: "Ready for release",
   },
   {
     id: "gate-scope",
     projectId: "project-northstar",
     label: "Scope clarification",
     status: "Client response",
+    purpose:
+      "Confirms the automation scope still matches the validated requirements before build proceeds further.",
+    criteria: [
+      "Referral intake runs without manual re-keying",
+      "Every automated step leaves an audit record",
+    ],
+    stage: "Build",
   },
   {
     id: "gate-architecture",
     projectId: "project-field-form",
     label: "Architecture baseline",
     status: "Needs reviewer",
+    purpose:
+      "Confirms the capture architecture and data model can deliver the charter before build starts.",
+    criteria: [
+      "Exceptions are captured digitally at the store",
+      "Triage routes exceptions to the right team automatically",
+    ],
+    stage: "Discovery",
   },
   {
     id: "gate-evidence",
     projectId: "project-northstar",
     label: "Test evidence",
     status: "Needs reviewer",
+    purpose:
+      "Verifies the test evidence covers the acceptance criteria before the project can leave Build.",
+    criteria: [
+      "Discharge drafts are produced for clinician approval within 15 minutes",
+      "Every automated step leaves an audit record",
+    ],
+    stage: "Build",
   },
 ];
+
+const seedEvidence: EvidenceRecord[] = [
+  {
+    id: "evidence-northstar-intake",
+    projectId: "project-northstar",
+    gateId: "gate-scope",
+    title: "Referral intake test run — 24 synthetic referrals",
+    checkpointType: "test-run",
+    note: "All 24 referrals registered without manual re-keying; timings logged.",
+    criteria: ["Referral intake runs without manual re-keying"],
+    capturedBy: "AM",
+    at: "2026-09-24T14:00:00.000Z",
+  },
+  {
+    id: "evidence-northstar-audit",
+    projectId: "project-northstar",
+    gateId: "gate-evidence",
+    title: "Audit extract — intake run trail",
+    checkpointType: "document",
+    note: "Every automated step in the test run produced an audit record.",
+    criteria: ["Every automated step leaves an audit record"],
+    capturedBy: "AM",
+    at: "2026-09-24T15:30:00.000Z",
+  },
+  {
+    id: "evidence-northstar-draft",
+    projectId: "project-northstar",
+    gateId: "gate-evidence",
+    title: "Discharge draft timing measurement",
+    checkpointType: "metric",
+    note: "Median draft production 11 minutes across the test cohort.",
+    criteria: [
+      "Discharge drafts are produced for clinician approval within 15 minutes",
+    ],
+    capturedBy: "AM",
+    at: "2026-09-25T09:15:00.000Z",
+  },
+  {
+    id: "evidence-field-capture",
+    projectId: "project-field-form",
+    gateId: "gate-architecture",
+    title: "Store capture prototype review",
+    checkpointType: "review",
+    note: "Prototype captures an exception digitally in under a minute per item.",
+    criteria: ["Exceptions are captured digitally at the store"],
+    capturedBy: "JT",
+    at: "2026-09-23T11:00:00.000Z",
+  },
+  {
+    id: "evidence-atlas-intake",
+    projectId: "project-atlas",
+    gateId: "gate-release",
+    title: "Intake registration test — 40 emailed applications",
+    checkpointType: "test-run",
+    note: "All applications registered automatically on receipt.",
+    criteria: ["Applications are registered automatically on receipt"],
+    capturedBy: "SK",
+    at: "2026-09-18T10:00:00.000Z",
+  },
+  {
+    id: "evidence-atlas-status",
+    projectId: "project-atlas",
+    gateId: "gate-release",
+    title: "Applicant status page walkthrough",
+    checkpointType: "review",
+    note: "Status visible end to end without contacting the office.",
+    criteria: ["Applicants can see live status without contacting the office"],
+    capturedBy: "SK",
+    at: "2026-09-18T13:00:00.000Z",
+  },
+  {
+    id: "evidence-atlas-drafts",
+    projectId: "project-atlas",
+    gateId: "gate-release",
+    title: "Notification draft samples",
+    checkpointType: "document",
+    note: "Notifications produced as drafts; nothing sent automatically.",
+    criteria: [
+      "Notifications are drafted for staff approval, never sent automatically",
+    ],
+    capturedBy: "SK",
+    at: "2026-09-19T09:00:00.000Z",
+  },
+  {
+    id: "evidence-atlas-audit",
+    projectId: "project-atlas",
+    gateId: "gate-release",
+    title: "Status history audit extract",
+    checkpointType: "document",
+    note: "Full status history reconstructable from the audit trail.",
+    criteria: ["Status history is fully auditable"],
+    capturedBy: "SK",
+    at: "2026-09-19T10:30:00.000Z",
+  },
+];
+
+/** Criteria (by exact text) covered by at least one evidence record. */
+export function coveredCriteria(
+  projectId: string,
+  records: EvidenceRecord[],
+): Set<string> {
+  const covered = new Set<string>();
+  for (const record of records) {
+    if (record.projectId !== projectId) continue;
+    for (const criterion of record.criteria) covered.add(criterion);
+  }
+  return covered;
+}
+
+/** Evidence coverage % for a project: charter criteria with evidence. */
+export function evidenceCoverage(
+  project: Project,
+  records: EvidenceRecord[],
+): number {
+  const criteria = project.charter.successCriteria;
+  if (criteria.length === 0) return 0;
+  const covered = coveredCriteria(project.id, records);
+  const hit = criteria.filter((criterion) => covered.has(criterion)).length;
+  return Math.round((hit / criteria.length) * 100);
+}
+
+export const STAGE_ORDER: ProjectStage[] = [
+  "Discovery",
+  "Plan",
+  "Build",
+  "Ready for release",
+  "Complete",
+];
+
+/**
+ * Progress is calculated, never typed in: the stage contributes its base
+ * (20 points per stage), and the remaining span is earned half by the
+ * current stage's gates being approved and half by evidence coverage.
+ */
+export function projectProgress(
+  project: Project,
+  gates: Gate[],
+  records: EvidenceRecord[],
+): number {
+  const index = STAGE_ORDER.indexOf(project.stage);
+  if (project.stage === "Complete") return 100;
+  const stageGates = gates.filter(
+    (gate) => gate.projectId === project.id && gate.stage === project.stage,
+  );
+  const gateFraction = stageGates.length
+    ? stageGates.filter((gate) => gate.status === "Approved").length /
+      stageGates.length
+    : 1;
+  const completion =
+    (gateFraction + evidenceCoverage(project, records) / 100) / 2;
+  return Math.round(index * 20 + completion * 20);
+}
 
 const navItems: Array<{ id: View; label: string }> = [
   { id: "portfolio", label: "Portfolio" },
@@ -153,25 +414,69 @@ function useStoredState<T>(key: string, initialValue: T) {
   return [value, setValue] as const;
 }
 
+/** Views backed by the demo workspace's browser-local sample data. */
+const LOCAL_DATA_VIEWS: View[] = [
+  "portfolio",
+  "projects",
+  "plans",
+  "gates",
+  "evidence",
+  "clients",
+  "audit",
+];
+
+function EnvironmentScopeNotice(props: {
+  onSwitchToDemo: () => void;
+  onNavigate: (view: View) => void;
+}) {
+  return (
+    <div className="content">
+      <section className="panel env-scope-notice">
+        <p className="eyebrow accent">Production environment</p>
+        <h3>This view holds demo sample data</h3>
+        <p className="muted">
+          The portfolio, projects, plans, gates, evidence, client views, and
+          audit explorer are the demo workspace's browser-local sample data,
+          so they live in the demo environment. Production delivery projects
+          are created from Lead Engine handoffs — watch them arrive in
+          Monitoring, and run production automations from the production
+          workflow list. The two environments never mix.
+        </p>
+        <div className="env-scope-actions">
+          <button className="primary" onClick={props.onSwitchToDemo}>
+            Open the demo environment
+          </button>
+          <button className="quiet" onClick={() => props.onNavigate("monitoring")}>
+            Go to monitoring
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function App() {
   const auth = useAuth();
   const [view, setView] = useState<View>("portfolio");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [workspace, setWorkspace] = useState<"All workspaces" | "Active only">(
-    "All workspaces",
-  );
+  const [environment, setEnvironmentState] =
+    useStoredState<DeliveryEnvironment>("raphah.delivery.environment.v1", "demo");
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [notice, setNotice] = useState(
-    "Portfolio data is sample data saved in this browser. Workflows & Monitoring reflect the live backend.",
+    "Demo and production are separate environments. The demo portfolio is sample data in this browser; workflows & monitoring reflect the live backend for the selected environment.",
   );
   const [projects, setProjects] = useStoredState(
-    "raphah.delivery.projects.v1",
+    "raphah.delivery.projects.v2",
     seedProjects,
   );
   const [gates, setGates] = useStoredState(
-    "raphah.delivery.gates.v1",
+    "raphah.delivery.gates.v2",
     seedGates,
   );
+  const [evidenceRecords, setEvidenceRecords] = useStoredState<
+    EvidenceRecord[]
+  >("raphah.delivery.evidence.v1", seedEvidence);
+  const [reviewTarget, setReviewTarget] = useState<ReviewState | null>(null);
   const [audit, setAudit] = useStoredState<AuditEvent[]>(
     "raphah.delivery.audit.v1",
     [
@@ -188,31 +493,38 @@ function App() {
     () =>
       projects.length
         ? Math.round(
-            projects.reduce((sum, project) => sum + project.progress, 0) /
-              projects.length,
+            projects.reduce(
+              (sum, project) =>
+                sum + projectProgress(project, gates, evidenceRecords),
+              0,
+            ) / projects.length,
           )
         : 0,
-    [projects],
+    [projects, gates, evidenceRecords],
   );
   const evidenceHealth = useMemo(
     () =>
       projects.length
         ? Math.round(
-            projects.reduce((sum, project) => sum + project.evidence, 0) /
-              projects.length,
+            projects.reduce(
+              (sum, project) =>
+                sum + evidenceCoverage(project, evidenceRecords),
+              0,
+            ) / projects.length,
           )
         : 0,
-    [projects],
+    [projects, evidenceRecords],
   );
   const openGates = gates.filter((gate) => gate.status !== "Approved");
 
-  function record(action: string, subject: string) {
+  function record(action: string, subject: string, detail?: string) {
     setAudit((current) =>
       [
         {
           id: crypto.randomUUID(),
           action,
           subject,
+          detail,
           at: new Date().toISOString(),
         },
         ...current,
@@ -223,8 +535,9 @@ function App() {
   function resetDemoWorkspace() {
     if (!window.confirm("Reset the demo workspace? This removes local projects, gates, and audit events from this browser.")) return;
     for (const key of [
-      "raphah.delivery.projects.v1",
-      "raphah.delivery.gates.v1",
+      "raphah.delivery.projects.v2",
+      "raphah.delivery.gates.v2",
+      "raphah.delivery.evidence.v1",
       "raphah.delivery.audit.v1",
     ]) {
       try {
@@ -234,6 +547,47 @@ function App() {
       }
     }
     window.location.reload();
+  }
+
+  function switchEnvironment(next: DeliveryEnvironment) {
+    if (next === environment) return;
+    setEnvironmentState(next);
+    record("environment.switched", next);
+    setNotice(
+      next === "demo"
+        ? "Demo environment: sample portfolio data and demo-scoped workflows. Nothing here touches production."
+        : "Production environment: live workflows and client delivery data. Demo data stays in the demo environment.",
+    );
+  }
+
+  async function resetDemoData() {
+    if (!window.confirm("Reset the demo environment on the server? This clears demo workflow runs, demo projects, and demo handoff records. Demo workflow definitions are kept. Production is never touched.")) return;
+    try {
+      const token = getAuthToken();
+      const res = await fetch("/api/workflows/environments/demo/reset", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      if (!res.ok) {
+        throw new Error(
+          typeof data.error === "string"
+            ? data.error
+            : `Reset failed (${res.status})`,
+        );
+      }
+      setNotice(
+        `Demo environment reset on the server: cleared ${String(data.workflowRuns ?? 0)} workflow runs, ${String(data.projects ?? 0)} projects, ${String(data.inbox ?? 0)} handoff records.`,
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Demo reset failed");
+    }
   }
 
   function changeView(nextView: View) {
@@ -255,14 +609,19 @@ function App() {
       name,
       client,
       stage: "Discovery",
-      progress: 10,
       owner: String(form.get("owner") || "DD")
         .trim()
         .slice(0, 2)
         .toUpperCase(),
       due: String(form.get("due") || "TBD"),
       tone: "violet",
-      evidence: 0,
+      charter: {
+        problemStatement:
+          "Charter not yet written for this locally created project. Production projects receive their charter from the Lead Engine handoff package.",
+        objective: "To be defined with the client before the baseline gate.",
+        successCriteria: [],
+        risks: [],
+      },
     };
     setProjects((current) => [project, ...current]);
     setGates((current) => [
@@ -271,6 +630,10 @@ function App() {
         projectId: project.id,
         label: "Discovery baseline",
         status: "Needs reviewer",
+        purpose:
+          "Confirms the problem, objective, and success criteria are agreed before the project leaves Discovery.",
+        criteria: [],
+        stage: "Discovery",
       },
       ...current,
     ]);
@@ -280,60 +643,120 @@ function App() {
     setNotice(`${project.name} was added to the delivery portfolio.`);
   }
 
-  function advanceProject(project: Project) {
+  /* ── Review-first actions (Phase 2) ────────────────────────────────
+   * Nothing approves, advances, or captures blind anymore: every action
+   * opens the review drawer first, and the decision lands here with its
+   * rationale written into the audit trail. */
+
+  function openGateReview(gate: Gate) {
+    setReviewTarget({ kind: "gate", projectId: gate.projectId, gateId: gate.id });
+  }
+
+  function openAdvanceReview(project: Project) {
     if (project.stage === "Complete") return;
-    if (!window.confirm(`Advance ${project.name} from ${project.stage}? This creates an audited delivery decision.`)) return;
-    const order: ProjectStage[] = [
-      "Discovery",
-      "Plan",
-      "Build",
-      "Ready for release",
-      "Complete",
-    ];
+    setReviewTarget({ kind: "advance", projectId: project.id });
+  }
+
+  function openCaptureReview(project: Project) {
+    setReviewTarget({ kind: "evidence", projectId: project.id });
+  }
+
+  function openPreview(project: Project) {
+    setReviewTarget({ kind: "preview", projectId: project.id });
+  }
+
+  function approveGate(gate: Gate, note: string) {
+    setGates((current) =>
+      current.map((item) =>
+        item.id === gate.id ? { ...item, status: "Approved" as const } : item,
+      ),
+    );
+    const project = projects.find((item) => item.id === gate.projectId);
+    const covered = coveredCriteria(gate.projectId, evidenceRecords);
+    const met = gate.criteria.filter((c) => covered.has(c)).length;
+    record(
+      "gate.approved",
+      `${project?.name || "Project"} · ${gate.label}`,
+      `Criteria with evidence: ${met}/${gate.criteria.length}.` +
+        (note ? ` Decision note: ${note}` : " No decision note recorded."),
+    );
+    setNotice(
+      `${gate.label} approved after review. The decision and its rationale are in the audit trail.`,
+    );
+    setReviewTarget(null);
+  }
+
+  function advanceProject(project: Project, note: string) {
+    if (project.stage === "Complete") return;
     const nextStage =
-      order[Math.min(order.indexOf(project.stage) + 1, order.length - 1)];
-    const progress =
-      nextStage === "Complete" ? 100 : Math.min(95, project.progress + 20);
+      STAGE_ORDER[
+        Math.min(STAGE_ORDER.indexOf(project.stage) + 1, STAGE_ORDER.length - 1)
+      ];
+    const blockers = gates.filter(
+      (gate) =>
+        gate.projectId === project.id &&
+        gate.stage === project.stage &&
+        gate.status !== "Approved",
+    );
     setProjects((current) =>
       current.map((item) =>
-        item.id === project.id ? { ...item, stage: nextStage, progress } : item,
+        item.id === project.id ? { ...item, stage: nextStage } : item,
       ),
     );
     record(
       "project.stage_changed",
       `${project.name}: ${project.stage} → ${nextStage}`,
+      (blockers.length
+        ? `Advanced with ${blockers.length} unapproved gate(s) for ${project.stage}: ${blockers.map((g) => g.label).join(", ")}. `
+        : `All gates for ${project.stage} were approved. `) +
+        (note ? `Decision note: ${note}` : "No decision note recorded."),
     );
-    setNotice(`${project.name} moved to ${nextStage}.`);
-  }
-
-  function approveGate(gate: Gate) {
-    if (!window.confirm(`Approve ${gate.label}? This records a human delivery decision.`)) return;
-    setGates((current) =>
-      current.map((item) =>
-        item.id === gate.id ? { ...item, status: "Approved" } : item,
-      ),
-    );
-    const project = projects.find((item) => item.id === gate.projectId);
-    record("gate.approved", `${project?.name || "Project"} · ${gate.label}`);
     setNotice(
-      `${gate.label} approved. The decision is recorded in the local audit trail.`,
+      blockers.length
+        ? `${project.name} moved to ${nextStage} with unapproved gates — the override rationale is in the audit trail.`
+        : `${project.name} moved to ${nextStage}.`,
     );
+    setReviewTarget(null);
   }
 
-  function captureEvidence(project: Project) {
-    setProjects((current) =>
-      current.map((item) =>
-        item.id === project.id
-          ? { ...item, evidence: Math.min(100, item.evidence + 10) }
-          : item,
-      ),
+  function captureEvidence(
+    project: Project,
+    draft: {
+      title: string;
+      checkpointType: EvidenceRecord["checkpointType"];
+      gateId: string | null;
+      note: string;
+      criteria: string[];
+    },
+  ) {
+    const record_: EvidenceRecord = {
+      id: crypto.randomUUID(),
+      projectId: project.id,
+      gateId: draft.gateId,
+      title: draft.title,
+      checkpointType: draft.checkpointType,
+      note: draft.note,
+      criteria: draft.criteria,
+      capturedBy: "DD",
+      at: new Date().toISOString(),
+    };
+    const nextRecords = [record_, ...evidenceRecords];
+    setEvidenceRecords(nextRecords);
+    const coverage = evidenceCoverage(project, nextRecords);
+    record(
+      "evidence.captured",
+      `${project.name} · ${draft.title}`,
+      `Checkpoint (${draft.checkpointType}) supports ${draft.criteria.length} criteria; coverage is now ${coverage}%.` +
+        (draft.note ? ` Note: ${draft.note}` : ""),
     );
-    record("evidence.captured", project.name);
-    setNotice(`Evidence coverage for ${project.name} increased by 10%.`);
+    setNotice(
+      `Evidence captured for ${project.name}. Coverage is now ${coverage}% — derived from evidence records, not a typed-in number.`,
+    );
+    setReviewTarget(null);
   }
 
   return (
-    <div className="app-shell factory-shell">
+    <div className={`app-shell factory-shell env-${environment}`}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">R</span>
@@ -351,10 +774,12 @@ function App() {
               aria-current={view === item.id ? "page" : undefined}
             >
               <span>{item.label}</span>
-              {item.id === "projects" ? (
+              {environment === "demo" && item.id === "projects" ? (
                 <strong>{projects.length}</strong>
               ) : null}
-              {item.id === "gates" ? <strong>{openGates.length}</strong> : null}
+              {environment === "demo" && item.id === "gates" ? (
+                <strong>{openGates.length}</strong>
+              ) : null}
             </button>
           ))}
         </nav>
@@ -393,24 +818,32 @@ function App() {
             <h1>{viewTitles[view]}</h1>
           </div>
           <div className="top-actions">
-            <button
-              className="quiet"
-              onClick={() =>
-                setWorkspace((current) =>
-                  current === "All workspaces"
-                    ? "Active only"
-                    : "All workspaces",
-                )
-              }
-            >
-              {workspace}⌄
-            </button>
-            <button
-              className="primary"
-              onClick={() => setShowProjectForm(true)}
-            >
-              + New project
-            </button>
+            <div className="env-switch" role="group" aria-label="Environment">
+              <button
+                type="button"
+                className={environment === "demo" ? "active" : ""}
+                aria-pressed={environment === "demo"}
+                onClick={() => switchEnvironment("demo")}
+              >
+                Demo
+              </button>
+              <button
+                type="button"
+                className={environment === "production" ? "active" : ""}
+                aria-pressed={environment === "production"}
+                onClick={() => switchEnvironment("production")}
+              >
+                Production
+              </button>
+            </div>
+            {environment === "demo" ? (
+              <button
+                className="primary"
+                onClick={() => setShowProjectForm(true)}
+              >
+                + New project
+              </button>
+            ) : null}
           </div>
         </header>
         {mobileNavOpen ? (
@@ -423,16 +856,30 @@ function App() {
         ) : null}
         <div className="status-bar" role="status" aria-live="polite">
           <span className="status-dot" />
-          <span className="pilot-badge">Pilot demo</span>
+          <span className={`pilot-badge env-badge-${environment}`}>
+            {environment === "production" ? "Production" : "Demo environment"}
+          </span>
           <span>{notice}</span>
-          <button
-            type="button"
-            className="status-action"
-            onClick={resetDemoWorkspace}
-            title="Clear the sample portfolio data from this browser and restore the seed data"
-          >
-            Reset demo workspace
-          </button>
+          {environment === "demo" ? (
+            <>
+              <button
+                type="button"
+                className="status-action"
+                onClick={resetDemoWorkspace}
+                title="Clear the sample portfolio data from this browser and restore the seed data"
+              >
+                Reset demo workspace
+              </button>
+              <button
+                type="button"
+                className="status-action"
+                onClick={() => void resetDemoData()}
+                title="Clear demo workflow runs, demo projects, and demo handoff records on the server. Demo workflow definitions are kept; production is never touched"
+              >
+                Reset demo data
+              </button>
+            </>
+          ) : null}
           <span className="auth-email" title="Signed-in operator">
             {auth.email}
           </span>
@@ -450,7 +897,7 @@ function App() {
             </span>
           ) : null}
         </div>
-        {projects.length === 0 || openGates.length === 0 ? (
+        {environment === "demo" && (projects.length === 0 || openGates.length === 0) ? (
           <section className="setup-checklist panel" aria-labelledby="df-setup-heading">
             <div><p className="eyebrow accent">Recommended next steps</p><h2 id="df-setup-heading">Prepare a delivery workspace</h2><p className="muted">Create the project, establish a baseline, then collect evidence before release.</p></div>
             <div className="checklist-grid">
@@ -460,18 +907,24 @@ function App() {
             </div>
           </section>
         ) : null}
-        {view === "portfolio" ? (
+        {environment === "production" && LOCAL_DATA_VIEWS.includes(view) ? (
+          <EnvironmentScopeNotice
+            onSwitchToDemo={() => switchEnvironment("demo")}
+            onNavigate={changeView}
+          />
+        ) : view === "portfolio" ? (
           <Portfolio
             projects={projects}
             gates={gates}
+            evidenceRecords={evidenceRecords}
             deliveryHealth={deliveryHealth}
             evidenceHealth={evidenceHealth}
             onNavigate={changeView}
-            onAdvance={advanceProject}
-            onApproveGate={approveGate}
+            onAdvance={openAdvanceReview}
+            onApproveGate={openGateReview}
           />
         ) : view === "workflows" ? (
-          <WorkflowsSection />
+          <WorkflowsSection environment={environment} />
         ) : view === "monitoring" ? (
           <MonitoringSection />
         ) : (
@@ -479,10 +932,12 @@ function App() {
             view={view}
             projects={projects}
             gates={gates}
+            evidenceRecords={evidenceRecords}
             audit={audit}
-            onAdvance={advanceProject}
-            onApproveGate={approveGate}
-            onCaptureEvidence={captureEvidence}
+            onAdvance={openAdvanceReview}
+            onApproveGate={openGateReview}
+            onCaptureEvidence={openCaptureReview}
+            onPreview={openPreview}
           />
         )}
       </main>
@@ -493,6 +948,19 @@ function App() {
           onSubmit={addProject}
         />
       ) : null}
+      {reviewTarget ? (
+        <ReviewDrawer
+          target={reviewTarget}
+          projects={projects}
+          gates={gates}
+          evidenceRecords={evidenceRecords}
+          audit={audit}
+          onClose={() => setReviewTarget(null)}
+          onApproveGate={approveGate}
+          onAdvanceProject={advanceProject}
+          onCaptureEvidence={captureEvidence}
+        />
+      ) : null}
     </div>
   );
 }
@@ -500,6 +968,7 @@ function App() {
 function Portfolio({
   projects,
   gates,
+  evidenceRecords,
   deliveryHealth,
   evidenceHealth,
   onNavigate,
@@ -508,6 +977,7 @@ function Portfolio({
 }: {
   projects: Project[];
   gates: Gate[];
+  evidenceRecords: EvidenceRecord[];
   deliveryHealth: number;
   evidenceHealth: number;
   onNavigate: (view: View) => void;
@@ -578,7 +1048,12 @@ function Portfolio({
               View all projects →
             </button>
           </div>
-          <ProjectList projects={projects.slice(0, 4)} onAdvance={onAdvance} />
+          <ProjectList
+            projects={projects.slice(0, 4)}
+            gates={gates}
+            evidenceRecords={evidenceRecords}
+            onAdvance={onAdvance}
+          />
         </section>
         <section className="panel gates">
           <div className="panel-head">
@@ -621,18 +1096,22 @@ function WorkspaceView({
   view,
   projects,
   gates,
+  evidenceRecords,
   audit,
   onAdvance,
   onApproveGate,
   onCaptureEvidence,
+  onPreview,
 }: {
   view: View;
   projects: Project[];
   gates: Gate[];
+  evidenceRecords: EvidenceRecord[];
   audit: AuditEvent[];
   onAdvance: (project: Project) => void;
   onApproveGate: (gate: Gate) => void;
   onCaptureEvidence: (project: Project) => void;
+  onPreview: (project: Project) => void;
 }) {
   if (view === "projects")
     return (
@@ -641,10 +1120,15 @@ function WorkspaceView({
           <div className="panel-head">
             <div>
               <h3>Delivery projects</h3>
-              <p>Stage changes are explicit and audited</p>
+              <p>Stage changes are reviewed before they happen, and audited</p>
             </div>
           </div>
-          <ProjectList projects={projects} onAdvance={onAdvance} />
+          <ProjectList
+            projects={projects}
+            gates={gates}
+            evidenceRecords={evidenceRecords}
+            onAdvance={onAdvance}
+          />
         </section>
       </div>
     );
@@ -654,7 +1138,7 @@ function WorkspaceView({
         title="Plans & baselines"
         items={projects.map((item) => ({
           title: `${item.name} implementation plan`,
-          detail: `${item.stage} · ${item.progress}% complete`,
+          detail: `${item.charter.objective} · ${item.stage} · ${projectProgress(item, gates, evidenceRecords)}% complete (calculated)`,
           badge: item.stage,
         }))}
       />
@@ -684,41 +1168,76 @@ function WorkspaceView({
           <div className="panel-head">
             <div>
               <h3>Evidence coverage</h3>
-              <p>Capture a new evidence checkpoint for a project</p>
+              <p>
+                Coverage is derived from evidence records against each
+                project's charter criteria — capture creates a record, never
+                a typed-in percentage
+              </p>
             </div>
           </div>
           <div className="record-list">
-            {projects.map((project) => (
-              <div className="record-row" key={project.id}>
-                <div>
-                  <b>{project.name}</b>
-                  <small>{project.evidence}% of critical gates covered</small>
+            {projects.map((project) => {
+              const coverage = evidenceCoverage(project, evidenceRecords);
+              const records = evidenceRecords.filter(
+                (item) => item.projectId === project.id,
+              );
+              return (
+                <div className="record-row" key={project.id}>
+                  <div>
+                    <b>{project.name}</b>
+                    <small>
+                      {coverage}% of charter criteria covered ·{" "}
+                      {records.length} record{records.length === 1 ? "" : "s"}
+                      {records[0] ? ` · latest: ${records[0].title}` : ""}
+                    </small>
+                  </div>
+                  <div className="coverage">
+                    <i style={{ width: `${coverage}%` }} />
+                  </div>
+                  <button
+                    className="row-action"
+                    onClick={() => onCaptureEvidence(project)}
+                  >
+                    Capture evidence
+                  </button>
                 </div>
-                <div className="coverage">
-                  <i style={{ width: `${project.evidence}%` }} />
-                </div>
-                <button
-                  className="row-action"
-                  onClick={() => onCaptureEvidence(project)}
-                >
-                  Capture +10%
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       </div>
     );
   if (view === "clients")
     return (
-      <SimpleList
-        title="Client views"
-        items={projects.map((item) => ({
-          title: item.client,
-          detail: `${item.name} · ${item.progress}% delivery progress`,
-          badge: "Preview",
-        }))}
-      />
+      <div className="content">
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h3>Client views</h3>
+              <p>Preview renders exactly what the client sees</p>
+            </div>
+          </div>
+          <div className="record-list">
+            {projects.map((item) => (
+              <div className="record-row" key={item.id}>
+                <div>
+                  <b>{item.client}</b>
+                  <small>
+                    {item.name} · {projectProgress(item, gates, evidenceRecords)}
+                    % delivery progress (calculated)
+                  </small>
+                </div>
+                <button
+                  className="row-action"
+                  onClick={() => onPreview(item)}
+                >
+                  Preview
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
     );
   if (view === "audit")
     return (
@@ -736,6 +1255,9 @@ function WorkspaceView({
                 <div>
                   <b>{item.action}</b>
                   <small>{item.subject}</small>
+                  {item.detail ? (
+                    <small className="audit-detail">{item.detail}</small>
+                  ) : null}
                 </div>
                 <time>{new Date(item.at).toLocaleString()}</time>
               </div>
@@ -751,14 +1273,14 @@ function WorkspaceView({
         {
           title: "Persistence mode",
           detail:
-            "Browser-local preview until the dedicated Delivery Supabase project is provisioned.",
-          badge: "Preview",
+            "Neon-backed Delivery Factory database. Demo and production records are environment-scoped and never mix; only this portfolio's sample data is browser-local.",
+          badge: "Live",
         },
         {
           title: "Handoff receiver",
           detail:
-            "Versioned contract exists; authenticated production endpoint is not configured.",
-          badge: "Pending env",
+            "LeadEngineHandoffPackage/v1 intake is live: signature-verified accepts are stamped with their environment scope, and automation fires only inside that scope.",
+          badge: "Live",
         },
         {
           title: "Release authority",
@@ -773,48 +1295,55 @@ function WorkspaceView({
 
 function ProjectList({
   projects,
+  gates,
+  evidenceRecords,
   onAdvance,
 }: {
   projects: Project[];
+  gates: Gate[];
+  evidenceRecords: EvidenceRecord[];
   onAdvance: (project: Project) => void;
 }) {
   return (
     <div className="project-list">
-      {projects.map((project) => (
-        <div className="project-row" key={project.id}>
-          <div className="project-title">
-            <span className={`project-icon ${project.tone}`}>
-              {project.name.slice(0, 1)}
-            </span>
-            <div>
-              <b>{project.name}</b>
-              <small>{project.client}</small>
+      {projects.map((project) => {
+        const progress = projectProgress(project, gates, evidenceRecords);
+        return (
+          <div className="project-row" key={project.id}>
+            <div className="project-title">
+              <span className={`project-icon ${project.tone}`}>
+                {project.name.slice(0, 1)}
+              </span>
+              <div>
+                <b>{project.name}</b>
+                <small>{project.client}</small>
+              </div>
             </div>
-          </div>
-          <div className="stage">
-            <span>{project.stage}</span>
-            <div className="progress">
-              <i style={{ width: `${project.progress}%` }} />
+            <div className="stage">
+              <span>{project.stage}</span>
+              <div className="progress">
+                <i style={{ width: `${progress}%` }} />
+              </div>
+              <small>{progress}% complete · calculated</small>
             </div>
-            <small>{project.progress}% complete</small>
+            <div className="owner">
+              <span>{project.owner}</span>
+              <small>Owner</small>
+            </div>
+            <div className="due">
+              <b>{project.due}</b>
+              <small>Next gate</small>
+            </div>
+            <button
+              className="row-action project-action"
+              onClick={() => onAdvance(project)}
+              disabled={project.stage === "Complete"}
+            >
+              {project.stage === "Complete" ? "Complete" : "Review advance"}
+            </button>
           </div>
-          <div className="owner">
-            <span>{project.owner}</span>
-            <small>Owner</small>
-          </div>
-          <div className="due">
-            <b>{project.due}</b>
-            <small>Next gate</small>
-          </div>
-          <button
-            className="row-action project-action"
-            onClick={() => onAdvance(project)}
-            disabled={project.stage === "Complete"}
-          >
-            {project.stage === "Complete" ? "Complete" : "Advance"}
-          </button>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -847,7 +1376,7 @@ function GateList({
               <span className="verified">Recorded</span>
             ) : (
               <button className="row-action" onClick={() => onApprove(gate)}>
-                Approve
+                Review
               </button>
             )}
           </div>

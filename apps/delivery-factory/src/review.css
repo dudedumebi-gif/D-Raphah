@@ -1,0 +1,192 @@
+/* Review drawer (Phase 2) — inspect before act. */
+.review-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(24, 20, 43, 0.45);
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+}
+.review-drawer {
+  width: min(540px, 94vw);
+  height: 100%;
+  overflow-y: auto;
+  background: #ffffff;
+  box-shadow: -18px 0 40px rgba(24, 20, 43, 0.25);
+  padding: 22px 24px 28px;
+}
+.review-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  border-bottom: 1px solid #e7e4f2;
+  padding-bottom: 14px;
+  margin-bottom: 6px;
+}
+.review-head h3 {
+  margin: 4px 0 4px;
+  font-size: 19px;
+}
+.review-section {
+  padding: 14px 0;
+  border-bottom: 1px solid #efece8;
+}
+.review-section h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6d6684;
+}
+.review-section p {
+  margin: 0 0 8px;
+  line-height: 1.55;
+  font-size: 13.5px;
+}
+.review-criteria {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.review-criteria li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: #f8f7fc;
+  border: 1px solid #e7e4f2;
+  border-radius: 9px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.review-criteria li small {
+  color: #8473a8;
+}
+.review-criteria li.met {
+  border-color: #bfe3cf;
+  background: #f2faf5;
+}
+.review-criterion-mark {
+  font-weight: 800;
+  color: #b0722a;
+}
+.review-criteria li.met .review-criterion-mark {
+  color: #1d6b4f;
+}
+.review-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.review-warn {
+  background: #fdf3e3;
+  border: 1px solid #f0d9ae;
+  color: #7c5514;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.review-drawer textarea,
+.review-drawer input[type="text"],
+.review-form input,
+.review-form select,
+.review-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d9d4ea;
+  border-radius: 8px;
+  padding: 9px 11px;
+  font: 500 13.5px Manrope, sans-serif;
+  color: #241f3a;
+  background: #fff;
+}
+.review-form {
+  display: grid;
+  gap: 12px;
+}
+.review-form label {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #6d6684;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.review-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.review-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+.review-check input {
+  margin-top: 3px;
+}
+.review-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 18px;
+}
+.review-actions .primary:disabled,
+.review-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.client-card {
+  background: #f6f4ff;
+  border: 1px solid #ddd6f5;
+  border-radius: 12px;
+  padding: 18px;
+  margin: 14px 0 4px;
+}
+.client-card h4 {
+  margin: 4px 0 12px;
+  font-size: 17px;
+}
+.client-card h5 {
+  margin: 16px 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6d6684;
+}
+.client-progress {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.client-progress span {
+  display: block;
+  font-size: 11px;
+  color: #6d6684;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.client-progress b {
+  font-size: 15px;
+}
+.client-bar {
+  margin-bottom: 6px;
+}
+.audit-detail {
+  display: block;
+  color: #8473cd;
+  margin-top: 2px;
+}

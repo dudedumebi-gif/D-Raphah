@@ -455,3 +455,5 @@
   color: #aab2cc;
 }
 .wf-step details summary { cursor: pointer; color: #8b93ad; font-size: 12px; margin-top: 6px; }
+.wf-badge-env { background: #26314f; color: #9db4e8; }
+.wf-list-actions { display: flex; gap: 10px; align-items: center; }

@@ -1,6 +1,8 @@
 import type { ServerResponse } from "node:http";
 import { sendJson, type ApiRequest } from "./_lib/http.js";
 import projectHandler from "./_projects/[id].js";
+import charterHandler from "./_projects/[id]/charter.js";
+import kpiVerifyHandler from "./_projects/[id]/kpis/[kpiId]/verify.js";
 import clarificationsHandler from "./_projects/[id]/clarifications.js";
 import resolveClarificationHandler from "./_projects/[id]/clarifications/[cid]/resolve.js";
 import eventsHandler from "./_projects/[id]/events.js";
@@ -33,6 +35,17 @@ export default async function pjDispatch(
   if (segments.length === 1) {
     query.id = segments[0];
     handler = projectHandler as Handler;
+  } else if (segments.length === 2 && segments[1] === "charter") {
+    query.id = segments[0];
+    handler = charterHandler as Handler;
+  } else if (
+    segments.length === 4 &&
+    segments[1] === "kpis" &&
+    segments[3] === "verify"
+  ) {
+    query.id = segments[0];
+    query.kpiId = segments[2];
+    handler = kpiVerifyHandler as Handler;
   } else if (segments.length === 2 && segments[1] === "clarifications") {
     query.id = segments[0];
     handler = clarificationsHandler as Handler;

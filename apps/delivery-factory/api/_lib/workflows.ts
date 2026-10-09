@@ -11,7 +11,11 @@
  * database: integration is contract-only via POST /api/intake.
  */
 
-import type { NeonClient } from "./db.js";
+import {
+  rowEnvironment,
+  type DeliveryEnvironment,
+  type NeonClient,
+} from "./db.js";
 import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
@@ -69,6 +73,8 @@ export interface Workflow {
   name: string;
   description: string | null;
   status: WorkflowStatus;
+  /** Environment scope (Phase 0): demo fixtures never mix with production. */
+  environment: DeliveryEnvironment;
   trigger_type: WorkflowTriggerType;
   trigger_config: Record<string, unknown>;
   created_by: string | null;
@@ -90,6 +96,8 @@ export type StepStatus =
 export interface WorkflowRun {
   id: string;
   workflow_id: string;
+  /** Environment scope, inherited from the workflow at execution time. */
+  environment: DeliveryEnvironment;
   trigger_type: string;
   trigger_payload: Record<string, unknown> | null;
   status: RunStatus;
@@ -381,16 +389,27 @@ function evaluateCondition(
 
 /* ── CRUD ──────────────────────────────────────────────────────────────── */
 
-export async function listWorkflows(db: NeonClient): Promise<Workflow[]> {
-  const rows = await q(db)`
-    select id, name, description, status, trigger_type, trigger_config,
-           created_by, created_at, updated_at, published_at
-    from public.workflows order by updated_at desc`;
+export async function listWorkflows(
+  db: NeonClient,
+  environment?: DeliveryEnvironment,
+): Promise<Workflow[]> {
+  const rows = environment
+    ? await q(db)`
+        select id, name, description, status, environment, trigger_type,
+               trigger_config, created_by, created_at, updated_at, published_at
+        from public.workflows
+        where environment = ${environment}
+        order by updated_at desc`
+    : await q(db)`
+        select id, name, description, status, environment, trigger_type,
+               trigger_config, created_by, created_at, updated_at, published_at
+        from public.workflows order by updated_at desc`;
   return rows.map((r) => ({
     id: r.id as string,
     name: r.name as string,
     description: r.description as string | null,
     status: r.status as WorkflowStatus,
+    environment: rowEnvironment(r.environment),
     trigger_type: r.trigger_type as WorkflowTriggerType,
     trigger_config: (r.trigger_config ?? {}) as Record<string, unknown>,
     created_by: r.created_by as string | null,
@@ -405,26 +424,32 @@ export async function listWorkflows(db: NeonClient): Promise<Workflow[]> {
 export interface TriggerableWorkflow {
   id: string;
   name: string;
+  environment: DeliveryEnvironment;
   trigger_config: Record<string, unknown> | null;
 }
 
 /**
- * Published workflows subscribed to a trigger type (e.g. 'lead_handoff').
- * Trigger matching reuses the workflows table's own trigger_type column —
- * there is no second trigger registry.
+ * Published workflows subscribed to a trigger type (e.g. 'lead_handoff')
+ * within one environment scope. Trigger matching reuses the workflows
+ * table's own trigger_type column — there is no second trigger registry —
+ * and the environment filter is what keeps demo automation and production
+ * automation from ever firing for each other's events.
  */
 export async function listPublishedWorkflowsByTrigger(
   db: NeonClient,
   triggerType: string,
+  environment: DeliveryEnvironment,
 ): Promise<TriggerableWorkflow[]> {
   const rows = await q(db)`
-    select id, name, trigger_config
+    select id, name, trigger_config, environment
     from public.workflows
     where trigger_type = ${triggerType} and status = 'published'
+      and environment = ${environment}
     order by created_at asc`;
   return rows.map((r) => ({
     id: r.id as string,
     name: r.name as string,
+    environment: rowEnvironment(r.environment),
     trigger_config: (r.trigger_config ?? null) as Record<string, unknown> | null,
   }));
 }
@@ -464,8 +489,8 @@ export async function getWorkflow(
   db: NeonClient,
   id: string,
 ): Promise<Workflow | null> {  const rows = await q(db)`
-    select id, name, description, status, trigger_type, trigger_config,
-           created_by, created_at, updated_at, published_at
+    select id, name, description, status, environment, trigger_type,
+           trigger_config, created_by, created_at, updated_at, published_at
     from public.workflows where id = ${id}`;
   if (rows.length === 0) return null;
   const r = rows[0];
@@ -480,6 +505,7 @@ export async function getWorkflow(
     name: r.name as string,
     description: r.description as string | null,
     status: r.status as WorkflowStatus,
+    environment: rowEnvironment(r.environment),
     trigger_type: r.trigger_type as WorkflowTriggerType,
     trigger_config: (r.trigger_config ?? {}) as Record<string, unknown>,
     created_by: r.created_by as string | null,
@@ -509,6 +535,8 @@ export async function getWorkflow(
 export interface UpsertWorkflowInput {
   name: string;
   description?: string;
+  /** Environment is fixed at creation; updates never move a workflow. */
+  environment?: DeliveryEnvironment;
   trigger_type?: WorkflowTriggerType;
   trigger_config?: Record<string, unknown>;
   created_by?: string;
@@ -522,13 +550,14 @@ export async function createWorkflow(
 ): Promise<Workflow> {
   const rows = await q(db)`
     insert into public.workflows
-      (name, description, trigger_type, trigger_config, created_by)
+      (name, description, trigger_type, trigger_config, created_by, environment)
     values (
       ${input.name},
       ${input.description ?? null},
       ${input.trigger_type ?? "manual"},
       ${JSON.stringify(input.trigger_config ?? {})}::jsonb,
-      ${input.created_by ?? null}
+      ${input.created_by ?? null},
+      ${input.environment ?? "production"}
     )
     returning id`;
   const id = rows[0].id as string;
@@ -630,14 +659,15 @@ export async function listRuns(
   limit = 50,
 ): Promise<WorkflowRun[]> {
   const rows = await q(db)`
-    select id, workflow_id, trigger_type, trigger_payload, status, output,
-           error, started_at, completed_at
+    select id, workflow_id, environment, trigger_type, trigger_payload,
+           status, output, error, started_at, completed_at
     from public.workflow_runs
     where workflow_id = ${workflowId}
     order by started_at desc limit ${limit}`;
   return rows.map((r) => ({
     id: r.id as string,
     workflow_id: r.workflow_id as string,
+    environment: rowEnvironment(r.environment),
     trigger_type: r.trigger_type as string,
     trigger_payload: (r.trigger_payload ?? null) as Record<string, unknown> | null,
     status: r.status as RunStatus,
@@ -653,8 +683,8 @@ export async function getRun(
   runId: string,
 ): Promise<WorkflowRun | null> {
   const rows = await q(db)`
-    select id, workflow_id, trigger_type, trigger_payload, status, output,
-           error, started_at, completed_at
+    select id, workflow_id, environment, trigger_type, trigger_payload,
+           status, output, error, started_at, completed_at
     from public.workflow_runs where id = ${runId}`;
   if (rows.length === 0) return null;
   const r = rows[0];
@@ -666,6 +696,7 @@ export async function getRun(
   return {
     id: r.id as string,
     workflow_id: r.workflow_id as string,
+    environment: rowEnvironment(r.environment),
     trigger_type: r.trigger_type as string,
     trigger_payload: (r.trigger_payload ?? null) as Record<string, unknown> | null,
     status: r.status as RunStatus,
@@ -726,13 +757,16 @@ export async function executeWorkflow(
   }
 
   const runRows = await q(db)`
-    insert into public.workflow_runs (workflow_id, trigger_type, trigger_payload)
-    values (${workflowId}, ${wf.trigger_type}, ${JSON.stringify(triggerPayload)}::jsonb)
+    insert into public.workflow_runs
+      (workflow_id, trigger_type, trigger_payload, environment)
+    values (${workflowId}, ${wf.trigger_type},
+            ${JSON.stringify(triggerPayload)}::jsonb, ${wf.environment})
     returning id, started_at`;
   const runId = runRows[0].id as string;
 
   const wfId = wf.id;
   const wfName = wf.name;
+  const wfEnvironment = wf.environment;
   const context: Record<string, unknown> = {
     trigger: triggerPayload,
     workflow: { id: wfId, name: wfName },
@@ -923,13 +957,15 @@ export async function executeWorkflow(
           };
           const inboxRows = await q(db)`
             insert into public.handoff_inbox
-              (idempotency_key, package, manifest_checksum, signature, status)
+              (idempotency_key, package, manifest_checksum, signature, status,
+               environment)
             values (
               ${syntheticKey},
               ${JSON.stringify(pkg)}::jsonb,
               ${"0".repeat(64)},
               'synthetic',
-              'processed'
+              'processed',
+              ${wfEnvironment}
             )
             returning id`;
           inboxId = inboxRows[0].id as string;
@@ -941,10 +977,10 @@ export async function executeWorkflow(
         const rows = await q(db)`
           insert into public.delivery_projects
             (inbox_id, package_id, package_version, opportunity_id,
-             organization_name, name)
+             organization_name, name, environment)
           values (
             ${inboxId}, ${packageId}, ${packageVersion}, ${opportunityId},
-            ${organizationName}, ${name}
+            ${organizationName}, ${name}, ${wfEnvironment}
           )
           returning id`;
         return { project_id: rows[0].id as string, name };

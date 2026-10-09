@@ -12,7 +12,7 @@
  */
 
 import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
-import type { NeonClient } from "./db.js";
+import type { DeliveryEnvironment, NeonClient } from "./db.js";
 import {
   buildLeadHandoffTriggerPayload,
   executeWorkflow,
@@ -45,17 +45,25 @@ export interface LeadHandoffTriggerResult {
 }
 
 /**
- * Runs every published 'lead_handoff' workflow against a freshly-accepted
- * handoff package. Per-workflow failure isolation: one broken workflow is
- * recorded in the aggregate error but never blocks the others. Throws when
- * any workflow failed so the caller can log + audit the failure — the
- * intake acceptance itself is unaffected (see handleIntake).
+ * Runs every published 'lead_handoff' workflow *in the given environment
+ * scope* against a freshly-accepted handoff package. Environment isolation
+ * is structural: a production accept only ever fires production workflows,
+ * and a demo/test accept only demo workflows. Per-workflow failure
+ * isolation: one broken workflow is recorded in the aggregate error but
+ * never blocks the others. Throws when any workflow failed so the caller
+ * can log + audit the failure — the intake acceptance itself is unaffected
+ * (see handleIntake).
  */
 export async function triggerLeadHandoffWorkflows(
   db: NeonClient,
   pkg: LeadEngineHandoffPackage,
+  environment: DeliveryEnvironment,
 ): Promise<LeadHandoffTriggerResult> {
-  const workflows = await listPublishedWorkflowsByTrigger(db, "lead_handoff");
+  const workflows = await listPublishedWorkflowsByTrigger(
+    db,
+    "lead_handoff",
+    environment,
+  );
   const payload = buildLeadHandoffTriggerPayload(pkg);
   const executed: string[] = [];
   const skipped: string[] = [];

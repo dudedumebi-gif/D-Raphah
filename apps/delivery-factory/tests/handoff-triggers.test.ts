@@ -13,6 +13,7 @@ interface FixtureWorkflow {
   name: string;
   description: string;
   status: string;
+  environment: string;
   trigger_type: string;
   trigger_config: Record<string, unknown>;
   created_by: string;
@@ -32,6 +33,7 @@ function demoWorkflow(
     name: "Lead follow-up (SMS, draft-first)",
     description: "Demo template",
     status: "published",
+    environment: "demo",
     trigger_type: "lead_handoff",
     trigger_config: { minScore: 0 },
     created_by: "seed",
@@ -99,9 +101,20 @@ function makeTriggerDb(workflows: FixtureWorkflow[]) {
     const head = strings[0];
     if (head.includes("from public.workflows") && head.includes("trigger_type =")) {
       const triggerType = String(values[0]);
+      const environment = String(values[1]);
       return [...byId.values()]
-        .filter((w) => w.trigger_type === triggerType && w.status === "published")
-        .map((w) => ({ id: w.id, name: w.name, trigger_config: w.trigger_config }));
+        .filter(
+          (w) =>
+            w.trigger_type === triggerType &&
+            w.status === "published" &&
+            w.environment === environment,
+        )
+        .map((w) => ({
+          id: w.id,
+          name: w.name,
+          trigger_config: w.trigger_config,
+          environment: w.environment,
+        }));
     }
     if (head.includes("from public.workflows where id =")) {
       const w = byId.get(String(values[0]));
@@ -126,6 +139,7 @@ function makeTriggerDb(workflows: FixtureWorkflow[]) {
         workflow_id: values[0],
         trigger_type: values[1],
         trigger_payload: JSON.parse(String(values[2])),
+        environment: values[3],
         status: "running",
         output: null,
         error: null,
@@ -180,6 +194,7 @@ function makeTriggerDb(workflows: FixtureWorkflow[]) {
       return [{
         id: run.id,
         workflow_id: run.workflow_id,
+        environment: run.environment,
         trigger_type: run.trigger_type,
         trigger_payload: run.trigger_payload,
         status: run.status,
@@ -253,7 +268,7 @@ describe("triggerLeadHandoffWorkflows", () => {
       stakeholders: [{ name: "Ava Operator", role: "Owner" }],
     });
 
-    const result = await triggerLeadHandoffWorkflows(db, pkg);
+    const result = await triggerLeadHandoffWorkflows(db, pkg, "demo");
     expect(result).toEqual({ executed: [wf.id], skipped: [] });
     expect(runs.size).toBe(1);
     const run = [...runs.values()][0];
@@ -285,7 +300,7 @@ describe("triggerLeadHandoffWorkflows", () => {
     const open = demoWorkflow();
     const { db, runs } = makeTriggerDb([gated, open]);
 
-    const result = await triggerLeadHandoffWorkflows(db, testPackage());
+    const result = await triggerLeadHandoffWorkflows(db, testPackage(), "demo");
     expect(result.executed).toEqual([open.id]);
     expect(result.skipped).toEqual([gated.id]);
     expect(runs.size).toBe(1);
@@ -296,7 +311,7 @@ describe("triggerLeadHandoffWorkflows", () => {
     const manual = demoWorkflow({ trigger_type: "manual" });
     const { db, runs } = makeTriggerDb([draft, manual]);
 
-    const result = await triggerLeadHandoffWorkflows(db, testPackage());
+    const result = await triggerLeadHandoffWorkflows(db, testPackage(), "demo");
     expect(result).toEqual({ executed: [], skipped: [] });
     expect(runs.size).toBe(0);
   });
@@ -308,7 +323,7 @@ describe("triggerLeadHandoffWorkflows", () => {
     failNodeQueryFor.add(broken.id);
 
     await expect(
-      triggerLeadHandoffWorkflows(db, testPackage()),
+      triggerLeadHandoffWorkflows(db, testPackage(), "demo"),
     ).rejects.toThrow(broken.id);
     // The healthy workflow still executed despite the broken one.
     expect(runs.size).toBe(1);

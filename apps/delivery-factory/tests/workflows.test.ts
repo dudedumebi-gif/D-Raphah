@@ -24,6 +24,7 @@ function makeFakeDb(workflow: Workflow) {
       return [
         {
           id: w.id, name: w.name, description: w.description, status: w.status,
+          environment: w.environment,
           trigger_type: w.trigger_type, trigger_config: w.trigger_config,
           created_by: w.created_by, created_at: w.created_at,
           updated_at: w.updated_at, published_at: w.published_at,
@@ -41,6 +42,7 @@ function makeFakeDb(workflow: Workflow) {
       runs.set(id, {
         id, workflow_id: values[0], trigger_type: values[1],
         trigger_payload: JSON.parse(String(values[2])),
+        environment: values[3],
         status: "running", output: null, error: null,
         started_at: new Date().toISOString(), completed_at: null,
       });
@@ -101,6 +103,7 @@ const demoWorkflow: Workflow = {
   name: "Synthetic E2E demo",
   description: null,
   status: "published",
+  environment: "demo",
   trigger_type: "manual",
   trigger_config: {},
   created_by: null,
@@ -329,6 +332,7 @@ const leadFollowupDemo: Workflow = {
   name: "Lead follow-up (SMS, draft-first)",
   description: "Demo template: on a qualified lead handoff, draft a personalized follow-up SMS with AI, then queue the SMS as a draft for human approval. Nothing sends automatically.",
   status: "published",
+  environment: "demo",
   trigger_type: "lead_handoff",
   trigger_config: { minScore: 0 },
   created_by: "seed",
