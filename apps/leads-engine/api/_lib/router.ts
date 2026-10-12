@@ -501,6 +501,26 @@ async function authenticatedRoutes(
       createAdminClient(),
       workspaceId,
     );
+    // Full-table job counts by mode + status. The jobs list above is a
+    // 100-row window (newest first): deriving the Overview "Active
+    // jobs / completed" card from it hides completions as soon as more
+    // than 100 jobs exist — the first sprint batch's completed jobs
+    // fell out of the window and the card froze at "100 / 0 completed"
+    // while the funnel (a true count) showed scoring progressing.
+    const jobCountRows = (await createAdminClient()`
+      select data_mode, status, count(*)::int as count
+      from public.scrape_jobs
+      where workspace_id = ${workspaceId}
+      group by data_mode, status
+    `) as unknown as Array<{
+      data_mode: string;
+      status: string;
+      count: number;
+    }>;
+    const jobCounts: Record<string, Record<string, number>> = {};
+    for (const row of jobCountRows) {
+      (jobCounts[row.data_mode] ??= {})[row.status] = row.count;
+    }
     return json({
       actor: {
         id: context.user.id,
@@ -524,6 +544,7 @@ async function authenticatedRoutes(
         };
       }),
       jobs: jobs.data,
+      jobCounts,
       leads: leads.data,
       audit: audit.data,
       operations,

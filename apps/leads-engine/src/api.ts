@@ -302,6 +302,8 @@ export interface BootstrapData {
   sources: SourceRecord[];
   campaigns: CampaignRecord[];
   jobs: JobRecord[];
+  /** Full-table job counts by data_mode -> status (bootstrap aggregate). */
+  jobCounts?: Partial<Record<string, Record<string, number>>>;
   leads: LeadRecord[];
   audit: AuditRecord[];
   operations: OperationsRecord;
