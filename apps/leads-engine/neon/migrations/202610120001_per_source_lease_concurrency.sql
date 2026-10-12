@@ -96,6 +96,91 @@ revoke execute on function public.lease_scrape_jobs(
   timestamptz
 ) from public, anonymous, authenticated;
 
+-- ---------------------------------------------------------------------
+-- Reservation pacing: per target host (was: per source).
+--
+-- reserve_source_collection (202609270001) rejects any reservation made
+-- within 1 / rate_limit_rps of the source's previous reservation. With
+-- up to four same-source jobs starting concurrently, only the first
+-- would be granted and the rest returned to retrying — nullifying the
+-- parallel leasing above. The replacement below is the 202609270001
+-- function verbatim except the pacing lookup, which now compares only
+-- reservations whose jobs targeted the SAME host.
+-- ---------------------------------------------------------------------
+
+create or replace function public.reserve_source_collection(
+  p_job_id uuid,
+  p_worker_id text,
+  p_now timestamptz
+) returns boolean
+language plpgsql security definer set search_path = public as $$
+declare
+  v_job public.scrape_jobs;
+  v_source public.source_definitions;
+  v_policy public.source_policy_versions;
+  v_daily bigint;
+  v_monthly bigint;
+  v_last timestamptz;
+begin
+  select * into v_job from public.scrape_jobs where id = p_job_id for update;
+  if v_job.id is null or v_job.status <> 'leased'
+     or v_job.lease_owner is distinct from p_worker_id
+     or v_job.lease_expires_at <= p_now then
+    raise exception 'job lease is not owned by worker';
+  end if;
+  if exists(select 1 from public.source_collection_reservations where scrape_job_id=p_job_id) then
+    return true;
+  end if;
+
+  select * into v_source from public.source_definitions where id=v_job.source_id for share;
+  if v_source.status <> 'active' or v_source.active_policy_id is null then
+    raise exception 'source is not active with an approved policy';
+  end if;
+  select * into v_policy from public.source_policy_versions
+    where id=v_source.active_policy_id and source_id=v_source.id for share;
+  if v_policy.id is null or v_policy.status <> 'approved'
+     or v_policy.approved_by is null or v_policy.approved_at is null then
+    raise exception 'source policy is not approved';
+  end if;
+
+  -- Serialize reservations for this source across every worker/node.
+  perform pg_advisory_xact_lock(hashtext(v_source.id::text));
+  select count(*) into v_daily from public.source_collection_reservations
+    where policy_version_id=v_policy.id and reserved_at >= date_trunc('day', p_now);
+  select count(*) into v_monthly from public.source_collection_reservations
+    where policy_version_id=v_policy.id and reserved_at >= date_trunc('month', p_now);
+  if v_daily >= v_policy.daily_budget then raise exception 'source daily budget exhausted'; end if;
+  if v_monthly >= v_policy.monthly_budget then raise exception 'source monthly budget exhausted'; end if;
+  -- Pace per TARGET HOST, not per source (PR #34 review fix): a source
+  -- whose jobs crawl a single site (campaign fronts, manual jobs) keeps
+  -- the exact serialized pacing it has always had, because all of its
+  -- jobs share one host. Discovery fan-out jobs each target a different
+  -- clinic domain, so each host gets its own rate window and parallel
+  -- leases proceed instead of all-but-one being rejected back to
+  -- retrying. Daily/monthly budgets above stay per policy, unchanged,
+  -- and each job's crawl still enforces the policy rate limit against
+  -- its own target while it runs.
+  select max(r.reserved_at) into v_last
+  from public.source_collection_reservations r
+  join public.scrape_jobs pj on pj.id = r.scrape_job_id
+  where r.source_id = v_source.id
+    and lower(split_part(split_part(pj.target_url, '://', 2), '/', 1))
+      = lower(split_part(split_part(v_job.target_url, '://', 2), '/', 1));
+  if v_last is not null and v_last + make_interval(secs => 1.0/v_policy.rate_limit_rps) > p_now then
+    raise exception 'source rate window has not elapsed';
+  end if;
+
+  insert into public.source_collection_reservations(
+    workspace_id, source_id, policy_version_id, scrape_job_id, worker_id, reserved_at
+  ) values (
+    v_job.workspace_id, v_source.id, v_policy.id, v_job.id, p_worker_id, p_now
+  ) on conflict(scrape_job_id) do nothing;
+  return true;
+end $$;
+
+revoke execute on function public.reserve_source_collection(uuid,text,timestamptz)
+  from public, anonymous, authenticated;
+
 insert into public.schema_versions(service, version)
 values ('lead-engine', '3.3.5')
 on conflict (service) do update
