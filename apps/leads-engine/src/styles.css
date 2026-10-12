@@ -317,6 +317,36 @@ button {
   min-height: 70px;
   border-top: 1px solid #edf1f0;
 }
+/* Discovery candidates: the generic table grid was sized for other
+   tables, and bare <b>/<small> pairs ran together inline. Give the
+   candidates table its own column balance, stack name over address,
+   stack the resolution cell, and let long URLs wrap inside their
+   cell instead of forcing the track wider and squeezing the rest. */
+.candidate-table .table-head,
+.candidate-table .table-row {
+  grid-template-columns: 1.5fr 0.55fr 1.4fr 0.85fr;
+  align-items: start;
+}
+.candidate-table .table-row > span {
+  min-width: 0;
+}
+.candidate-table .table-row b {
+  display: block;
+  line-height: 1.35;
+}
+.candidate-table .table-row small {
+  display: block;
+  margin-top: 3px;
+  color: #839496;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.candidate-table .resolution-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
 .op-name {
   display: flex;
   gap: 10px;

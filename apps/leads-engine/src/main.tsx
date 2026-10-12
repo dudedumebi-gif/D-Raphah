@@ -379,7 +379,15 @@ function Workspace({ session }: { session: Session }) {
             >
               <span>{item.label}</span>
               {item.id === "jobs" && data ? (
-                <strong>{visibleData?.jobs.length ?? 0}</strong>
+                <strong>
+                  {data.jobCounts?.[dataMode]
+                    ? ["queued", "leased", "running", "retrying"].reduce(
+                        (total, status) =>
+                          total + (data.jobCounts![dataMode]![status] ?? 0),
+                        0,
+                      )
+                    : (visibleData?.jobs.length ?? 0)}
+                </strong>
               ) : null}
             </button>
           ))}
@@ -644,10 +652,21 @@ function DashboardView({
     return <Audit data={data} session={session} workspaceId={workspaceId} />;
   if (view === "settings") return <Settings data={data} mutate={mutate} />;
   if (view === "help") return <HelpGuide />;
-  const complete = data.jobs.filter((job) => job.status === "completed").length;
-  const active = data.jobs.filter((job) =>
-    ["queued", "leased", "running", "retrying"].includes(job.status),
-  ).length;
+  // Prefer the bootstrap's full-table counts for the current mode;
+  // data.jobs is only a 100-row window, so counting it hides
+  // completions once more than 100 jobs exist.
+  const modeJobCounts = data.jobCounts?.[dataMode];
+  const complete =
+    modeJobCounts?.completed ??
+    data.jobs.filter((job) => job.status === "completed").length;
+  const active = modeJobCounts
+    ? ["queued", "leased", "running", "retrying"].reduce(
+        (total, status) => total + (modeJobCounts[status] ?? 0),
+        0,
+      )
+    : data.jobs.filter((job) =>
+        ["queued", "leased", "running", "retrying"].includes(job.status),
+      ).length;
   return (
     <div className="content">
       <section className="hero-row">
@@ -1847,7 +1866,7 @@ export function Discovery({
               </p>
             </div>
           </div>
-          <div className="table">
+          <div className="table candidate-table">
             <div className="table-head">
               <span>Business</span>
               <span>Adapter</span>
@@ -1863,7 +1882,7 @@ export function Discovery({
                   </small>
                 </span>
                 <span>{candidate.adapter_id}</span>
-                <span>
+                <span className="resolution-cell">
                   <Status value={candidate.resolution_status} />
                   <small>
                     {candidate.resolved_website ?? "Review required"}
