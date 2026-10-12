@@ -205,3 +205,37 @@ describe("mapRowToSourceInput", () => {
     ).toThrow(/HTTP/i);
   });
 });
+
+describe("allowDiscoveredDomains import support", () => {
+  it("parses the allow_discovered_domains column (truthy values only)", () => {
+    const result = parseSourceCsv(
+      "name,website,allow_discovered_domains\n" +
+        "Clinics,https://overpass-api.de,true\n" +
+        "Strict,https://strict.example,false\n" +
+        "AlsoYes,https://yes.example,YES\n",
+    );
+    expect(result.error).toBeNull();
+    expect(result.rows[0].allowDiscoveredDomains).toBe(true);
+    expect(result.rows[1].allowDiscoveredDomains).toBeUndefined();
+    expect(result.rows[2].allowDiscoveredDomains).toBe(true);
+  });
+
+  it("mapRowToSourceInput carries the flag, defaulting to false", () => {
+    expect(
+      mapRowToSourceInput(
+        {
+          name: "Clinics",
+          website: "https://overpass-api.de",
+          allowDiscoveredDomains: true,
+        },
+        "ops@example.com",
+      ).allowDiscoveredDomains,
+    ).toBe(true);
+    expect(
+      mapRowToSourceInput(
+        { name: "Plain", website: "https://plain.example" },
+        "ops@example.com",
+      ).allowDiscoveredDomains,
+    ).toBe(false);
+  });
+});

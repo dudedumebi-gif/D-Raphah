@@ -709,8 +709,8 @@ function DashboardView({
 }
 
 const SOURCE_IMPORT_TEMPLATE =
-  "name,website,collection_method,business_purpose\n" +
-  '"Example Business",https://example.com,static_html,"Identify public evidence of manual processes and automation opportunity."\n';
+  "name,website,collection_method,business_purpose,allow_discovered_domains\n" +
+  '"Example Business",https://example.com,static_html,"Identify public evidence of manual processes and automation opportunity.",false\n';
 
 const MAX_IMPORT_ROWS = 200;
 

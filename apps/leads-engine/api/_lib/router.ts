@@ -114,6 +114,7 @@ const SourceImportBodySchema = z.object({
           .enum(["api", "rss", "sitemap", "static_html"])
           .optional(),
         businessPurpose: z.string().optional(),
+        allowDiscoveredDomains: z.boolean().optional(),
       }),
     )
     .min(1)
