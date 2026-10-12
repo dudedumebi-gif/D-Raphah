@@ -385,7 +385,7 @@ export async function runWorkerTick(
       last_heartbeat_at
     ) values (
       ${workerId}, 'vercel-function', 'active',
-      ${["static_html", "api", "rss", "sitemap", "json", "xml"]}, 3,
+      ${["static_html", "api", "rss", "sitemap", "json", "xml"]}, 12,
       ${deploymentId}, ${now}::timestamptz
     )
     on conflict (id) do update set
@@ -479,7 +479,7 @@ export async function runWorkerTick(
   }
   const jobs = (await client`
     select * from public.lease_scrape_jobs(
-      ${workerId}, 3, 240, ${now}::timestamptz
+      ${workerId}, 12, 240, ${now}::timestamptz
     )
   `) as unknown as ScrapeJobRow[];
   result.leased = jobs.length;
