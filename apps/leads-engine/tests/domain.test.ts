@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalizeUrl,
   CriteriaSchema,
+  detectContactability,
   detectSignals,
   evaluateCanarySoak,
   calculateIcpFit,
@@ -87,19 +88,32 @@ describe("criteria validation", () => {
 
 describe("maturity scoring", () => {
   it("scores strong manual friction as low maturity and high opportunity", () => {
-    const signals = detectSignals(
-      "Call us to book. Fax the paperwork. We use manual data entry and spreadsheet tracking. A modernization programme is funded.",
+    const text =
+      "Call us to book. Fax the paperwork. We use manual data entry and spreadsheet tracking. A modernization programme is funded.";
+    const signals = detectSignals(text);
+    const score = scoreSignals(
+      signals,
+      {
+        qualificationScoreMin: 50,
+        confidenceMin: 0.5,
+      },
+      { contactability: detectContactability(text) },
     );
-    const score = scoreSignals(signals, {
-      automationMaturityMax: 45,
-      opportunityPotentialMin: 50,
-      confidenceMin: 0.5,
-      minimumEvidenceCategories: 2,
-    });
     expect(score.automationMaturity).toBeLessThan(50);
-    expect(score.opportunityPotential).toBeGreaterThanOrEqual(50);
+    expect(score.opportunityScore).toBeGreaterThanOrEqual(50);
     expect(score.qualified).toBe(true);
-    expect(score.scoringVersion).toBe("2.1.0");
+    expect(score.scoringVersion).toBe("3.0.0");
+    // The seven PRD §10.1 factors are all reported as components.
+    for (const factor of [
+      "icp_fit",
+      "maturity_inverse",
+      "signal_strength",
+      "evidence_freshness",
+      "contactability",
+      "intent_trigger",
+      "confidence_factor",
+    ])
+      expect(score.components[factor]).toBeTypeOf("number");
   });
 
   it("does not qualify highly automated organizations", () => {
@@ -107,13 +121,29 @@ describe("maturity scoring", () => {
       "Book online in our customer portal. Salesforce API integration, Power BI analytics, and a generative AI assistant are available.",
     );
     const score = scoreSignals(signals, {
-      automationMaturityMax: 40,
-      opportunityPotentialMin: 50,
+      qualificationScoreMin: 60,
       confidenceMin: 0.5,
-      minimumEvidenceCategories: 2,
     });
     expect(score.automationMaturity).toBeGreaterThan(40);
     expect(score.qualified).toBe(false);
+  });
+
+  it("normalizes campaign score weights that do not sum to 1", () => {
+    const signals = detectSignals("Fax the paperwork. Call us to book.");
+    const unit = scoreSignals(signals, { qualificationScoreMin: 0 });
+    const doubled = scoreSignals(signals, {
+      qualificationScoreMin: 0,
+      scoreWeights: {
+        icpFit: 0.4,
+        maturityInverse: 0.4,
+        signalStrength: 0.3,
+        evidenceFreshness: 0.1,
+        contactability: 0.2,
+        intentTrigger: 0.4,
+        confidence: 0.2,
+      },
+    });
+    expect(doubled.opportunityScore).toBe(unit.opportunityScore);
   });
 });
 

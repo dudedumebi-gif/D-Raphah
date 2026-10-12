@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { collectUrl, type CollectionPolicy } from "./collection.js";
 import {
   CriteriaSchema,
+  detectContactability,
   detectSignals,
   evaluateAutoApply,
   evaluateGeography,
@@ -235,6 +236,7 @@ async function persistEvidenceAndLead(
     businessProfile: inferBusinessProfile(combinedExtractedText),
     geoEligible: geography.eligible,
     evidenceFreshness: 100,
+    contactability: detectContactability(combinedExtractedText),
   });
   if (job.canary_run_id && (!score.qualified || signals.length === 0)) {
     throw new Error("Canary did not produce a qualified, evidence-backed lead");
@@ -543,10 +545,8 @@ export async function enqueueCanary(client = createAdminClient()) {
   const run = runRows[0];
   if (!run) throw new Error("Canary record failed: no row");
   const criteria = CriteriaSchema.parse({
-    automationMaturityMax: 100,
-    opportunityPotentialMin: 0,
+    qualificationScoreMin: 0,
     confidenceMin: 0,
-    minimumEvidenceCategories: 1,
   });
   await client`
     insert into public.scrape_jobs(
