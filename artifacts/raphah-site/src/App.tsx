@@ -57,17 +57,39 @@ function Logo() {
 
 function Header() {
   const [open, setOpen] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
   const close = () => setOpen(false);
+  // The header is fixed so the call-to-action stays in reach at any
+  // scroll depth. It is transparent over the hero and gains a solid
+  // backdrop once the page scrolls (or the mobile menu opens).
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 24);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+  const solid = scrolled || open;
   return (
-    <header className="absolute inset-x-0 top-0 z-30">
-      <div className="container-wide flex h-[78px] items-center justify-between">
+    <header
+      className={`fixed inset-x-0 top-0 z-40 border-b transition-[background-color,border-color] duration-300 ${
+        solid
+          ? 'border-[hsl(var(--border))] bg-[hsl(var(--background)/0.92)] backdrop-blur-md'
+          : 'border-transparent bg-transparent'
+      }`}
+    >
+      <div
+        className={`container-wide flex items-center justify-between transition-[height] duration-300 ${
+          solid ? 'h-16' : 'h-[78px]'
+        }`}
+      >
         <Logo />
         <nav className="hidden items-center gap-8 text-[.78rem] font-semibold md:flex" aria-label="Main navigation">
           <a className="nav-link" href="#approach">How we work</a>
           <a className="nav-link" href="#focus">Where we help</a>
           <a className="nav-link" href="#principles">What matters</a>
         </nav>
-        <a href="#conversation" className="btn-primary hidden md:inline-flex">Start a conversation <ArrowUpRight size={15} /></a>
+        <div className="flex items-center gap-2">
+          <a href="#conversation" className="btn-primary inline-flex max-md:px-3.5 max-md:py-2.5 max-md:text-[.72rem] max-md:[&>svg]:hidden">Start a conversation <ArrowUpRight size={15} /></a>
         <button
           type="button"
           className="rounded-full p-2 md:hidden"
@@ -77,6 +99,7 @@ function Header() {
         >
           {open ? <X size={22} /> : <Menu size={22} />}
         </button>
+        </div>
       </div>
       {open && (
         <div className="mobile-panel absolute inset-x-4 top-[68px] rounded-2xl border bg-[hsl(var(--card))] p-5 md:hidden">
