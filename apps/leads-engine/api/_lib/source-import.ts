@@ -15,6 +15,13 @@ export interface SourceImportRow {
   website: string;
   collectionMethod?: ImportCollectionMethod;
   businessPurpose?: string;
+  /**
+   * Policy flag for discovery-borrowed sources: collection under this
+   * source admits each discovery job's own host (the approval unit is
+   * the discovery registration). Defaults to false — the strict
+   * per-domain allowlist — when the column is absent or not truthy.
+   */
+  allowDiscoveredDomains?: boolean;
 }
 
 export interface IndexedImportRow {
@@ -88,6 +95,7 @@ export function mapRowToSourceInput(
   collectionMethod: ImportCollectionMethod;
   businessPurpose: string;
   allowedDomains: string[];
+  allowDiscoveredDomains: boolean;
   allowlistPaths: string[];
   denylistPaths: string[];
   contactEmail: string;
@@ -102,6 +110,7 @@ export function mapRowToSourceInput(
     businessPurpose:
       purpose.length >= 10 ? purpose : DEFAULT_IMPORT_BUSINESS_PURPOSE,
     allowedDomains: [host],
+    allowDiscoveredDomains: row.allowDiscoveredDomains === true,
     allowlistPaths: ["/*"],
     denylistPaths: ["/login*", "/account*", "/admin*"],
     contactEmail,
@@ -244,6 +253,10 @@ export function parseSourceCsv(text: string): CsvParseResult {
   const websiteIdx = findColumn("website", "baseurl", "url");
   const methodIdx = findColumn("collectionmethod", "method");
   const purposeIdx = findColumn("businesspurpose", "purpose");
+  const discoveredIdx = findColumn(
+    "allowdiscovereddomains",
+    "discovereddomains",
+  );
   if (nameIdx === -1) {
     return { rows: [], error: "Missing required column: 'name'." };
   }
@@ -262,6 +275,10 @@ export function parseSourceCsv(text: string): CsvParseResult {
     ).includes(rawMethod)
       ? (rawMethod as ImportCollectionMethod)
       : undefined;
+    const discoveredRaw = cell(discoveredIdx).toLowerCase();
+    const allowDiscoveredDomains = ["true", "yes", "1", "on"].includes(
+      discoveredRaw,
+    );
     rows.push({
       name: cell(nameIdx),
       website: cell(websiteIdx),
@@ -269,6 +286,7 @@ export function parseSourceCsv(text: string): CsvParseResult {
       ...(purposeIdx >= 0 && cell(purposeIdx)
         ? { businessPurpose: cell(purposeIdx) }
         : {}),
+      ...(allowDiscoveredDomains ? { allowDiscoveredDomains } : {}),
     });
   }
   return { rows, error: null };
