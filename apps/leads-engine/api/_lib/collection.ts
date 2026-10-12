@@ -767,6 +767,11 @@ async function checkRobots(
       const location = response.headers.get("location");
       if (!location)
         throw new Error("Redirect response omitted Location header");
+      // The redirect body is never read; cancel it so the pinned
+      // fetcher's socket is released instead of lingering past the hop
+      // (the abort timer is cleared once the chain completes, so an
+      // abandoned stream would hold its connection open indefinitely).
+      await response.body?.cancel().catch(() => undefined);
       const next = new URL(location, robotsUrl);
       assertDomainAllowed(next, policy);
       robotsUrl = next;
@@ -882,6 +887,9 @@ export async function collectUrl(
       const location = response.headers.get("location");
       if (!location)
         throw new Error("Redirect response omitted Location header");
+      // Same abandoned-body hazard as the robots chain: cancel the
+      // redirect body so its socket is released before the next hop.
+      await response.body?.cancel().catch(() => undefined);
       current = assertUrlAllowed(new URL(location, current).toString(), policy);
       await verifyHost(current.hostname);
       await checkRobots(current, policy, fetcher);

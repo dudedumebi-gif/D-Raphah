@@ -373,6 +373,31 @@ describe("collectUrl enrichment", () => {
     expect(collected.extractedText).not.toContain("[job-page:");
   });
 
+  it("cancels page redirect bodies before following the hop", async () => {
+    let cancelled = false;
+    const redirectBody = new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/old")
+        return new Response(redirectBody, {
+          status: 301,
+          headers: { location: "https://example.com/" },
+        });
+      return htmlResponse("<html><body>landed</body></html>");
+    });
+    const collected = await collectUrl(
+      "https://example.com/old",
+      testPolicy,
+      fetcher,
+      { skipPublicHostCheck: true, geocode: false },
+    );
+    expect(collected.statusCode).toBe(200);
+    expect(cancelled).toBe(true);
+  });
+
   it("survives job-page fetch failures without failing the scrape", async () => {
     const fetcher = createMockFetcher((url) => {
       if (url.pathname === "/careers")
@@ -470,6 +495,28 @@ describe("collectUrl robots handling", () => {
     await expect(collect(fetcher)).rejects.toThrow(
       "Domain unapproved.example.net is not approved",
     );
+  });
+
+  it("cancels the redirect response body before following the hop", async () => {
+    let cancelled = false;
+    const redirectBody = new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(redirectBody, {
+          status: 301,
+          headers: { location: "https://www.example.com/robots.txt" },
+        });
+      if (url.hostname === "www.example.com" && url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      return plainPage();
+    });
+    const collected = await collect(fetcher);
+    expect(collected.statusCode).toBe(200);
+    expect(cancelled).toBe(true);
   });
 
   it("gives up on a robots.txt redirect loop", async () => {
