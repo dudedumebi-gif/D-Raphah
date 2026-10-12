@@ -239,3 +239,39 @@ describe("structured discovery adapters", () => {
     ).toEqual(["open.canada.ca"]);
   });
 });
+
+describe("overpass category preset (clinic sprint C2)", () => {
+  it("parses overpass adapter config with an all-businesses default", async () => {
+    const { parseDiscoveryAdapterConfig } = await import(
+      "../api/_lib/discovery/registry"
+    );
+    expect(parseDiscoveryAdapterConfig("overpass", {})).toEqual({
+      categoryPreset: "all",
+    });
+    expect(
+      parseDiscoveryAdapterConfig("overpass", { categoryPreset: "clinics" }),
+    ).toEqual({ categoryPreset: "clinics" });
+    expect(() =>
+      parseDiscoveryAdapterConfig("overpass", { categoryPreset: "bogus" }),
+    ).toThrow();
+  });
+
+  it("sends clinic-only selectors when the preset is configured", async () => {
+    const { OverpassAdapter } = await import(
+      "../api/_lib/discovery/overpass"
+    );
+    const adapter = new OverpassAdapter();
+    let body = "";
+    const fetcher = (async (_url: unknown, init?: { body?: unknown }) => {
+      body = String(init?.body ?? "");
+      return jsonResponse({ elements: [] });
+    }) as typeof fetch;
+    await adapter.fetchCandidates(geo, {
+      fetcher,
+      config: { categoryPreset: "clinics" },
+    });
+    const query = decodeURIComponent(body.replace(/^data=/, ""));
+    expect(query).toContain('["amenity"="dentist"]');
+    expect(query).not.toContain('["shop"]');
+  });
+});

@@ -111,6 +111,25 @@ describe("buildOverpassQuery", () => {
     const box = geoBoundingBox(GEO);
     expect(query).toContain(box.south.toFixed(5));
   });
+
+  it("clinics preset queries clinic-type tags only, still requiring a website", () => {
+    const query = buildOverpassQuery(GEO, "clinics");
+    for (const kind of ["node", "way", "relation"]) {
+      expect(query).toContain(`${kind}["amenity"="dentist"]["website"]`);
+      expect(query).toContain(`${kind}["amenity"="clinic"]["website"]`);
+      expect(query).toContain(`${kind}["amenity"="doctors"]["website"]`);
+      expect(query).toContain(`${kind}["healthcare"~`);
+    }
+    expect(query).not.toContain('["shop"]');
+    expect(query).not.toContain('["office"]');
+    expect(query).toContain("out center;");
+  });
+
+  it("explicit all preset keeps the original selectors", () => {
+    const query = buildOverpassQuery(GEO, "all");
+    expect(query).toContain('node["shop"]["website"]');
+    expect(query).not.toContain("healthcare");
+  });
 });
 
 describe("overpassElementToCandidate", () => {
