@@ -1,12 +1,12 @@
 # Raphah Lead Engine — Production README
 
-Last updated: 2026-10-09
+Last updated: 2026-10-11
 
 Target release: Lead Engine schema/API `3.3.4`
 
-Status: **pilot release candidate deployed; production database migrated; telemetry and live soak gates remain**
+Status: **Production approved and live. Pilot and demo records remain isolated from Production.**
 
-This is the operational handover for the Lead Engine’s permitted-source discovery pipeline. It records what is implemented, what must remain human-controlled, and the exact gates for moving Pilot data into Production. Source authorization and Pilot-to-Production promotion remain explicit human decisions.
+This is the operational handover for the Lead Engine’s permitted-source discovery pipeline. It records what is implemented, what must remain human-controlled, and the release evidence used for Production approval. Source authorization remains an explicit human decision. Production approval does not bulk-relabel Pilot data; Production sources and discovery configurations are created and approved independently.
 
 ## Delivered in this release
 
@@ -164,7 +164,7 @@ For the genuine-session CI run, configure protected secrets `NEON_RLS_DATABASE_U
 - Recovery points are snapshot `snap-curly-dust-avqzu2b4` (pre-3.3.1) and no-compute branch `br-bold-mountain-av2njseg` (pre-3.3.2).
 - PR #16 delivered the adapters and reviewed acceptance dialog; PR #17 repaired the schema compatibility guard; PR #18 repaired retention and demo-mode canary isolation; PR #20 added stateful Slack operations alerts. Each merged only after green CI and green Lead Engine Preview deployment.
 - Production Lead Engine deployment `7bf334cc64213588bd8d695c8eafcdb940e49930` is live. The repaired worker completed a previously stuck canary, and stale pre-soak work remains failed/dead-letter history with audit events rather than active incidents.
-- The 72-hour soak is in progress. At the 2026-10-08 verification snapshot it had 4/72 completed runs (5.56%) with p95 completion near 303 seconds, so the release correctly remains Pilot.
+- The 72-hour soak completed with 72/72 successful hourly observations, no missing runs, and 100% completion. The owner approved Production promotion on 2026-10-11 after all five release-decision checks passed. See `apps/leads-engine/docs/reports/2026-10-11-72-hour-soak-results.md`.
 
 ### Automated production-approval probe — 2026-10-09
 
@@ -188,7 +188,30 @@ recorded idempotently in production `audit_events` as
 explicit approval. It is evidence, not authorization: no code path performs an
 automatic Pilot-to-Production promotion.
 
-## Production release gates
+## Production approval record
+
+All five release-decision checks passed in the same production evaluation, the
+audited `production_gate_passed` alert was raised, and the product owner
+explicitly approved promotion on 2026-10-11. The authoritative approval event
+is `audit_events.id = 6bb49fcd-b07e-4592-af28-1673ee30da27` with correlation ID
+`lead-engine-production-approval-2026-10-11`.
+
+| Release-decision check | Result |
+| --- | --- |
+| 72-hour canary completion at least 99% | **PASS** — 72/72, 100%, zero missing |
+| Scheduled-run start p95 below five minutes | **PASS** — 241.209 seconds at the publication snapshot |
+| No open critical incident | **PASS** — zero open critical alerts |
+| Retry/dead-letter recovery | **PASS** — durable retry evidence and zero dead letters in the rolling 72-hour window |
+| RLS and audit coverage | **PASS** — required RLS/audit checks and durable RLS behavioural evidence present |
+
+The Vercel production deployment was `READY`, the database and worker readiness
+checks returned `ready`, and the owner approval was recorded without modifying
+the `data_mode` of existing rows.
+
+## Ongoing operational assurance
+
+These controls remain visible post-release. An unchecked item is an assurance
+or integration follow-up; it does not reverse the recorded owner approval.
 
 - [x] Toronto Open Data terms reviewed and accepted by a human operator.
 - [x] Canada Job Bank terms reviewed and accepted by a human operator.
@@ -203,14 +226,16 @@ automatic Pilot-to-Production promotion.
 - [ ] Restart test proves jobs/results survive process replacement.
 - [x] Expired lease recovery is demonstrated in the transactional lifecycle suite.
 - [ ] Duplicate schedule delivery produces no duplicate candidate, job, organization, or opportunity.
-- [ ] Retry and dead-letter recovery are demonstrated and audited.
+- [x] Retry and dead-letter recovery are demonstrated and audited.
 - [ ] Signed versioned Delivery Factory handoff and replay protection pass.
-- [ ] 72-hour canary completion is at least 99%.
-- [ ] Scheduled-run start p95 is below five minutes.
+- [x] 72-hour canary completion is at least 99%.
+- [x] Scheduled-run start p95 is below five minutes.
 - [x] Vercel production deployment is Ready with no material build/runtime errors.
 - [ ] Sentry shows no unresolved release-blocking exceptions.
 
-Until every box is checked, the release remains Pilot and must not be represented as production-ready.
+Pilot and demo datasets remain isolated. New Production source definitions,
+policies, campaigns, and discovery configurations must still be created and
+approved explicitly; historical Pilot rows must not be bulk relabelled.
 
 ## Rollback
 
