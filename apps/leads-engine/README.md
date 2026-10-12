@@ -2,7 +2,7 @@
 
 Production-oriented web application for permitted-source discovery, evidence capture, automation-maturity scoring, durable scrape jobs, and human-reviewed lead qualification.
 
-**Implementation complete — not production approved.** See the repository-level `PRODUCTION_README.md` and `docs/runbooks/Lead_Engine_Production_Readiness_Runbook.md` for migration, source-licence acceptance, live proof, and canary gates. Do not promote Pilot data until those gates pass.
+**Production approved and live.** The 72-hour soak completed at 72/72 (100%) and all five release-decision checks passed before explicit owner approval on 2026-10-11. See the repository-level `PRODUCTION_README.md` and `docs/reports/2026-10-11-72-hour-soak-results.md`. Pilot and demo data remain isolated; Production sources are created and approved independently.
 
 ## Runtime architecture
 
