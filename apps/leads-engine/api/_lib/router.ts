@@ -338,6 +338,13 @@ async function operationalSnapshot(
     Math.floor(now.getTime() / 3_600_000) * 3_600_000 - 72 * 3_600_000,
   ).toISOString();
   const workspaceFilter = workspaceId ?? null;
+  // The canary is a system-level signal: its runs live in the dedicated
+  // canary workspace (LEAD_ENGINE_CANARY_WORKSPACE_ID), not in the
+  // caller's workspace. Filtering canary runs by the caller's workspace
+  // made the Overview/Operations canary cards read 0% / "0h observed"
+  // for the operator while /api/health reported the soak green.
+  const canaryFilter =
+    process.env.LEAD_ENGINE_CANARY_WORKSPACE_ID ?? workspaceFilter;
   const [jobsResult, canaryResult, workersResult, alertsResult] = await Promise.all([
     client`
       select status, scheduled_for, started_at, completed_at
@@ -349,7 +356,7 @@ async function operationalSnapshot(
       select scheduled_at, completed_at, status, failure_reason
       from public.canary_runs
       where scheduled_at >= ${start72h}
-        and (${workspaceFilter}::uuid is null or workspace_id = ${workspaceFilter}::uuid)
+        and (${canaryFilter}::uuid is null or workspace_id = ${canaryFilter}::uuid)
       order by scheduled_at
     `,
     client`
@@ -659,39 +666,31 @@ async function authenticatedRoutes(
         businessPurpose: z.string().min(10).max(2000).optional(),
       })
       .parse(await bodyJson(request));
-    const sets: string[] = [];
-    const params: unknown[] = [];
-    let idx = 1;
-    if (input.name !== undefined) {
-      sets.push(`name = $${idx++}`);
-      params.push(input.name);
-    }
-    if (input.baseUrl !== undefined) {
-      sets.push(`base_url = $${idx++}`);
-      params.push(input.baseUrl);
-    }
-    if (input.collectionMethod !== undefined) {
-      sets.push(`collection_method = $${idx++}`);
-      params.push(input.collectionMethod);
-    }
-    if (input.businessPurpose !== undefined) {
-      sets.push(`business_purpose = $${idx++}`);
-      params.push(input.businessPurpose);
-    }
-    if (sets.length === 0)
+    if (
+      input.name === undefined &&
+      input.baseUrl === undefined &&
+      input.collectionMethod === undefined &&
+      input.businessPurpose === undefined
+    )
       throw Object.assign(new Error("No fields to update"), {
         statusCode: 400,
       });
-    const sql = createAdminClient() as unknown as (
-      query: string,
-      params: unknown[],
-    ) => Promise<Array<Record<string, unknown>>>;
-    const rows = await sql(
-      `update public.source_definitions set ${sets.join(", ")}, updated_at = now()
-       where workspace_id = $${idx++} and id = $${idx++}
-       returning id, name, base_url, collection_method, business_purpose, status`,
-      [...params, workspaceId, sourceUpdate[1]],
-    );
+    // The admin client is the Neon HTTP driver: it is a template-tag
+    // function, NOT a (query, params) callable — calling it as one
+    // throws and surfaces as a 500 (this is how source rename broke).
+    // Use the tag form with coalesce so absent fields keep their
+    // current values.
+    const admin = createAdminClient();
+    const rows = (await admin`
+      update public.source_definitions
+      set name = coalesce(${input.name ?? null}, name),
+          base_url = coalesce(${input.baseUrl ?? null}, base_url),
+          collection_method = coalesce(${input.collectionMethod ?? null}, collection_method),
+          business_purpose = coalesce(${input.businessPurpose ?? null}, business_purpose),
+          updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${sourceUpdate[1]}
+      returning id, name, base_url, collection_method, business_purpose, status
+    `) as unknown as Array<Record<string, unknown>>;
     if (!rows.length)
       throw Object.assign(new Error("Source not found"), { statusCode: 404 });
     return json({ data: rows[0] });

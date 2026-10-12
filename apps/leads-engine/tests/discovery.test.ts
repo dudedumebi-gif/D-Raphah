@@ -489,3 +489,35 @@ describe("runDiscoveryRun", () => {
     expect(calls.queued).toHaveLength(3);
   });
 });
+
+describe("runDiscoveryRun target normalization (regression)", () => {
+  it("enqueues the normalized absolute URL for scheme-less websites", async () => {
+    const source = discoverySource();
+    const { store, calls } = makeStore(source);
+    const candidates: Candidate[] = [
+      {
+        name: "Scheme Less Dental",
+        website: "www.schemeless-dental.example",
+        address: null,
+        lat: 1,
+        lng: 1,
+        category: "dentist",
+        source: "overpass",
+      },
+    ];
+    const summary = await runDiscoveryRun({
+      store,
+      adapters: stubAdapter(candidates),
+      discoverySourceId: DISCOVERY_ID,
+    });
+    expect(summary.candidatesEnqueued).toBe(1);
+    expect(calls.queued).toHaveLength(1);
+    // The stored target must be parseable by `new URL` (the Scrape jobs
+    // table renders its hostname) — the raw scheme-less string is not.
+    expect(() => new URL(calls.queued[0].targetUrl)).not.toThrow();
+    // Canonical form: scheme added, www. prefix stripped by normalization.
+    expect(new URL(calls.queued[0].targetUrl).hostname).toBe(
+      "schemeless-dental.example",
+    );
+  });
+});

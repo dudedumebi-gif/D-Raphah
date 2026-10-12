@@ -232,7 +232,12 @@ export async function runDiscoveryRun(
       }
       const queued = await store.queueJob({
         sourceId: source.source_id,
-        targetUrl: candidate.website as string,
+        // Always enqueue the normalized absolute URL, never the raw
+        // adapter-provided website string: sources like OSM `website`
+        // tags frequently omit the scheme ("www.clinic.ca"), and a
+        // scheme-less target breaks URL consumers downstream (the
+        // Scrape jobs table parses target_url with `new URL`).
+        targetUrl: normalized,
         key,
         maxAttempts: 3,
         candidateId,
