@@ -667,11 +667,13 @@ function globMatches(pathname: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`).test(pathname);
 }
 
-export function assertUrlAllowed(
-  rawUrl: string,
-  policy: CollectionPolicy,
-): URL {
-  const url = new URL(rawUrl);
+/**
+ * Scheme, credential, LinkedIn, and approved-domain checks shared by page
+ * URLs and by robots.txt redirect hops. Path allow/deny rules deliberately
+ * do NOT apply here: robots.txt lives outside a source's path allowlist by
+ * design, so its redirect chain is validated on domain grounds only.
+ */
+function assertDomainAllowed(url: URL, policy: CollectionPolicy): void {
   if (!["http:", "https:"].includes(url.protocol))
     throw new Error("Only HTTP(S) sources are permitted");
   if (url.username || url.password)
@@ -680,6 +682,14 @@ export function assertUrlAllowed(
     throw new Error("Automated LinkedIn collection is prohibited");
   if (!domainAllowed(url.hostname, policy.allowedDomains))
     throw new Error(`Domain ${url.hostname} is not approved`);
+}
+
+export function assertUrlAllowed(
+  rawUrl: string,
+  policy: CollectionPolicy,
+): URL {
+  const url = new URL(rawUrl);
+  assertDomainAllowed(url, policy);
   if (
     policy.denylistPaths.some((pattern) => globMatches(url.pathname, pattern))
   )
@@ -729,18 +739,40 @@ async function checkRobots(
   fetcher: typeof fetch,
 ): Promise<"allowed" | "not_checked"> {
   if (!policy.respectRobots) return "not_checked";
-  const robotsUrl = new URL("/robots.txt", url.origin);
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
     Math.min(policy.timeoutMs, 10_000),
   );
   try {
-    const response = await fetcher(robotsUrl, {
-      headers: { "user-agent": `${policy.userAgent} (${policy.contactEmail})` },
-      signal: controller.signal,
-      redirect: "error",
-    });
+    // Follow robots.txt redirects manually, mirroring the page-fetch
+    // redirect loop in collectUrl: canonicalization hops (bare -> www,
+    // http -> https) are the norm on real sites, and the pinned fetcher
+    // returns redirect responses instead of following them — a 301 used
+    // to dead-letter the whole job as "robots.txt returned 301". Every
+    // hop is re-validated against the policy's approved domains; the
+    // rules evaluated are the ones served at the FINAL robots URL, for
+    // the ORIGINAL page path.
+    let robotsUrl = new URL("/robots.txt", url.origin);
+    let response: Response | null = null;
+    for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
+      response = await fetcher(robotsUrl, {
+        headers: {
+          "user-agent": `${policy.userAgent} (${policy.contactEmail})`,
+        },
+        signal: controller.signal,
+        redirect: "manual",
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      if (!location)
+        throw new Error("Redirect response omitted Location header");
+      const next = new URL(location, robotsUrl);
+      assertDomainAllowed(next, policy);
+      robotsUrl = next;
+      response = null;
+    }
+    if (!response) throw new Error("Too many redirects");
     if (response.status === 404) return "allowed";
     if (!response.ok) throw new Error(`robots.txt returned ${response.status}`);
     const content = await readBoundedBody(
