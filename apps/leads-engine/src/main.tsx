@@ -1938,6 +1938,20 @@ export function Discovery({
   );
 }
 
+/**
+ * Hostname for display, tolerant of legacy rows whose target_url is
+ * not an absolute URL (discovery once enqueued raw adapter website
+ * strings, some without a scheme). Rendering must never throw on a
+ * stored value — a single bad row blanked the whole app.
+ */
+function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
 function Jobs({
   data,
   mutate,
@@ -2023,7 +2037,7 @@ function Jobs({
               <div className="op-name">
                 <span className="avatar">J</span>
                 <div>
-                  <b>{new URL(job.target_url).hostname}</b>
+                  <b>{hostnameOf(job.target_url)}</b>
                   <small>
                     {job.id.slice(0, 8)} · {job.target_url}
                   </small>
@@ -3026,9 +3040,11 @@ function Status({ value }: { value: string }) {
   );
 }
 function HealthBadge({ data }: { data: BootstrapData }) {
+  // "Release gate" health is the canary verdict plus worker presence.
+  // (It previously keyed off the scheduled-start latency target, which
+  // flips false whenever a large queue is draining normally.)
   const healthy =
-    data.operations.workers.length > 0 &&
-    data.operations.jobs.scheduledStartTargetMet;
+    data.operations.workers.length > 0 && data.operations.canary.passed;
   return (
     <div className="signal-box">
       <span className={`pulse ${healthy ? "" : "pulse-warn"}`} />
