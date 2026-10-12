@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { DiscoveryAdapter } from "./adapter.js";
 import { JobBankAdapter, JobBankAdapterConfigSchema } from "./job-bank.js";
-import { OverpassAdapter } from "./overpass.js";
+import { OverpassAdapter, OverpassAdapterConfigSchema } from "./overpass.js";
 import {
   TorontoAdapterConfigSchema,
   TorontoOpenDataAdapter,
@@ -22,6 +22,8 @@ export function parseDiscoveryAdapterConfig(
     return TorontoAdapterConfigSchema.parse(input ?? {});
   if (adapterId === "job_bank")
     return JobBankAdapterConfigSchema.parse(input ?? {});
+  if (adapterId === "overpass")
+    return OverpassAdapterConfigSchema.parse(input ?? {});
   return z.object({}).parse(input ?? {});
 }
 

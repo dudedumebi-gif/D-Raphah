@@ -1366,7 +1366,11 @@ export function Discovery({
       geo.centreLongitude = Number(form.get("longitude"));
     }
     const adapterConfig: Record<string, unknown> = {};
-    if (adapterId === "toronto_open_data") {
+    if (adapterId === "overpass") {
+      adapterConfig.categoryPreset = String(
+        form.get("categoryPreset") ?? "all",
+      );
+    } else if (adapterId === "toronto_open_data") {
       adapterConfig.categories = String(form.get("categories") ?? "")
         .split(",")
         .map((value) => value.trim())
@@ -1603,6 +1607,19 @@ export function Discovery({
                 required
               />
             </label>
+            {adapterId === "overpass" ? (
+              <>
+                <label>
+                  Category
+                  <select name="categoryPreset" defaultValue="all">
+                    <option value="all">All businesses</option>
+                    <option value="clinics">
+                      Clinics only (dental / medical / wellness)
+                    </option>
+                  </select>
+                </label>
+              </>
+            ) : null}
             {adapterId === "toronto_open_data" ? (
               <>
                 <label>
