@@ -157,7 +157,7 @@ try {
   await le`
     insert into public.opportunities(
       id, workspace_id, organization_id, title, stage, routing, status,
-      automation_maturity_score, opportunity_potential_score, confidence,
+      automation_maturity_score, opportunity_score, confidence,
       last_refreshed_at
     ) values (
       ${oppId}::uuid, ${workspaceId}::uuid, ${orgId}::uuid,

@@ -21,7 +21,7 @@ function sampleLead(overrides: Record<string, unknown> = {}) {
     status: "active",
     routing: "standard_review",
     automation_maturity_score: 32,
-    opportunity_potential_score: 78,
+    opportunity_score: 78,
     confidence: 0.81,
     last_refreshed_at: "2026-09-24T01:00:00.000Z",
     created_at: "2026-09-23T12:00:00.000Z",

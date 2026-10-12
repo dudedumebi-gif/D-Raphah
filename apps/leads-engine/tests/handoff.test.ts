@@ -58,7 +58,7 @@ function opportunityHandlers(overrides: {
           {
             id: OPPORTUNITY_ID,
             title: "Acme Manufacturing",
-            opportunity_potential_score: 82,
+            opportunity_score: 82,
             automation_maturity_score: 41,
             confidence: 0.78,
             latest_assessment_id: ASSESSMENT_ID,
