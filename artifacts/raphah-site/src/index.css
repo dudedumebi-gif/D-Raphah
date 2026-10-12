@@ -76,6 +76,8 @@
 @layer base {
   * { @apply border-border; }
   html { scroll-behavior: smooth; }
+  /* Anchor jumps must clear the fixed header (78px tall, 64px scrolled). */
+  section[id] { scroll-margin-top: 92px; }
   body {
     @apply font-sans antialiased bg-background text-foreground;
     margin: 0;
