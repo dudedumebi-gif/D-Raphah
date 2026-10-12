@@ -373,6 +373,31 @@ describe("collectUrl enrichment", () => {
     expect(collected.extractedText).not.toContain("[job-page:");
   });
 
+  it("cancels page redirect bodies before following the hop", async () => {
+    let cancelled = false;
+    const redirectBody = new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/old")
+        return new Response(redirectBody, {
+          status: 301,
+          headers: { location: "https://example.com/" },
+        });
+      return htmlResponse("<html><body>landed</body></html>");
+    });
+    const collected = await collectUrl(
+      "https://example.com/old",
+      testPolicy,
+      fetcher,
+      { skipPublicHostCheck: true, geocode: false },
+    );
+    expect(collected.statusCode).toBe(200);
+    expect(cancelled).toBe(true);
+  });
+
   it("survives job-page fetch failures without failing the scrape", async () => {
     const fetcher = createMockFetcher((url) => {
       if (url.pathname === "/careers")
@@ -386,5 +411,123 @@ describe("collectUrl enrichment", () => {
     expect(collected.statusCode).toBe(200);
     expect(collected.extractedText).toContain("[tech-fingerprint]");
     expect(collected.extractedText).not.toContain("[job-page:/careers]");
+  });
+});
+
+describe("collectUrl robots handling", () => {
+  const robotsPolicy: CollectionPolicy = {
+    ...testPolicy,
+    respectRobots: true,
+    allowedDomains: ["example.com", "www.example.com"],
+  };
+  const plainPage = () => htmlResponse("<html><body>plain</body></html>");
+  const collect = (fetcher: MockFetch) =>
+    collectUrl("https://example.com/", robotsPolicy, fetcher, {
+      skipPublicHostCheck: true,
+      geocode: false,
+    });
+
+  it("collects when robots.txt is served directly", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      return plainPage();
+    });
+    const collected = await collect(fetcher);
+    expect(collected.statusCode).toBe(200);
+    expect(collected.robotsDecision).toBe("allowed");
+  });
+
+  it("treats a missing robots.txt as allowed", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response("nope", { status: 404 });
+      return plainPage();
+    });
+    const collected = await collect(fetcher);
+    expect(collected.robotsDecision).toBe("allowed");
+  });
+
+  it("follows a robots.txt redirect to the canonical host and collects", async () => {
+    // The clinic-sprint failure mode: robots.txt 301 (bare -> www)
+    // dead-lettered the whole job as "robots.txt returned 301".
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://www.example.com/robots.txt" },
+        });
+      if (url.hostname === "www.example.com" && url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      return plainPage();
+    });
+    const collected = await collect(fetcher);
+    expect(collected.statusCode).toBe(200);
+    expect(collected.robotsDecision).toBe("allowed");
+    expect(fetcher.calls).toContain("https://www.example.com/robots.txt");
+  });
+
+  it("still enforces a Disallow served at the redirect target", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://www.example.com/robots.txt" },
+        });
+      if (url.hostname === "www.example.com" && url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nDisallow: /\n");
+      return plainPage();
+    });
+    await expect(collect(fetcher)).rejects.toThrow(
+      "robots.txt denies collection for this path",
+    );
+  });
+
+  it("refuses a robots.txt redirect to an unapproved domain", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://unapproved.example.net/robots.txt" },
+        });
+      return plainPage();
+    });
+    await expect(collect(fetcher)).rejects.toThrow(
+      "Domain unapproved.example.net is not approved",
+    );
+  });
+
+  it("cancels the redirect response body before following the hop", async () => {
+    let cancelled = false;
+    const redirectBody = new ReadableStream({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(redirectBody, {
+          status: 301,
+          headers: { location: "https://www.example.com/robots.txt" },
+        });
+      if (url.hostname === "www.example.com" && url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      return plainPage();
+    });
+    const collected = await collect(fetcher);
+    expect(collected.statusCode).toBe(200);
+    expect(cancelled).toBe(true);
+  });
+
+  it("gives up on a robots.txt redirect loop", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "/robots.txt" },
+        });
+      return plainPage();
+    });
+    await expect(collect(fetcher)).rejects.toThrow("Too many redirects");
   });
 });
