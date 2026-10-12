@@ -13,7 +13,7 @@ type CampaignWithAutoApply = CampaignRecord & {
 };
 type EditableCriteria = {
   automationMaturityMax?: number;
-  opportunityPotentialMin?: number;
+  qualificationScoreMin?: number;
   confidenceMin?: number;
   minimumEvidenceCategories?: number;
   targetQualifiedLeadsPerWeek?: number;
@@ -119,9 +119,8 @@ function CampaignSettings({
             criteria: {
               ...campaign.criteria,
               automationMaturityMax: Number(form.get("maturity")),
-              opportunityPotentialMin: Number(form.get("potential")),
+              qualificationScoreMin: Number(form.get("qualification")),
               confidenceMin: Number(form.get("confidence")) / 100,
-              minimumEvidenceCategories: Number(form.get("coverage")),
               targetQualifiedLeadsPerWeek: Number(form.get("target")),
               geography: {
                 mode,
@@ -181,9 +180,8 @@ function CampaignSettings({
           <small>{suggestion.rationale.join(" ")}</small>
           {Object.keys(suggestion.changes).length ? (
             <small>
-              Suggested values: maturity ≤{" "}
-              {suggestion.changes.automationMaturityMax}, opportunity ≥{" "}
-              {suggestion.changes.opportunityPotentialMin}, confidence ≥{" "}
+              Suggested values: qualification score ≥{" "}
+              {suggestion.changes.qualificationScoreMin ?? "—"}, confidence ≥{" "}
               {suggestion.changes.confidenceMin != null
                 ? `${Math.round(suggestion.changes.confidenceMin * 100)}%`
                 : "—"}
@@ -219,7 +217,18 @@ function CampaignSettings({
         <fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0 }}>
           <div className="form-grid">
             <label>
-              Maximum maturity
+              Qualification score (min)
+              <input
+                name="qualification"
+                type="number"
+                min="0"
+                max="100"
+                required
+                defaultValue={criteria.qualificationScoreMin ?? 60}
+              />
+            </label>
+            <label>
+              AI-enablement threshold (maturity ≤)
               <input
                 name="maturity"
                 type="number"
@@ -230,17 +239,6 @@ function CampaignSettings({
               />
             </label>
             <label>
-              Minimum opportunity
-              <input
-                name="potential"
-                type="number"
-                min="0"
-                max="100"
-                required
-                defaultValue={criteria.opportunityPotentialMin ?? 60}
-              />
-            </label>
-            <label>
               Confidence %
               <input
                 name="confidence"
@@ -248,18 +246,7 @@ function CampaignSettings({
                 min="0"
                 max="100"
                 required
-                defaultValue={(criteria.confidenceMin ?? 0.7) * 100}
-              />
-            </label>
-            <label>
-              Evidence categories
-              <input
-                name="coverage"
-                type="number"
-                min="1"
-                max="6"
-                required
-                defaultValue={criteria.minimumEvidenceCategories ?? 2}
+                defaultValue={(criteria.confidenceMin ?? 0.6) * 100}
               />
             </label>
             <label>

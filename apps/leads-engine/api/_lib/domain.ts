@@ -5,8 +5,24 @@ export const CriteriaSchema = z
   .object({
     automationMaturityMax: z.number().min(0).max(100).default(40),
     opportunityPotentialMin: z.number().min(0).max(100).default(60),
-    confidenceMin: z.number().min(0).max(1).default(0.7),
+    confidenceMin: z.number().min(0).max(1).default(0.6),
     minimumEvidenceCategories: z.number().int().min(1).max(6).default(2),
+    // PRD §10.2: qualification is a single Opportunity Score threshold.
+    qualificationScoreMin: z.number().min(0).max(100).default(60),
+    // PRD §10.1: the Opportunity Score is a weighted sum of seven
+    // factors; the weights are tunable per campaign and normalized at
+    // scoring time, so any operator-supplied set is scaled to sum to 1.
+    scoreWeights: z
+      .object({
+        icpFit: z.number().min(0).max(1).default(0.2),
+        maturityInverse: z.number().min(0).max(1).default(0.2),
+        signalStrength: z.number().min(0).max(1).default(0.15),
+        evidenceFreshness: z.number().min(0).max(1).default(0.05),
+        contactability: z.number().min(0).max(1).default(0.1),
+        intentTrigger: z.number().min(0).max(1).default(0.2),
+        confidence: z.number().min(0).max(1).default(0.1),
+      })
+      .default({}),
     targetQualifiedLeadsPerWeek: z
       .number()
       .int()
@@ -59,7 +75,7 @@ export interface DetectedSignal {
 
 export interface ScoreResult {
   automationMaturity: number;
-  opportunityPotential: number;
+  opportunityScore: number;
   confidence: number;
   coverageCategories: number;
   qualified: boolean;
@@ -92,14 +108,7 @@ export interface CriteriaSuggestion {
   observedQualifiedLeads: number;
   targetQualifiedLeads: number;
   changes: Partial<
-    Pick<
-      LeadCriteria,
-      | "automationMaturityMax"
-      | "opportunityPotentialMin"
-      | "confidenceMin"
-      | "minimumEvidenceCategories"
-      | "geography"
-    >
+    Pick<LeadCriteria, "qualificationScoreMin" | "confidenceMin" | "geography">
   >;
   rationale: string[];
   // False for every engine-produced suggestion today (gap analysis: the
@@ -372,6 +381,29 @@ export function inferBusinessProfile(text: string): BusinessProfile {
   };
 }
 
+/**
+ * PRD §10.1 contactability factor: does the evidence expose a reachable,
+ * permitted contact path? Four independent cues, 25 points each — an
+ * email address, a phone number, a contact invitation, and a booking
+ * path. Deliberately evidence-only: no cue, no credit.
+ */
+export function detectContactability(text: string): number {
+  const normalized = normalizeText(text);
+  let score = 0;
+  if (/[\w.+-]+@[\w-]+\.[\w.]{2,}/.test(normalized)) score += 25;
+  if (/(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}/.test(normalized))
+    score += 25;
+  if (/contact us|get in touch|reach us|contact form|send us a message/i.test(normalized))
+    score += 25;
+  if (
+    /book (?:online|an appointment|now|by phone)|request an appointment|call (?:us )?to book/i.test(
+      normalized,
+    )
+  )
+    score += 25;
+  return score;
+}
+
 export function calculateIcpFit(
   profile: BusinessProfile,
   criteriaInput: unknown,
@@ -564,13 +596,9 @@ export function suggestCriteriaAdjustment(
       observedQualifiedLeads,
       targetQualifiedLeads: target,
       changes: {
-        automationMaturityMax: Math.max(
-          criteria.automationMaturityMax,
-          Math.min(65, criteria.automationMaturityMax + 5),
-        ),
-        opportunityPotentialMin: Math.min(
-          criteria.opportunityPotentialMin,
-          Math.max(40, criteria.opportunityPotentialMin - 5),
+        qualificationScoreMin: Math.min(
+          criteria.qualificationScoreMin,
+          Math.max(40, criteria.qualificationScoreMin - 5),
         ),
         confidenceMin: Number(
           Math.min(
@@ -598,13 +626,9 @@ export function suggestCriteriaAdjustment(
       observedQualifiedLeads,
       targetQualifiedLeads: target,
       changes: {
-        automationMaturityMax: Math.min(
-          criteria.automationMaturityMax,
-          Math.max(20, criteria.automationMaturityMax - 5),
-        ),
-        opportunityPotentialMin: Math.max(
-          criteria.opportunityPotentialMin,
-          Math.min(80, criteria.opportunityPotentialMin + 5),
+        qualificationScoreMin: Math.max(
+          criteria.qualificationScoreMin,
+          Math.min(80, criteria.qualificationScoreMin + 5),
         ),
         confidenceMin: Number(
           Math.max(
@@ -616,7 +640,7 @@ export function suggestCriteriaAdjustment(
       },
       rationale: [
         `${observedQualifiedLeads} qualified leads exceed 150% of the weekly target of ${target}.`,
-        "Tighten score and confidence gates to prioritize the strongest manual-process opportunities.",
+        "Tighten the qualification score and confidence gates to prioritize the strongest opportunities.",
         ...(geographyCentre
           ? [
               `Centre coordinates were missing — suggesting ${criteria.geography.cities[0]} (${geographyCentre.centreLatitude}, ${geographyCentre.centreLongitude}) so radius qualification can work.`,
@@ -693,19 +717,15 @@ export function suggestGeographyCentre(
  * one-step recommendation.
  */
 export const AUTO_APPLY_MAX_STEP = {
-  automationMaturityMax: 5,
-  opportunityPotentialMin: 5,
+  qualificationScoreMin: 5,
   confidenceMin: 0.05,
-  minimumEvidenceCategories: 1,
 } as const;
 
 type AutoAdjustableKey = keyof typeof AUTO_APPLY_MAX_STEP;
 
 const AUTO_APPLY_HARD_BOUNDS: Record<AutoAdjustableKey, [number, number]> = {
-  automationMaturityMax: [0, 100],
-  opportunityPotentialMin: [0, 100],
+  qualificationScoreMin: [0, 100],
   confidenceMin: [0, 1],
-  minimumEvidenceCategories: [1, 6],
 };
 
 /**
@@ -764,7 +784,7 @@ export function evaluateAutoApply(
     const [minimum, maximum] = AUTO_APPLY_HARD_BOUNDS[key];
     stepped = Math.min(maximum, Math.max(minimum, stepped));
     if (key === "confidenceMin") stepped = Number(stepped.toFixed(2));
-    if (key === "minimumEvidenceCategories") stepped = Math.round(stepped);
+    if (key === "qualificationScoreMin") stepped = Math.round(stepped);
     if (stepped !== current) {
       next[key] = stepped;
       moved = true;
@@ -798,6 +818,7 @@ export function scoreSignals(
     businessProfile?: BusinessProfile;
     geoEligible?: boolean;
     evidenceFreshness?: number;
+    contactability?: number;
   } = {},
 ): ScoreResult {
   const criteria = CriteriaSchema.parse(criteriaInput);
@@ -830,9 +851,17 @@ export function scoreSignals(
     ),
   );
 
-  const manualStrength = signals
-    .filter((signal) => signal.polarity === "manual")
-    .reduce((total, signal) => total + signal.strength * signal.confidence, 0);
+  // PRD §10.1: the Opportunity Score is a single weighted sum of seven
+  // factors — ICP fit, automation maturity (inverse), signal strength,
+  // evidence freshness, contactability, intent/trigger, confidence.
+  // Weights are campaign-tunable (criteria.scoreWeights) and normalized
+  // here so any operator-supplied set sums to 1. This replaces the
+  // dual-score model (scoring 2.x) whose opportunity-potential formula
+  // and four independent gates appeared in no design document.
+  const totalSignalMass = signals.reduce(
+    (total, signal) => total + signal.strength * signal.confidence,
+    0,
+  );
   const urgencyStrength = signals
     .filter((signal) => signal.polarity === "commercial")
     .reduce((total, signal) => total + signal.strength * signal.confidence, 0);
@@ -841,14 +870,6 @@ export function scoreSignals(
       (metadata.businessProfile
         ? calculateIcpFit(metadata.businessProfile, criteria)
         : 55),
-  );
-  components.icp_fit = Math.round(icpFit);
-  const opportunityPotential = Math.round(
-    clamp(
-      icpFit * 0.45 +
-        Math.min(100, manualStrength * 1.6) * 0.35 +
-        Math.min(100, urgencyStrength * 2) * 0.2,
-    ),
   );
 
   const categories = new Set(signals.map((signal) => signal.category));
@@ -869,19 +890,58 @@ export function scoreSignals(
         0.97,
       ).toFixed(2),
     ) * evidenceFreshness;
+
+  const factors: Record<string, number> = {
+    icp_fit: Math.round(icpFit),
+    maturity_inverse: 100 - automationMaturity,
+    // Saturating linear scale: an evidence-rich page (~60+ weighted
+    // signal mass) reads as strong; a thin page stays low.
+    signal_strength: Math.round(clamp(totalSignalMass * 1.25)),
+    evidence_freshness: Math.round(clamp(metadata.evidenceFreshness ?? 100)),
+    contactability: Math.round(clamp(metadata.contactability ?? 0)),
+    intent_trigger: Math.round(clamp(Math.min(100, urgencyStrength * 2))),
+    confidence_factor: Math.round(confidence * 100),
+  };
+  Object.assign(components, factors);
+
+  const weights = criteria.scoreWeights;
+  const weightTotal =
+    weights.icpFit +
+    weights.maturityInverse +
+    weights.signalStrength +
+    weights.evidenceFreshness +
+    weights.contactability +
+    weights.intentTrigger +
+    weights.confidence;
+  const opportunityScore =
+    weightTotal > 0
+      ? Math.round(
+          clamp(
+            (factors.icp_fit * weights.icpFit +
+              factors.maturity_inverse * weights.maturityInverse +
+              factors.signal_strength * weights.signalStrength +
+              factors.evidence_freshness * weights.evidenceFreshness +
+              factors.contactability * weights.contactability +
+              factors.intent_trigger * weights.intentTrigger +
+              factors.confidence_factor * weights.confidence) /
+              weightTotal,
+          ),
+        )
+      : 0;
+
+  // PRD §10.2: qualification is the score threshold + confidence floor +
+  // geography. Automation maturity is a factor (inverse) and the
+  // AI-enablement pursuit threshold — not a separate veto.
   const geoEligible = metadata.geoEligible ?? true;
   const qualified =
     geoEligible &&
-    automationMaturity <= criteria.automationMaturityMax &&
-    opportunityPotential >= criteria.opportunityPotentialMin &&
-    confidence >= criteria.confidenceMin &&
-    coverageCategories >= criteria.minimumEvidenceCategories;
+    opportunityScore >= criteria.qualificationScoreMin &&
+    confidence >= criteria.confidenceMin;
 
   const explanation = [
-    `Automation maturity ${automationMaturity}/100 (qualifies at or below ${criteria.automationMaturityMax}).`,
-    `Opportunity potential ${opportunityPotential}/100 (minimum ${criteria.opportunityPotentialMin}).`,
+    `Opportunity score ${opportunityScore}/100 (qualifies at ${criteria.qualificationScoreMin}): ICP fit ${factors.icp_fit}, automation headroom ${factors.maturity_inverse}, signal strength ${factors.signal_strength}, intent/trigger ${factors.intent_trigger}, contactability ${factors.contactability}.`,
+    `Automation maturity ${automationMaturity}/100 (AI-enablement threshold ${criteria.automationMaturityMax}: at or below reads as low-automation).`,
     `Confidence ${(confidence * 100).toFixed(0)}% across ${coverageCategories} evidence categories.`,
-    `ICP fit ${Math.round(icpFit)}/100 based on available firmographic evidence.`,
     geoEligible
       ? "Geography is eligible."
       : "Geography is outside the configured market.",
@@ -889,13 +949,13 @@ export function scoreSignals(
 
   return {
     automationMaturity,
-    opportunityPotential,
+    opportunityScore,
     confidence: Number(confidence.toFixed(2)),
     coverageCategories,
     qualified,
     explanation,
     components,
-    scoringVersion: "2.1.0",
+    scoringVersion: "3.0.0",
   };
 }
 

@@ -53,7 +53,7 @@ const DISPATCH_TIMEOUT_MS = 15_000;
 interface OpportunityRow {
   id: string;
   title: string;
-  opportunity_potential_score: number;
+  opportunity_score: number;
   automation_maturity_score: number;
   confidence: number;
   latest_assessment_id: string | null;
@@ -129,7 +129,7 @@ export async function buildHandoffPackage(
     throw new Error("Invalid workspace or opportunity identifier");
   }
   const opportunityRows = (await client`
-    select o.id, o.title, o.opportunity_potential_score, o.automation_maturity_score,
+    select o.id, o.title, o.opportunity_score, o.automation_maturity_score,
            o.confidence, o.latest_assessment_id, o.primary_evidence_id,
            o.organization_id,
            org.name as org_name, org.normalized_domain as org_domain
@@ -177,8 +177,8 @@ export async function buildHandoffPackage(
   const summary = assessment ? explanationSummary(assessment.explanation) : "";
   const problemStatement =
     `${opportunity.title}. Automation maturity ` +
-    `${opportunity.automation_maturity_score}/100, opportunity potential ` +
-    `${opportunity.opportunity_potential_score}/100 ` +
+    `${opportunity.automation_maturity_score}/100, opportunity score ` +
+    `${opportunity.opportunity_score}/100 ` +
     `(confidence ${Number(opportunity.confidence).toFixed(2)}).` +
     (summary ? ` ${summary}` : "");
 

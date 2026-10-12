@@ -242,7 +242,7 @@ export const LEAD_EXPORT_COLUMNS = [
   "status",
   "routing",
   "automation_maturity_score",
-  "opportunity_potential_score",
+  "opportunity_score",
   "confidence",
   "coverage_categories",
   "qualified",
@@ -272,7 +272,7 @@ export function mapExportLeadRow(lead: any): Record<string, unknown> {
     status: lead.status ?? "",
     routing: lead.routing ?? "",
     automation_maturity_score: lead.automation_maturity_score ?? null,
-    opportunity_potential_score: lead.opportunity_potential_score ?? null,
+    opportunity_score: lead.opportunity_score ?? null,
     confidence: lead.confidence ?? null,
     coverage_categories: assessment?.coverage_categories ?? null,
     qualified: assessment?.qualified ?? null,
@@ -468,7 +468,7 @@ async function authenticatedRoutes(
             "*,organizations(name,normalized_domain),maturity_assessments!latest_assessment_id(explanation,components,scoring_version)",
           )
           .eq("workspace_id", workspaceId)
-          .order("opportunity_potential_score", { ascending: false })
+          .order("opportunity_score", { ascending: false })
           .limit(100),
         client
           .from("audit_events")
@@ -1061,7 +1061,7 @@ async function authenticatedRoutes(
       .from("opportunities")
       .select("*,organizations(*),maturity_assessments!latest_assessment_id(*)")
       .eq("workspace_id", workspaceId)
-      .order("opportunity_potential_score", { ascending: false });
+      .order("opportunity_score", { ascending: false });
     if (error) throw new Error(error.message);
     return json({ data });
   }
@@ -1076,7 +1076,7 @@ async function authenticatedRoutes(
       .from("opportunities")
       .select("*,organizations(*),maturity_assessments!latest_assessment_id(*)")
       .eq("workspace_id", workspaceId)
-      .order("opportunity_potential_score", { ascending: false })
+      .order("opportunity_score", { ascending: false })
       .limit(EXPORT_MAX_LEADS);
     if (error) throw new Error(error.message);
     const leads = (data ?? []) as any[];

@@ -181,7 +181,7 @@ export interface LeadRecord {
   routing: string;
   status: string;
   automation_maturity_score: number;
-  opportunity_potential_score: number;
+  opportunity_score: number;
   confidence: number;
   last_refreshed_at: string;
   data_mode: DataMode;

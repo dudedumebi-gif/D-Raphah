@@ -2290,7 +2290,7 @@ function LeadTable({
                 </div>
               </div>
               <Score value={lead.automation_maturity_score} inverse />
-              <Score value={lead.opportunity_potential_score} />
+              <Score value={lead.opportunity_score} />
               <span className="stage-action">
                 <b>{Math.round(lead.confidence * 100)}%</b>
                 {actions?.(lead)}
@@ -2974,7 +2974,7 @@ function interpretAuditEvent(event: {
   if (action === "opportunities.insert") {
     return {
       observation: `A new qualified lead was created: ${String(after.business_name ?? after.organization_id ?? "a business")}.`,
-      metric: `Opportunity score: ${String(after.opportunity_potential_score ?? after.score ?? "—")}`,
+      metric: `Opportunity score: ${String(after.opportunity_score ?? after.score ?? "—")}`,
       action:
         "Review the lead in Qualified leads and export it when ready for outreach planning.",
     };

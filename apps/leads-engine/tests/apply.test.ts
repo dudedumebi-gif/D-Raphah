@@ -17,12 +17,10 @@ function loosenSuggestion(): CriteriaSuggestion {
 describe("mergeSuggestionChanges", () => {
   it("merges partial changes into current criteria", () => {
     const merged = mergeSuggestionChanges(BASE_CRITERIA, {
-      automationMaturityMax: 45,
+      qualificationScoreMin: 55,
     });
-    expect(merged.automationMaturityMax).toBe(45);
-    expect(merged.opportunityPotentialMin).toBe(
-      BASE_CRITERIA.opportunityPotentialMin,
-    );
+    expect(merged.qualificationScoreMin).toBe(55);
+    expect(merged.confidenceMin).toBe(BASE_CRITERIA.confidenceMin);
   });
 
   it("applies the same validation as the PATCH route (rejects bad merges)", () => {
@@ -81,7 +79,7 @@ describe("evaluateAutoApply", () => {
       observedQualifiedLeads: 2,
       targetQualifiedLeads: 20,
       // Far-away synthetic target: a single run must not jump the whole way.
-      changes: { automationMaturityMax: 60 },
+      changes: { qualificationScoreMin: 20 },
       rationale: ["synthetic"],
       autoApply: true,
     };
@@ -89,12 +87,10 @@ describe("evaluateAutoApply", () => {
       autoApplyEnabled: true,
     });
     expect(next).not.toBeNull();
-    expect(next!.automationMaturityMax).toBe(
-      BASE_CRITERIA.automationMaturityMax + AUTO_APPLY_MAX_STEP.automationMaturityMax,
+    expect(next!.qualificationScoreMin).toBe(
+      BASE_CRITERIA.qualificationScoreMin - AUTO_APPLY_MAX_STEP.qualificationScoreMin,
     );
-    expect(next!.opportunityPotentialMin).toBe(
-      BASE_CRITERIA.opportunityPotentialMin,
-    );
+    expect(next!.confidenceMin).toBe(BASE_CRITERIA.confidenceMin);
   });
 
   it("never overshoots the suggestion target", () => {
@@ -102,14 +98,14 @@ describe("evaluateAutoApply", () => {
       direction: "loosen",
       observedQualifiedLeads: 2,
       targetQualifiedLeads: 20,
-      changes: { automationMaturityMax: 42 },
+      changes: { qualificationScoreMin: 57 },
       rationale: ["synthetic"],
       autoApply: true,
     };
     const next = evaluateAutoApply(BASE_CRITERIA, suggestion, {
       autoApplyEnabled: true,
     });
-    expect(next!.automationMaturityMax).toBe(42);
+    expect(next!.qualificationScoreMin).toBe(57);
   });
 
   it("moves every suggested key in one run, each bounded", () => {
@@ -147,8 +143,7 @@ describe("evaluateAutoApply", () => {
 
   it("respects hard schema bounds on the stepped values", () => {
     const tight = CriteriaSchema.parse({
-      automationMaturityMax: 21,
-      opportunityPotentialMin: 79,
+      qualificationScoreMin: 79,
       confidenceMin: 0.89,
     });
     const suggestion: CriteriaSuggestion = {
@@ -156,10 +151,8 @@ describe("evaluateAutoApply", () => {
       observedQualifiedLeads: 100,
       targetQualifiedLeads: 20,
       changes: {
-        automationMaturityMax: 10,
-        opportunityPotentialMin: 90,
+        qualificationScoreMin: 90,
         confidenceMin: 1.0,
-        minimumEvidenceCategories: 6,
       },
       rationale: ["synthetic"],
       autoApply: true,
@@ -167,10 +160,8 @@ describe("evaluateAutoApply", () => {
     const next = evaluateAutoApply(tight, suggestion, {
       autoApplyEnabled: true,
     })!;
-    expect(next.automationMaturityMax).toBeGreaterThanOrEqual(0);
-    expect(next.opportunityPotentialMin).toBeLessThanOrEqual(100);
+    expect(next.qualificationScoreMin).toBeLessThanOrEqual(100);
     expect(next.confidenceMin).toBeLessThanOrEqual(1);
-    expect(next.minimumEvidenceCategories).toBeLessThanOrEqual(6);
     // confidenceMin keeps 2-decimal precision like the engine.
     expect(Number(next.confidenceMin.toFixed(2))).toBe(next.confidenceMin);
   });

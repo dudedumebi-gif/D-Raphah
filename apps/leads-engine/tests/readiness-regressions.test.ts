@@ -291,7 +291,7 @@ describe("bounded criteria recommendations", () => {
     expect(suggestCriteriaAdjustment({}, 2)).toMatchObject({
       direction: "loosen",
       autoApply: false,
-      changes: { automationMaturityMax: 45 },
+      changes: { qualificationScoreMin: 55 },
     });
     expect(suggestCriteriaAdjustment({}, 20)).toMatchObject({
       direction: "hold",
@@ -299,28 +299,24 @@ describe("bounded criteria recommendations", () => {
     });
     expect(suggestCriteriaAdjustment({}, 40)).toMatchObject({
       direction: "tighten",
-      changes: { automationMaturityMax: 35 },
+      changes: { qualificationScoreMin: 65 },
     });
   });
   it("never reverses direction at custom guardrail boundaries", () => {
     const loose = CriteriaSchema.parse({
-      automationMaturityMax: 90,
-      opportunityPotentialMin: 20,
+      qualificationScoreMin: 40,
       confidenceMin: 0.1,
     });
     expect(suggestCriteriaAdjustment(loose, 0).changes).toMatchObject({
-      automationMaturityMax: 90,
-      opportunityPotentialMin: 20,
+      qualificationScoreMin: 40,
       confidenceMin: 0.1,
     });
     const strict = CriteriaSchema.parse({
-      automationMaturityMax: 10,
-      opportunityPotentialMin: 95,
+      qualificationScoreMin: 95,
       confidenceMin: 0.95,
     });
     expect(suggestCriteriaAdjustment(strict, 100).changes).toMatchObject({
-      automationMaturityMax: 10,
-      opportunityPotentialMin: 95,
+      qualificationScoreMin: 95,
       confidenceMin: 0.95,
     });
   });
