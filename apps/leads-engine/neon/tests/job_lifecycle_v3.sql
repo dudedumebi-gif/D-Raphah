@@ -3,10 +3,11 @@
 -- This worker/durability test rolls back. Run `pnpm test:rls:neon` separately
 -- with two genuine Neon Auth tokens to validate the Data API/RLS boundary.
 --
--- Leasing model under test (202610120001): up to 4 jobs per source may be
--- leased at once (live leases count against the cap), and reservation
--- pacing is per TARGET HOST — same-host jobs still serialize on the
--- policy rate window, different-host jobs reserve in parallel.
+-- Leasing model under test (202610120001 + 202610120002): up to 8 jobs
+-- per source may be leased at once (live leases count against the cap),
+-- and reservation pacing is per TARGET HOST — same-host jobs still
+-- serialize on the policy rate window, different-host jobs reserve in
+-- parallel.
 begin;
 create extension if not exists pgtap;
 select plan(18);
@@ -40,9 +41,9 @@ values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000
 
 -- Both due jobs lease in one call: the per-source cap is 4, not 1.
 with leased as materialized (
-  select * from public.lease_scrape_jobs('worker-a',12,240,(select test_now from test_clock))
+  select * from public.lease_scrape_jobs('worker-a',20,240,(select test_now from test_clock))
 )
-select is((select count(*)::int from leased where source_id='30000000-0000-0000-0000-000000000003'),2,'first lease returns both due jobs (per-source cap 4)');
+select is((select count(*)::int from leased where source_id='30000000-0000-0000-0000-000000000003'),2,'first lease returns both due jobs (per-source cap 8)');
 select ok(public.reserve_source_collection((select id from public.scrape_jobs where idempotency_key='fixture-one'),'worker-a',(select test_now from test_clock)),'source capacity is reserved durably');
 select ok(public.reserve_source_collection((select id from public.scrape_jobs where idempotency_key='fixture-one'),'worker-a',(select test_now from test_clock)),'reservation replay is idempotent');
 select is((select count(*)::int from public.source_collection_reservations where source_id='30000000-0000-0000-0000-000000000003' and worker_id='worker-a'),1,'reservation replay does not consume budget twice');
@@ -52,19 +53,27 @@ select throws_ok($$select public.reserve_source_collection((select id from publi
 -- ...and succeeds once the window has elapsed (its lease is still live).
 select ok(public.reserve_source_collection((select id from public.scrape_jobs where idempotency_key='fixture-two'),'worker-a',(select test_now from test_clock)+interval '2 seconds'),'same-host reservation succeeds after the rate window');
 
--- Three more due jobs: two live leases leave exactly 2 of the 4 slots.
+-- Seven more due jobs: two live leases leave exactly 6 of the 8 slots.
 insert into public.scrape_jobs(workspace_id,source_id,target_url,idempotency_key,max_attempts,scheduled_for)
 values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000003','https://example.test/three','fixture-three',3,(select test_now from test_clock)-interval '5 seconds');
 insert into public.scrape_jobs(workspace_id,source_id,target_url,idempotency_key,max_attempts,scheduled_for)
 values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000003','https://example.test/four','fixture-four',3,(select test_now from test_clock)-interval '5 seconds');
 insert into public.scrape_jobs(workspace_id,source_id,target_url,idempotency_key,max_attempts,scheduled_for)
 values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000003','https://example.test/five','fixture-five',3,(select test_now from test_clock)-interval '5 seconds');
+insert into public.scrape_jobs(workspace_id,source_id,target_url,idempotency_key,max_attempts,scheduled_for)
+values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000003','https://example.test/six','fixture-six',3,(select test_now from test_clock)-interval '5 seconds');
+insert into public.scrape_jobs(workspace_id,source_id,target_url,idempotency_key,max_attempts,scheduled_for)
+values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000003','https://example.test/seven','fixture-seven',3,(select test_now from test_clock)-interval '5 seconds');
+insert into public.scrape_jobs(workspace_id,source_id,target_url,idempotency_key,max_attempts,scheduled_for)
+values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000003','https://example.test/eight','fixture-eight',3,(select test_now from test_clock)-interval '5 seconds');
+insert into public.scrape_jobs(workspace_id,source_id,target_url,idempotency_key,max_attempts,scheduled_for)
+values('20000000-0000-0000-0000-000000000003','30000000-0000-0000-0000-000000000003','https://example.test/nine','fixture-nine',3,(select test_now from test_clock)-interval '5 seconds');
 with leased as materialized (
-  select * from public.lease_scrape_jobs('worker-b',12,240,(select test_now from test_clock))
+  select * from public.lease_scrape_jobs('worker-b',20,240,(select test_now from test_clock))
 )
-select is((select count(*)::int from leased where source_id='30000000-0000-0000-0000-000000000003'),2,'remaining slots lease two more jobs (cap 4 with 2 active)');
+select is((select count(*)::int from leased where source_id='30000000-0000-0000-0000-000000000003'),6,'remaining slots lease six more jobs (cap 8 with 2 active)');
 with leased as materialized (
-  select * from public.lease_scrape_jobs('worker-c',12,240,(select test_now from test_clock))
+  select * from public.lease_scrape_jobs('worker-c',20,240,(select test_now from test_clock))
 )
 select is((select count(*)::int from leased where source_id='30000000-0000-0000-0000-000000000003'),0,'cap reached: another worker receives none for the source');
 
