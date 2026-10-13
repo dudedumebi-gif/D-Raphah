@@ -19,7 +19,11 @@
  */
 import { fetchCkanPackage, type CkanPackage } from "./discovery/ckan.js";
 import { JOB_BANK_PACKAGE_URL } from "./discovery/job-bank.js";
-import type { DetectedSignal } from "./domain.js";
+import { JOB_BANK_OPEN_DATA_TERMS_ID } from "./discovery/terms.js";
+import {
+  JOB_BANK_MARKET_SIGNAL_CODE,
+  type DetectedSignal,
+} from "./domain.js";
 
 /** Titles that are unambiguously clinic front-desk roles. */
 export const JOB_BANK_ROLE_KEYWORDS: readonly string[] = [
@@ -268,13 +272,48 @@ export async function lookupJobBankMarket(
   }
 }
 
+/**
+ * The repository's source gate, applied to the market sync: the Job
+ * Bank dataset may only be collected while a Job Bank discovery source
+ * exists whose linked collection source is active with a human-approved
+ * policy AND whose workspace has accepted the Open Government Licence —
+ * Canada terms. Mirrors the predicates discovery runs and collection
+ * already enforce (schedule.ts assertCollectionSourceApproved, the
+ * terms_acceptances check in the discovery routes). Fail-closed: any
+ * error or missing link means the sync does not run.
+ */
+export async function jobBankSourceApproved(
+  client: SqlClient,
+): Promise<boolean> {
+  try {
+    const rows = (await client`
+      select 1 as ok
+      from public.discovery_sources d
+      join public.source_definitions s on s.id = d.source_id
+      join public.source_policy_versions p on p.id = s.active_policy_id
+      join public.terms_acceptances t
+        on t.workspace_id = d.workspace_id
+       and t.terms_id = ${JOB_BANK_OPEN_DATA_TERMS_ID}
+      where d.adapter_id = 'job_bank'
+        and d.active = true
+        and s.status = 'active'
+        and p.status = 'approved'
+        and p.approved_by is not null
+      limit 1
+    `) as unknown as unknown[];
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** The synthetic signal the worker adds for an active market. */
 export function jobBankMarketSignal(
   market: JobBankMarket,
   strength: number,
 ): DetectedSignal {
   return {
-    code: "job_bank_market_hiring",
+    code: JOB_BANK_MARKET_SIGNAL_CODE,
     category: "commercial_urgency",
     polarity: "commercial",
     strength,

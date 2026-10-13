@@ -18,6 +18,7 @@ import { dispatchDueHandoffs, type SqlClient } from "./handoff.js";
 import {
   jobBankMarketSignal,
   jobBankMarketSyncStale,
+  jobBankSourceApproved,
   lookupJobBankMarket,
   syncJobBankMarketSignals,
 } from "./job-bank-market.js";
@@ -250,8 +251,11 @@ async function persistEvidenceAndLead(
   // strength is the campaign's operator-tuned jobBankMarketStrength.
   // The evidence is market-level and inferential (Job Bank open data
   // withholds employer identity); its excerpt says so verbatim. The
-  // lookup is fail-soft — no snapshot, no signal.
-  const marketCity = geography.city ?? criteria.geography.cities[0] ?? null;
+  // lookup is fail-soft — no snapshot, no signal. The city must be
+  // EVIDENCED by the clinic's own geography evaluation — never the
+  // campaign's configured targets, which would credit a clinic with a
+  // market it was never shown to be in.
+  const marketCity = geography.city;
   if (marketCity && criteria.jobBankMarketStrength > 0) {
     const market = await lookupJobBankMarket(client, marketCity);
     if (market) {
@@ -449,16 +453,24 @@ export async function runWorkerTick(
   `) as unknown as Array<{ count: number }>;
   result.compactedEvidence = Number(compactedRows[0]?.count ?? 0);
   // Job Bank market snapshot: refresh at most daily (the source files
-  // are monthly). Failure-isolated — a CKAN outage, a slow download, or
-  // the snapshot table not existing yet must never fail the tick; the
-  // scoring-side lookup is likewise fail-soft.
+  // are monthly), and ONLY while the source gate holds — an active Job
+  // Bank discovery source with a human-approved collection policy and
+  // accepted Open Government Licence terms (the same gate discovery
+  // runs enforce; without it the dataset is not collected at all).
+  // Failure-isolated — a CKAN outage, a slow download, or the snapshot
+  // table not existing yet must never fail the tick; the scoring-side
+  // lookup is likewise fail-soft.
   try {
     if (await jobBankMarketSyncStale(client, new Date(now))) {
-      result.jobBankCitiesSynced = await syncJobBankMarketSignals(
-        client,
-        fetch,
-        new Date(now),
-      );
+      if (await jobBankSourceApproved(client)) {
+        result.jobBankCitiesSynced = await syncJobBankMarketSignals(
+          client,
+          fetch,
+          new Date(now),
+        );
+      } else {
+        log("info", "job_bank_market_sync_skipped_unapproved", { workerId });
+      }
     }
   } catch (error) {
     log("error", "job_bank_market_sync_failed", { workerId });

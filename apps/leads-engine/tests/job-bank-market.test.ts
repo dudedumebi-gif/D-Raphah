@@ -3,6 +3,7 @@ import {
   countJobBankPostingsByCity,
   isClinicRolePosting,
   jobBankMarketSignal,
+  jobBankSourceApproved,
   selectJobBankCsvUrls,
 } from "../api/_lib/job-bank-market";
 import { CriteriaSchema, scoreSignals } from "../api/_lib/domain";
@@ -112,6 +113,25 @@ describe("market signal", () => {
     expect(scored.components.intent_trigger).toBe(40);
   });
 
+  it("is isolated from clinic-evidence calculations (Codex P2)", () => {
+    const signal = jobBankMarketSignal(
+      { city: "Toronto", province: "Ontario", postings: 71 },
+      20,
+    );
+    const baseline = scoreSignals([], {}, { contactability: 0 });
+    const scored = scoreSignals([signal], {}, { contactability: 0 });
+    // Intent moves; nothing clinic-evidence-derived does.
+    expect(scored.components.intent_trigger).toBe(40);
+    expect(scored.confidence).toBe(baseline.confidence);
+    expect(scored.components.signal_strength).toBe(
+      baseline.components.signal_strength,
+    );
+    expect(scored.coverageCategories).toBe(0);
+    expect(
+      scored.explanation.some((line) => line.includes("market-level")),
+    ).toBe(true);
+  });
+
   it("defaults the criteria strength to 20 and allows disabling", () => {
     expect(CriteriaSchema.parse({}).jobBankMarketStrength).toBe(20);
     expect(
@@ -120,5 +140,27 @@ describe("market signal", () => {
     expect(() =>
       CriteriaSchema.parse({ jobBankMarketStrength: 41 }),
     ).toThrow();
+  });
+});
+
+describe("source gate", () => {
+  const fakeClient =
+    (result: unknown) =>
+    async () =>
+      result;
+  it("opens only when an approved source row exists", async () => {
+    await expect(
+      jobBankSourceApproved(fakeClient([{ ok: 1 }]) as never),
+    ).resolves.toBe(true);
+    await expect(jobBankSourceApproved(fakeClient([]) as never)).resolves.toBe(
+      false,
+    );
+  });
+
+  it("fails closed on any error", async () => {
+    const throwing = (async () => {
+      throw new Error("relation does not exist");
+    }) as never;
+    await expect(jobBankSourceApproved(throwing)).resolves.toBe(false);
   });
 });
