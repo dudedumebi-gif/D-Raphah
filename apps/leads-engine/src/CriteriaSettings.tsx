@@ -52,6 +52,33 @@ function CampaignSettings({
   const [autoApply, setAutoApply] = useState(
     (campaign as CampaignWithAutoApply).auto_apply_criteria === true,
   );
+  const [rescoring, setRescoring] = useState(false);
+  const [dryRunning, setDryRunning] = useState(false);
+  const [rescoreSummary, setRescoreSummary] = useState<string | null>(null);
+  const [dryRun, setDryRun] = useState<{
+    total: number;
+    projectedQualified: number;
+    newlyQualified: number;
+    alreadyCurrent: number;
+    threshold: number;
+    marketStrength: number;
+    top: Array<{
+      organization: string;
+      domain: string | null;
+      currentScore: number;
+      projectedScore: number;
+      currentQualified: boolean;
+      projectedQualified: boolean;
+      intentBefore: number | null;
+      intentAfter: number;
+    }>;
+  } | null>(null);
+  const [thresholdInput, setThresholdInput] = useState(
+    criteria.qualificationScoreMin ?? 60,
+  );
+  const [strengthInput, setStrengthInput] = useState(
+    criteria.jobBankMarketStrength ?? 20,
+  );
   const suggestion = campaign.criteria_suggestion;
   const usesRadius = mode === "radius" || mode === "hybrid";
   const hasSuggestedChanges =
@@ -74,6 +101,77 @@ function CampaignSettings({
       );
     } finally {
       setApplying(false);
+    }
+  }
+  async function runDryRun() {
+    setDryRunning(true);
+    setDryRun(null);
+    try {
+      const payload = await mutate<{ data?: typeof dryRun }>(
+        `/api/v1/criteria/${campaign.id}/rescore`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dryRun: true,
+            thresholdOverride: thresholdInput,
+            strengthOverride: strengthInput,
+          }),
+        },
+        "Dry-run complete — no records written.",
+      );
+      if (payload?.data) setDryRun(payload.data);
+    } finally {
+      setDryRunning(false);
+    }
+  }
+  async function rescore() {
+    setRescoring(true);
+    setRescoreSummary(null);
+    let rescanned = 0;
+    let alreadyCurrent = 0;
+    let newlyQualified = 0;
+    let unqualified = 0;
+    let total = 0;
+    try {
+      // The route scores a bounded batch per call and skips rows
+      // already current under these parameters; loop until it
+      // reports nothing remaining.
+      for (let guard = 0; guard < 200; guard += 1) {
+        const payload = await mutate<{
+          data?: {
+            total: number;
+            rescanned: number;
+            alreadyCurrent: number;
+            newlyQualified: number;
+            unqualified: number;
+            remaining: number;
+          };
+        }>(
+          `/api/v1/criteria/${campaign.id}/rescore`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              limit: 25,
+              thresholdOverride: thresholdInput,
+              strengthOverride: strengthInput,
+            }),
+          },
+          "Rescoring stored assessments…",
+        );
+        const batch = payload?.data;
+        if (!batch) break;
+        total = batch.total;
+        rescanned += batch.rescanned;
+        alreadyCurrent = batch.alreadyCurrent;
+        newlyQualified += batch.newlyQualified;
+        unqualified += batch.unqualified;
+        if (batch.remaining === 0 || batch.rescanned === 0) break;
+      }
+      setRescoreSummary(
+        `Rescored ${rescanned} of ${total} assessments at threshold ${thresholdInput} / strength ${strengthInput}: ${newlyQualified} newly qualified, ${unqualified} unqualified, ${alreadyCurrent} already current. New assessments were written; originals are preserved.`,
+      );
+    } finally {
+      setRescoring(false);
     }
   }
   async function requeue() {
@@ -419,6 +517,99 @@ function CampaignSettings({
           >
             {requeuing ? "Queueing…" : "Re-queue scrape"}
           </button>
+        </div>
+      ) : null}
+      <div className="requeue-row">
+        <p className="muted">
+          Re-score this campaign&apos;s stored assessments from their
+          stored evidence — no re-scraping. Run a dry-run first: it
+          projects qualifiers and the top 20 at the parameters below
+          and writes nothing. A real rescore writes NEW assessments
+          (originals preserved), reuses the stored signals plus the
+          Job Bank market overlay, and never deletes opportunities.
+          {rescoreSummary ? (
+            <>
+              <br />
+              {rescoreSummary}
+            </>
+          ) : null}
+        </p>
+        <label>
+          Threshold
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={thresholdInput}
+            onChange={(event) =>
+              setThresholdInput(Number(event.target.value))
+            }
+          />
+        </label>
+        <label>
+          Job Bank strength
+          <input
+            type="number"
+            min={0}
+            max={40}
+            value={strengthInput}
+            onChange={(event) => setStrengthInput(Number(event.target.value))}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={busy || applying || dryRunning || rescoring}
+          onClick={() => void runDryRun()}
+        >
+          {dryRunning ? "Projecting…" : "Dry-run"}
+        </button>
+        <button
+          type="button"
+          disabled={busy || applying || dryRunning || rescoring}
+          onClick={() => void rescore()}
+        >
+          {rescoring ? "Rescoring…" : "Rescore assessments"}
+        </button>
+      </div>
+      {dryRun ? (
+        <div className="requeue-row">
+          <p className="muted">
+            Dry-run at threshold {dryRun.threshold} / strength{" "}
+            {dryRun.marketStrength}: {dryRun.projectedQualified} of{" "}
+            {dryRun.total} projected qualified ({dryRun.newlyQualified}{" "}
+            newly, {dryRun.alreadyCurrent} already current). Top 20 by
+            projected score:
+          </p>
+          <table className="jobbank-table">
+            <thead>
+              <tr>
+                <th>Organization</th>
+                <th>Score</th>
+                <th>Intent</th>
+                <th>Qualified</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dryRun.top.map((row) => (
+                <tr key={row.organization}>
+                  <td>{row.organization}</td>
+                  <td>
+                    {row.currentScore} → {row.projectedScore}
+                  </td>
+                  <td>
+                    {row.intentBefore ?? "—"} → {row.intentAfter}
+                  </td>
+                  <td>
+                    {row.projectedQualified
+                      ? row.currentQualified
+                        ? "Yes"
+                        : "New"
+                      : "No"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       ) : null}
       </>
