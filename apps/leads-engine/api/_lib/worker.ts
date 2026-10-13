@@ -15,6 +15,12 @@ import {
 import { truncateToByteLength } from "@raphah/handoff-contract";
 import { createAdminClient } from "./neon.js";
 import { dispatchDueHandoffs, type SqlClient } from "./handoff.js";
+import {
+  jobBankMarketSignal,
+  jobBankMarketSyncStale,
+  lookupJobBankMarket,
+  syncJobBankMarketSignals,
+} from "./job-bank-market.js";
 import { checkOperationalAlerts } from "./alerts.js";
 import { log, reportError } from "./telemetry.js";
 
@@ -97,6 +103,7 @@ export interface WorkerTickResult {
   autoApplied: number;
   alertsEmitted: number;
   prunedOperationalRows: number;
+  jobBankCitiesSynced: number;
 }
 
 export function allowedDomainsForJob(
@@ -238,6 +245,21 @@ async function persistEvidenceAndLead(
     criteria,
     collected.coordinates,
   );
+  // Job Bank market-intent bridge: when the clinic's market is actively
+  // hiring for clinic front-desk roles, add ONE synthetic signal whose
+  // strength is the campaign's operator-tuned jobBankMarketStrength.
+  // The evidence is market-level and inferential (Job Bank open data
+  // withholds employer identity); its excerpt says so verbatim. The
+  // lookup is fail-soft — no snapshot, no signal.
+  const marketCity = geography.city ?? criteria.geography.cities[0] ?? null;
+  if (marketCity && criteria.jobBankMarketStrength > 0) {
+    const market = await lookupJobBankMarket(client, marketCity);
+    if (market) {
+      signals.push(
+        jobBankMarketSignal(market, criteria.jobBankMarketStrength),
+      );
+    }
+  }
   const score = scoreSignals(signals, criteria, {
     businessProfile: inferBusinessProfile(combinedExtractedText),
     geoEligible: geography.eligible,
@@ -381,6 +403,7 @@ export async function runWorkerTick(
     autoApplied: 0,
     alertsEmitted: 0,
     prunedOperationalRows: 0,
+    jobBankCitiesSynced: 0,
   };
   const now = new Date().toISOString();
   const deploymentId =
@@ -425,6 +448,21 @@ export async function runWorkerTick(
     select public.compact_expired_evidence(${now}::timestamptz) as count
   `) as unknown as Array<{ count: number }>;
   result.compactedEvidence = Number(compactedRows[0]?.count ?? 0);
+  // Job Bank market snapshot: refresh at most daily (the source files
+  // are monthly). Failure-isolated — a CKAN outage, a slow download, or
+  // the snapshot table not existing yet must never fail the tick; the
+  // scoring-side lookup is likewise fail-soft.
+  try {
+    if (await jobBankMarketSyncStale(client, new Date(now))) {
+      result.jobBankCitiesSynced = await syncJobBankMarketSignals(
+        client,
+        fetch,
+        new Date(now),
+      );
+    }
+  } catch (error) {
+    log("error", "job_bank_market_sync_failed", { workerId });
+  }
   // Auto-apply (gap 3): one bounded criteria step per opted-in campaign.
   // Failure-isolated so a bad campaign row can never fail the tick.
   try {
