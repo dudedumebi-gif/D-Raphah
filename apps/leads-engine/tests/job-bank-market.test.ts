@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   countJobBankPostingsByCity,
+  countJobBankRoleRollups,
   isClinicRolePosting,
   jobBankMarketSignal,
   jobBankSourceApproved,
   selectJobBankCsvUrls,
+  shapeJobBankMarketView,
 } from "../api/_lib/job-bank-market";
 import { CriteriaSchema, scoreSignals } from "../api/_lib/domain";
 
@@ -140,6 +142,53 @@ describe("market signal", () => {
     expect(() =>
       CriteriaSchema.parse({ jobBankMarketStrength: 41 }),
     ).toThrow();
+  });
+});
+
+describe("role rollups and market view shaping", () => {
+  const header =
+    "Job Title\tNOC\tNAICS\tProvince/Territory\tCity\tFirst Posting Date";
+  const text = [
+    header,
+    "dental receptionist\t14101\t621210\tOntario\tToronto\t2026/09/15",
+    "Dental Receptionist\t14101\t621210\tOntario\tToronto\t2026/09/20",
+    "dental receptionist\t14101\t621210\tOntario\tToronto\t2026/08/10",
+    "medical receptionist\t14101\t621110\tOntario\tToronto\tnot-a-date",
+  ].join("\n");
+
+  it("buckets postings by posting month with display titles", () => {
+    const rollups = countJobBankRoleRollups(text);
+    const sept = rollups.find((row) => row.periodMonth === "2026-09-01");
+    const aug = rollups.find((row) => row.periodMonth === "2026-08-01");
+    expect(sept?.roleTitle).toBe("Dental Receptionist");
+    expect(sept?.postings).toBe(2);
+    expect(aug?.postings).toBe(1);
+    // The unparseable-date row contributes to no bucket.
+    expect(rollups.reduce((total, row) => total + row.postings, 0)).toBe(3);
+  });
+
+  it("shapes top cities, Toronto roles, and growth", () => {
+    const view = shapeJobBankMarketView({
+      cities: [
+        { city: "Ottawa", province: "Ontario", postings: 12, latestPosted: "2026/09/28" },
+        { city: "Toronto", province: "Ontario", postings: 40, latestPosted: "2026/09/30" },
+      ],
+      rollups: [
+        { periodMonth: "2026-09-01", city: "Toronto", province: "Ontario", roleTitle: "Dental Receptionist", postings: 30 },
+        { periodMonth: "2026-08-01", city: "Toronto", province: "Ontario", roleTitle: "Dental Receptionist", postings: 20 },
+        { periodMonth: "2026-09-01", city: "Toronto", province: "Ontario", roleTitle: "Medical Receptionist", postings: 5 },
+      ],
+      gateApproved: true,
+      syncedAt: "2026-10-12T00:00:00Z",
+    });
+    expect(view.cities[0].city).toBe("Toronto");
+    expect(view.totalCities).toBe(2);
+    expect(view.toronto.postings).toBe(40);
+    expect(view.periods).toEqual({ current: "2026-09-01", previous: "2026-08-01" });
+    const dental = view.toronto.roles.find((r) => r.role === "Dental Receptionist");
+    expect(dental?.deltaPct).toBe(50);
+    const medical = view.toronto.roles.find((r) => r.role === "Medical Receptionist");
+    expect(medical?.deltaPct).toBeNull();
   });
 });
 

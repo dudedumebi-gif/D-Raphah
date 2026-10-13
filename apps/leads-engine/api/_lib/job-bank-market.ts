@@ -72,21 +72,27 @@ export function isClinicRolePosting(title: string, naics: string): boolean {
   return normalized.includes("receptionist") && naics.trim().startsWith("62");
 }
 
+interface JobBankRow {
+  title: string;
+  naics: string;
+  province: string;
+  city: string;
+  postedRaw: string;
+  postedMs: number;
+}
+
 /**
- * Count in-window clinic-role postings per city from one monthly Job Bank
- * CSV (already decoded to text; the published files are UTF-16 TSV).
- * Column positions are resolved from the header row, and rows too short
- * to contain the location columns are skipped (free-text columns can
- * carry embedded tabs in principle; every column used here precedes
- * them in the published layout).
+ * Parse one monthly Job Bank file (already decoded to text; the
+ * published files are UTF-16 TSV) into clinic-role posting rows.
+ * Column positions are resolved from the header row, and rows too
+ * short to contain the location columns are skipped (free-text columns
+ * can carry embedded tabs in principle; every column used here
+ * precedes them in the published layout).
  */
-export function countJobBankPostingsByCity(
-  text: string,
-  now: Date,
-): Map<string, JobBankCityCount> {
-  const counts = new Map<string, JobBankCityCount>();
+function parseJobBankRows(text: string): JobBankRow[] {
+  const rows: JobBankRow[] = [];
   const lines = text.split(/\r?\n/);
-  if (lines.length < 2) return counts;
+  if (lines.length < 2) return rows;
   const header = lines[0].split("\t").map((value) => value.trim());
   const titleIdx = header.indexOf("Job Title");
   const naicsIdx = header.indexOf("NAICS");
@@ -94,23 +100,43 @@ export function countJobBankPostingsByCity(
   const cityIdx = header.indexOf("City");
   const dateIdx = header.indexOf("First Posting Date");
   if ([titleIdx, naicsIdx, provinceIdx, cityIdx, dateIdx].some((i) => i < 0))
-    return counts;
+    return rows;
   const minFields = Math.max(titleIdx, naicsIdx, provinceIdx, cityIdx, dateIdx);
-  const cutoff = now.getTime() - JOB_BANK_MARKET_WINDOW_DAYS * 86_400_000;
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue;
     const fields = line.split("\t");
     if (fields.length <= minFields) continue;
-    if (!isClinicRolePosting(fields[titleIdx] ?? "", fields[naicsIdx] ?? ""))
-      continue;
-    const postedRaw = (fields[dateIdx] ?? "").trim();
-    const posted = Date.parse(postedRaw);
-    if (!Number.isNaN(posted) && (posted < cutoff || posted > now.getTime()))
-      continue;
+    const title = fields[titleIdx] ?? "";
+    const naics = fields[naicsIdx] ?? "";
+    if (!isClinicRolePosting(title, naics)) continue;
     const city = (fields[cityIdx] ?? "").trim();
     const province = (fields[provinceIdx] ?? "").trim();
     if (!city || !province) continue;
-    const key = `${city.toLowerCase()}|${province.toLowerCase()}`;
+    const postedRaw = (fields[dateIdx] ?? "").trim();
+    rows.push({
+      title,
+      naics,
+      province,
+      city,
+      postedRaw,
+      postedMs: Date.parse(postedRaw),
+    });
+  }
+  return rows;
+}
+
+/** Count in-window clinic-role postings per city from one monthly file. */
+export function countJobBankPostingsByCity(
+  text: string,
+  now: Date,
+): Map<string, JobBankCityCount> {
+  const counts = new Map<string, JobBankCityCount>();
+  const cutoff = now.getTime() - JOB_BANK_MARKET_WINDOW_DAYS * 86_400_000;
+  for (const row of parseJobBankRows(text)) {
+    const posted = row.postedMs;
+    if (!Number.isNaN(posted) && (posted < cutoff || posted > now.getTime()))
+      continue;
+    const key = `${row.city.toLowerCase()}|${row.province.toLowerCase()}`;
     const existing = counts.get(key);
     if (existing) {
       existing.postings += 1;
@@ -119,17 +145,62 @@ export function countJobBankPostingsByCity(
         (!existing.latestPosted ||
           posted > Date.parse(existing.latestPosted))
       )
-        existing.latestPosted = postedRaw;
+        existing.latestPosted = row.postedRaw;
     } else {
       counts.set(key, {
-        city,
-        province,
+        city: row.city,
+        province: row.province,
         postings: 1,
-        latestPosted: Number.isNaN(posted) ? null : postedRaw,
+        latestPosted: Number.isNaN(posted) ? null : row.postedRaw,
       });
     }
   }
   return counts;
+}
+
+export interface JobBankRoleRollup {
+  /** First of the posting month, ISO date (yyyy-mm-dd). */
+  periodMonth: string;
+  city: string;
+  province: string;
+  roleTitle: string;
+  postings: number;
+}
+
+function displayRoleTitle(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/(^|[\s-])([a-z])/g, (_m, sep: string, ch: string) => sep + ch.toUpperCase());
+}
+
+/**
+ * Postings per (posting month, city, role) from one monthly file —
+ * the market view's raw material for top roles and month-over-month
+ * growth. Rows with unparseable dates are excluded (no month to
+ * bucket them into).
+ */
+export function countJobBankRoleRollups(text: string): JobBankRoleRollup[] {
+  const counts = new Map<string, JobBankRoleRollup>();
+  for (const row of parseJobBankRows(text)) {
+    if (Number.isNaN(row.postedMs)) continue;
+    const date = new Date(row.postedMs);
+    const periodMonth = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-01`;
+    const roleTitle = displayRoleTitle(row.title);
+    const key = `${periodMonth}|${row.city.toLowerCase()}|${row.province.toLowerCase()}|${roleTitle.toLowerCase()}`;
+    const existing = counts.get(key);
+    if (existing) existing.postings += 1;
+    else
+      counts.set(key, {
+        periodMonth,
+        city: row.city,
+        province: row.province,
+        roleTitle,
+        postings: 1,
+      });
+  }
+  return [...counts.values()];
 }
 
 /** The English CSV resources for the two newest monthly files. */
@@ -160,19 +231,25 @@ async function fetchUtf16Text(
   return new TextDecoder("utf-16").decode(buffer);
 }
 
+export interface JobBankMarketData {
+  cities: JobBankCityCount[];
+  rollups: JobBankRoleRollup[];
+}
+
 /** Download the current + previous month files and merge the counts. */
 export async function fetchJobBankMarketCounts(
   fetcher: typeof fetch,
   now: Date,
-): Promise<JobBankCityCount[]> {
+): Promise<JobBankMarketData> {
   const pkg = await fetchCkanPackage(fetcher, JOB_BANK_PACKAGE_URL);
   const urls = selectJobBankCsvUrls(pkg);
   if (!urls.length) throw new Error("No Job Bank CSV resources found");
-  const merged = new Map<string, JobBankCityCount>();
+  const mergedCities = new Map<string, JobBankCityCount>();
+  const mergedRollups = new Map<string, JobBankRoleRollup>();
   for (const url of urls) {
     const text = await fetchUtf16Text(fetcher, url);
     for (const [key, value] of countJobBankPostingsByCity(text, now)) {
-      const existing = merged.get(key);
+      const existing = mergedCities.get(key);
       if (existing) {
         existing.postings += value.postings;
         if (
@@ -182,11 +259,20 @@ export async function fetchJobBankMarketCounts(
         )
           existing.latestPosted = value.latestPosted;
       } else {
-        merged.set(key, { ...value });
+        mergedCities.set(key, { ...value });
       }
     }
+    for (const rollup of countJobBankRoleRollups(text)) {
+      const key = `${rollup.periodMonth}|${rollup.city.toLowerCase()}|${rollup.province.toLowerCase()}|${rollup.roleTitle.toLowerCase()}`;
+      const existing = mergedRollups.get(key);
+      if (existing) existing.postings += rollup.postings;
+      else mergedRollups.set(key, { ...rollup });
+    }
   }
-  return [...merged.values()];
+  return {
+    cities: [...mergedCities.values()],
+    rollups: [...mergedRollups.values()],
+  };
 }
 
 type SqlClient = (
@@ -200,42 +286,98 @@ export async function syncJobBankMarketSignals(
   fetcher: typeof fetch = fetch,
   now: Date = new Date(),
 ): Promise<number> {
-  const counts = await fetchJobBankMarketCounts(fetcher, now);
+  const data = await fetchJobBankMarketCounts(fetcher, now);
+  const counts = data.cities;
   const syncedAt = now.toISOString();
   // All fetching/parsing happens before the first write, so a timeout
-  // mid-download leaves the previous snapshot untouched. Writes are
-  // ordered largest-market-first so even an interrupted write keeps the
-  // most significant rows.
+  // mid-download leaves the previous snapshot untouched. Each table's
+  // swap is ONE transaction (delete + inserts): any failure rolls
+  // that table back whole, so readers never see a partial replacement.
   counts.sort((a, b) => b.postings - a.postings);
-  await client`delete from public.job_bank_market_signals`;
-  for (const row of counts) {
-    await client`
-      insert into public.job_bank_market_signals(
-        city, province, postings_60d, latest_posted, synced_at
-      ) values (
-        ${row.city}, ${row.province}, ${row.postings},
-        ${row.latestPosted}, ${syncedAt}::timestamptz
-      )
-      on conflict (city, province) do update set
-        postings_60d = excluded.postings_60d,
-        latest_posted = excluded.latest_posted,
-        synced_at = excluded.synced_at
-    `;
+  const transactional = client as SqlClient & {
+    transaction?: (batch: unknown[]) => Promise<unknown>;
+  };
+  const runBatch = async (queries: unknown[]) => {
+    if (typeof transactional.transaction === "function") {
+      await transactional.transaction(queries);
+    } else {
+      // Non-transactional client (tests/fakes): sequential fallback.
+      for (const query of queries) await query;
+    }
+  };
+  await runBatch([
+    client`delete from public.job_bank_market_signals`,
+    ...counts.map(
+      (row) => client`
+        insert into public.job_bank_market_signals(
+          city, province, postings_60d, latest_posted, synced_at
+        ) values (
+          ${row.city}, ${row.province}, ${row.postings},
+          ${row.latestPosted}, ${syncedAt}::timestamptz
+        )
+        on conflict (city, province) do update set
+          postings_60d = excluded.postings_60d,
+          latest_posted = excluded.latest_posted,
+          synced_at = excluded.synced_at
+      `,
+    ),
+  ]);
+  // Rollups in their own transaction. A missing table (migration
+  // 202610120005 pending) is tolerated — the scoring snapshot must not
+  // be held hostage to the view's table — but any other failure
+  // propagates so the tick logs it, and the staleness check (which
+  // watches both tables once the rollups exist) retries next tick.
+  try {
+    await runBatch([
+      client`delete from public.job_bank_role_rollups`,
+      ...data.rollups.map(
+        (row) => client`
+          insert into public.job_bank_role_rollups(
+            period_month, city, province, role_title, postings, synced_at
+          ) values (
+            ${row.periodMonth}::date, ${row.city}, ${row.province},
+            ${row.roleTitle}, ${row.postings}, ${syncedAt}::timestamptz
+          )
+          on conflict (period_month, city, province, role_title) do update set
+            postings = excluded.postings,
+            synced_at = excluded.synced_at
+        `,
+      ),
+    ]);
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    const message = error instanceof Error ? error.message : String(error);
+    if (code !== "42P01" && !/job_bank_role_rollups.*does not exist/i.test(message))
+      throw error;
   }
   return counts.length;
 }
 
-/** True when the snapshot is missing or older than the daily cadence. */
+/**
+ * True when the snapshot is missing or older than the daily cadence.
+ * Watches the role rollups too once their table exists (migration
+ * 202610120005), so a failed rollup swap retries on the next tick
+ * instead of waiting a day; a not-yet-migrated rollup table never
+ * makes the sync spin.
+ */
 export async function jobBankMarketSyncStale(
   client: SqlClient,
   now: Date = new Date(),
 ): Promise<boolean> {
+  const isStale = (latest: string | null | undefined) =>
+    !latest || now.getTime() - Date.parse(latest) > JOB_BANK_SYNC_MAX_AGE_MS;
   const rows = (await client`
     select max(synced_at) as latest from public.job_bank_market_signals
   `) as unknown as Array<{ latest: string | null }>;
-  const latest = rows[0]?.latest;
-  if (!latest) return true;
-  return now.getTime() - Date.parse(latest) > JOB_BANK_SYNC_MAX_AGE_MS;
+  if (isStale(rows[0]?.latest)) return true;
+  const reg = (await client`
+    select to_regclass('public.job_bank_role_rollups') is not null as present
+  `) as unknown as Array<{ present: boolean }>;
+  if (!reg[0]?.present) return false;
+  const rollupRows = (await client`
+    select max(synced_at) as latest from public.job_bank_role_rollups
+  `) as unknown as Array<{ latest: string | null }>;
+  return isStale(rollupRows[0]?.latest);
 }
 
 /**
@@ -299,12 +441,186 @@ export async function jobBankSourceApproved(
         and s.status = 'active'
         and p.status = 'approved'
         and p.approved_by is not null
+        and p.allow_discovered_domains = true
       limit 1
     `) as unknown as unknown[];
     return rows.length > 0;
   } catch {
     return false;
   }
+}
+
+export interface JobBankRoleStat {
+  role: string;
+  currentMonth: number;
+  previousMonth: number;
+  /** Percent change vs the previous month; null when the role is new. */
+  deltaPct: number | null;
+}
+
+export interface JobBankMarketView {
+  syncedAt: string | null;
+  gateApproved: boolean;
+  threshold: number;
+  windowDays: number;
+  periods: { current: string | null; previous: string | null };
+  /** Total cities in the snapshot (cities below is the top-15 display). */
+  totalCities: number;
+  cities: Array<{
+    city: string;
+    province: string;
+    postings: number;
+    latestPosted: string | null;
+  }>;
+  toronto: { postings: number; roles: JobBankRoleStat[] };
+  nationalRoles: JobBankRoleStat[];
+}
+
+function roleStats(
+  rollups: JobBankRoleRollup[],
+  current: string | null,
+  previous: string | null,
+): JobBankRoleStat[] {
+  const byRole = new Map<string, JobBankRoleStat>();
+  for (const row of rollups) {
+    let stat = byRole.get(row.roleTitle);
+    if (!stat) {
+      stat = {
+        role: row.roleTitle,
+        currentMonth: 0,
+        previousMonth: 0,
+        deltaPct: null,
+      };
+      byRole.set(row.roleTitle, stat);
+    }
+    if (row.periodMonth === current) stat.currentMonth += row.postings;
+    else if (row.periodMonth === previous) stat.previousMonth += row.postings;
+  }
+  const stats = [...byRole.values()];
+  for (const stat of stats) {
+    stat.deltaPct =
+      stat.previousMonth > 0
+        ? Math.round(
+            ((stat.currentMonth - stat.previousMonth) / stat.previousMonth) *
+              100,
+          )
+        : stat.currentMonth > 0
+          ? null
+          : 0;
+  }
+  return stats.sort((a, b) => b.currentMonth - a.currentMonth);
+}
+
+/** Pure shaping for the market view (unit-tested). */
+export function shapeJobBankMarketView(args: {
+  cities: Array<{
+    city: string;
+    province: string;
+    postings: number;
+    latestPosted: string | null;
+  }>;
+  rollups: JobBankRoleRollup[];
+  gateApproved: boolean;
+  syncedAt: string | null;
+}): JobBankMarketView {
+  const periods = [...new Set(args.rollups.map((row) => row.periodMonth))].sort();
+  const current = periods.at(-1) ?? null;
+  const previous = periods.at(-2) ?? null;
+  const torontoRollups = args.rollups.filter(
+    (row) => row.city.toLowerCase() === "toronto",
+  );
+  const torontoCity = args.cities.find(
+    (row) => row.city.toLowerCase() === "toronto",
+  );
+  return {
+    syncedAt: args.syncedAt,
+    gateApproved: args.gateApproved,
+    threshold: JOB_BANK_MARKET_MIN_POSTINGS,
+    windowDays: JOB_BANK_MARKET_WINDOW_DAYS,
+    periods: { current, previous },
+    totalCities: args.cities.length,
+    cities: [...args.cities]
+      .sort((a, b) => b.postings - a.postings)
+      .slice(0, 15)
+      .map((row) => ({
+        city: row.city,
+        province: row.province,
+        postings: row.postings,
+        latestPosted: row.latestPosted ?? null,
+      })),
+    toronto: {
+      postings: torontoCity?.postings ?? 0,
+      roles: roleStats(torontoRollups, current, previous).slice(0, 12),
+    },
+    nationalRoles: roleStats(args.rollups, current, previous).slice(0, 12),
+  };
+}
+
+/**
+ * Read the market view from the snapshot tables. Fail-soft: missing
+ * tables (migrations pending) read as an empty snapshot; the gate
+ * state is always reported so the UI can explain a paused bridge.
+ */
+export async function readJobBankMarketView(
+  client: SqlClient,
+): Promise<JobBankMarketView> {
+  const gateApproved = await jobBankSourceApproved(client);
+  let cities: Array<{
+    city: string;
+    province: string;
+    postings: number;
+    latestPosted: string | null;
+  }> = [];
+  let rollups: JobBankRoleRollup[] = [];
+  let syncedAt: string | null = null;
+  try {
+    const cityRows = (await client`
+      select city, province, postings_60d, latest_posted, synced_at
+      from public.job_bank_market_signals
+      order by postings_60d desc
+    `) as unknown as Array<{
+      city: string;
+      province: string;
+      postings_60d: number;
+      latest_posted: string | null;
+      synced_at: string;
+    }>;
+    cities = cityRows.map((row) => ({
+      city: row.city,
+      province: row.province,
+      postings: Number(row.postings_60d),
+      latestPosted: row.latest_posted,
+    }));
+    syncedAt =
+      cityRows.reduce<string | null>(
+        (max, row) => (max === null || row.synced_at > max ? row.synced_at : max),
+        null,
+      ) ?? null;
+  } catch {
+    // Snapshot table not present yet — empty view.
+  }
+  try {
+    const rollupRows = (await client`
+      select period_month::text as period_month, city, province, role_title, postings
+      from public.job_bank_role_rollups
+    `) as unknown as Array<{
+      period_month: string;
+      city: string;
+      province: string;
+      role_title: string;
+      postings: number;
+    }>;
+    rollups = rollupRows.map((row) => ({
+      periodMonth: row.period_month,
+      city: row.city,
+      province: row.province,
+      roleTitle: row.role_title,
+      postings: Number(row.postings),
+    }));
+  } catch {
+    // Rollups not present yet — role tables render empty.
+  }
+  return shapeJobBankMarketView({ cities, rollups, gateApproved, syncedAt });
 }
 
 /** The synthetic signal the worker adds for an active market. */

@@ -31,6 +31,7 @@ import {
   normalizeSourceUrl,
 } from "./source-import.js";
 import { enqueueCanary, runWorkerTick } from "./worker.js";
+import { readJobBankMarketView } from "./job-bank-market.js";
 import {
   DiscoveryGeoInputSchema,
   normalizeWebsiteUrl,
@@ -1374,6 +1375,10 @@ async function authenticatedRoutes(
     return json({
       data: await operationalSnapshot(createAdminClient(), workspaceId),
     });
+  }
+
+  if (pathname === "/api/v1/job-bank-market" && request.method === "GET") {
+    return json({ data: await readJobBankMarketView(createAdminClient()) });
   }
 
   if (pathname === "/api/v1/discovery/sources" && request.method === "GET") {

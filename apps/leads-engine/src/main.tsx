@@ -28,6 +28,7 @@ import {
   type Session,
 } from "./api";
 import { Settings } from "./CriteriaSettings";
+import { JobBankMarket } from "./JobBankMarket";
 import { JobLiveWindow } from "./JobLiveWindow";
 import {
   normalizeSourceUrl,
@@ -44,6 +45,7 @@ type View =
   | "discovery"
   | "jobs"
   | "leads"
+  | "jobbank"
   | "operations"
   | "audit"
   | "settings"
@@ -59,6 +61,7 @@ const views: Array<{ id: View; label: string }> = [
   { id: "discovery", label: "Discovery" },
   { id: "jobs", label: "Scrape jobs" },
   { id: "leads", label: "Qualified leads" },
+  { id: "jobbank", label: "Job Bank market" },
   { id: "operations", label: "Operations" },
   { id: "audit", label: "Audit log" },
   { id: "settings", label: "Criteria & schedule" },
@@ -647,6 +650,8 @@ function DashboardView({
         workspaceId={workspaceId}
       />
     );
+  if (view === "jobbank")
+    return <JobBankMarket session={session} workspaceId={workspaceId} />;
   if (view === "operations") return <Operations data={data} />;
   if (view === "audit")
     return <Audit data={data} session={session} workspaceId={workspaceId} />;
