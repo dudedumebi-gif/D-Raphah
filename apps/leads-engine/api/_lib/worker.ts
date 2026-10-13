@@ -23,6 +23,7 @@ import {
   syncJobBankMarketSignals,
 } from "./job-bank-market.js";
 import { checkOperationalAlerts } from "./alerts.js";
+import { sanitizePayloadStrings } from "./sanitize.js";
 import { log, reportError } from "./telemetry.js";
 
 type DatabaseClient = ReturnType<typeof createAdminClient>;
@@ -292,7 +293,7 @@ async function persistEvidenceAndLead(
     select public.persist_scrape_result(
       ${job.id}::uuid,
       ${workerId},
-      ${JSON.stringify(payload)}::jsonb
+      ${JSON.stringify(sanitizePayloadStrings(payload))}::jsonb
     ) as result
   `) as unknown as Array<{ result: unknown }>;
   const data = persisted[0]?.result;
