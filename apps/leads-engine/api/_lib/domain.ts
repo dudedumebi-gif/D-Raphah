@@ -80,6 +80,16 @@ export interface DetectedSignal {
   excerpt: string;
 }
 
+/**
+ * The synthetic Job Bank market signal (see job-bank-market.ts). It is
+ * market-level evidence, not clinic evidence: scoreSignals counts it
+ * toward the intent/trigger factor ONLY — never toward signal mass,
+ * evidence coverage, signal count, or average confidence, so a lead
+ * with no clinic-level signal cannot pass the confidence floor on
+ * market evidence alone.
+ */
+export const JOB_BANK_MARKET_SIGNAL_CODE = "job_bank_market_hiring";
+
 export interface ScoreResult {
   automationMaturity: number;
   opportunityScore: number;
@@ -865,7 +875,12 @@ export function scoreSignals(
   // here so any operator-supplied set sums to 1. This replaces the
   // dual-score model (scoring 2.x) whose opportunity-potential formula
   // and four independent gates appeared in no design document.
-  const totalSignalMass = signals.reduce(
+  // Market-level evidence (the Job Bank bridge signal) is isolated from
+  // every clinic-evidence calculation: it feeds intent/trigger only.
+  const clinicSignals = signals.filter(
+    (signal) => signal.code !== JOB_BANK_MARKET_SIGNAL_CODE,
+  );
+  const totalSignalMass = clinicSignals.reduce(
     (total, signal) => total + signal.strength * signal.confidence,
     0,
   );
@@ -879,11 +894,11 @@ export function scoreSignals(
         : 55),
   );
 
-  const categories = new Set(signals.map((signal) => signal.category));
+  const categories = new Set(clinicSignals.map((signal) => signal.category));
   const coverageCategories = categories.size;
-  const averageSignalConfidence = signals.length
-    ? signals.reduce((total, signal) => total + signal.confidence, 0) /
-      signals.length
+  const averageSignalConfidence = clinicSignals.length
+    ? clinicSignals.reduce((total, signal) => total + signal.confidence, 0) /
+      clinicSignals.length
     : 0;
   const evidenceFreshness = clamp(metadata.evidenceFreshness ?? 100) / 100;
   const confidence =
@@ -891,7 +906,7 @@ export function scoreSignals(
       clamp(
         0.25 +
           coverageCategories * 0.1 +
-          Math.min(signals.length, 8) * 0.025 +
+          Math.min(clinicSignals.length, 8) * 0.025 +
           averageSignalConfidence * 0.25,
         0,
         0.97,
@@ -945,6 +960,9 @@ export function scoreSignals(
     opportunityScore >= criteria.qualificationScoreMin &&
     confidence >= criteria.confidenceMin;
 
+  const marketSignal = signals.find(
+    (signal) => signal.code === JOB_BANK_MARKET_SIGNAL_CODE,
+  );
   const explanation = [
     `Opportunity score ${opportunityScore}/100 (qualifies at ${criteria.qualificationScoreMin}): ICP fit ${factors.icp_fit}, automation headroom ${factors.maturity_inverse}, signal strength ${factors.signal_strength}, intent/trigger ${factors.intent_trigger}, contactability ${factors.contactability}.`,
     `Automation maturity ${automationMaturity}/100 (AI-enablement threshold ${criteria.automationMaturityMax}: at or below reads as low-automation).`,
@@ -952,6 +970,11 @@ export function scoreSignals(
     geoEligible
       ? "Geography is eligible."
       : "Geography is outside the configured market.",
+    ...(marketSignal
+      ? [
+          `Intent includes market-level evidence (counted toward intent/trigger only, not confidence): ${marketSignal.excerpt}`,
+        ]
+      : []),
   ];
 
   return {
