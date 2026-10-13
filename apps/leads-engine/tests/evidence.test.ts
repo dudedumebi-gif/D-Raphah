@@ -415,10 +415,18 @@ describe("collectUrl enrichment", () => {
 });
 
 describe("collectUrl robots handling", () => {
+  // The sprint context: a discovery-linked job under a policy whose owner
+  // enabled allow_discovered_domains — the envelope inside which redirect
+  // provenance applies. strictPolicy below is the PRD §8.2 default.
   const robotsPolicy: CollectionPolicy = {
     ...testPolicy,
     respectRobots: true,
     allowedDomains: ["example.com", "www.example.com"],
+    allowDiscoveredDomains: true,
+  };
+  const strictPolicy: CollectionPolicy = {
+    ...robotsPolicy,
+    allowDiscoveredDomains: false,
   };
   const plainPage = () => htmlResponse("<html><body>plain</body></html>");
   const collect = (fetcher: MockFetch) =>
@@ -574,6 +582,44 @@ describe("collectUrl robots handling", () => {
     expect(collected.statusCode).toBe(200);
     expect(collected.finalUrl).toBe("https://clinic-canada.ca/");
     expect(fetcher.calls).toContain("https://clinic-canada.ca/robots.txt");
+  });
+
+  it("rejects a page redirect to an unapproved domain when discovered domains are not approved", async () => {
+    // PRD §8.2 default: outside the allow_discovered_domains envelope,
+    // redirects to unapproved domains are rejected outright.
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      if (url.hostname === "example.com")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://clinic-canada.ca/" },
+        });
+      return plainPage();
+    });
+    await expect(
+      collectUrl("https://example.com/", strictPolicy, fetcher, {
+        skipPublicHostCheck: true,
+        geocode: false,
+      }),
+    ).rejects.toThrow("Domain clinic-canada.ca is not approved");
+  });
+
+  it("rejects a robots.txt redirect to an unapproved domain when discovered domains are not approved", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://clinic-canada.ca/robots.txt" },
+        });
+      return plainPage();
+    });
+    await expect(
+      collectUrl("https://example.com/", strictPolicy, fetcher, {
+        skipPublicHostCheck: true,
+        geocode: false,
+      }),
+    ).rejects.toThrow("Domain clinic-canada.ca is not approved");
   });
 
   it("still refuses direct collection on an unapproved domain", async () => {

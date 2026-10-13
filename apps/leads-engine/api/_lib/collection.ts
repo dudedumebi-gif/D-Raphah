@@ -17,6 +17,13 @@ export interface CollectionPolicy {
   timeoutMs: number;
   respectRobots: boolean;
   collectionMethod: string;
+  /**
+   * The policy owner approved discovered-domain collection for this job
+   * (allow_discovered_domains on the policy + a discovery-linked job).
+   * Only inside that human-approved envelope may a redirect hop leave
+   * the approved domain set (see assertDomainAllowed).
+   */
+  allowDiscoveredDomains?: boolean;
 }
 
 export interface CollectionResult {
@@ -673,13 +680,17 @@ function globMatches(pathname: string, pattern: string): boolean {
  * do NOT apply here: robots.txt lives outside a source's path allowlist by
  * design, so its redirect chain is validated on domain grounds only.
  *
- * Redirect provenance (viaRedirect): a hop reached BY REDIRECT from an
- * already-validated URL inherits that URL's domain trust — a business's
- * own canonical redirect (.com -> .ca, a rebrand domain) is the same
- * business, not a new source. Only the approved-domain check is relaxed;
- * scheme, credential, and LinkedIn checks apply to every hop, the initial
- * URL is always validated strictly, and the page chain still runs the
- * public-host (SSRF) verification and a fresh robots check per hop.
+ * Redirect provenance (viaRedirect): the PRD default (§8.2) is to reject
+ * redirects to unapproved domains, and that remains the rule for every
+ * policy — EXCEPT inside the envelope a policy owner explicitly approved
+ * by enabling allow_discovered_domains for a discovery-linked job: the
+ * job's own host was itself machine-discovered and admitted under that
+ * flag, so its canonical redirect (.com -> .ca, a rebrand domain) is the
+ * same business inside the same approval, not a new source. Only the
+ * approved-domain check is relaxed, and only there; scheme, credential,
+ * and LinkedIn checks apply to every hop, the initial URL is always
+ * validated strictly, and the page chain still runs the public-host
+ * (SSRF) verification and a fresh robots check per hop.
  */
 function assertDomainAllowed(
   url: URL,
@@ -692,7 +703,10 @@ function assertDomainAllowed(
     throw new Error("URL credentials are prohibited");
   if (url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com"))
     throw new Error("Automated LinkedIn collection is prohibited");
-  if (!viaRedirect && !domainAllowed(url.hostname, policy.allowedDomains))
+  if (
+    !(viaRedirect && policy.allowDiscoveredDomains) &&
+    !domainAllowed(url.hostname, policy.allowedDomains)
+  )
     throw new Error(`Domain ${url.hostname} is not approved`);
 }
 

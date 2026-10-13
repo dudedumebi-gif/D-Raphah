@@ -126,6 +126,12 @@ function collectionPolicy(row: PolicyRow, job: ScrapeJobRow): CollectionPolicy {
     timeoutMs: row.timeout_ms,
     respectRobots: row.respect_robots,
     collectionMethod: row.collection_method,
+    // Same envelope allowedDomainsForJob admits the job's own host under:
+    // the owner's discovered-domains flag + a discovery-linked job. Only
+    // inside it may redirect hops leave the approved domain set.
+    allowDiscoveredDomains: Boolean(
+      row.allow_discovered_domains && job.discovery_candidate_id,
+    ),
   };
 }
 
