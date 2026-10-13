@@ -672,24 +672,37 @@ function globMatches(pathname: string, pattern: string): boolean {
  * URLs and by robots.txt redirect hops. Path allow/deny rules deliberately
  * do NOT apply here: robots.txt lives outside a source's path allowlist by
  * design, so its redirect chain is validated on domain grounds only.
+ *
+ * Redirect provenance (viaRedirect): a hop reached BY REDIRECT from an
+ * already-validated URL inherits that URL's domain trust — a business's
+ * own canonical redirect (.com -> .ca, a rebrand domain) is the same
+ * business, not a new source. Only the approved-domain check is relaxed;
+ * scheme, credential, and LinkedIn checks apply to every hop, the initial
+ * URL is always validated strictly, and the page chain still runs the
+ * public-host (SSRF) verification and a fresh robots check per hop.
  */
-function assertDomainAllowed(url: URL, policy: CollectionPolicy): void {
+function assertDomainAllowed(
+  url: URL,
+  policy: CollectionPolicy,
+  viaRedirect = false,
+): void {
   if (!["http:", "https:"].includes(url.protocol))
     throw new Error("Only HTTP(S) sources are permitted");
   if (url.username || url.password)
     throw new Error("URL credentials are prohibited");
   if (url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com"))
     throw new Error("Automated LinkedIn collection is prohibited");
-  if (!domainAllowed(url.hostname, policy.allowedDomains))
+  if (!viaRedirect && !domainAllowed(url.hostname, policy.allowedDomains))
     throw new Error(`Domain ${url.hostname} is not approved`);
 }
 
 export function assertUrlAllowed(
   rawUrl: string,
   policy: CollectionPolicy,
+  viaRedirect = false,
 ): URL {
   const url = new URL(rawUrl);
-  assertDomainAllowed(url, policy);
+  assertDomainAllowed(url, policy, viaRedirect);
   if (
     policy.denylistPaths.some((pattern) => globMatches(url.pathname, pattern))
   )
@@ -749,10 +762,11 @@ async function checkRobots(
     // redirect loop in collectUrl: canonicalization hops (bare -> www,
     // http -> https) are the norm on real sites, and the pinned fetcher
     // returns redirect responses instead of following them — a 301 used
-    // to dead-letter the whole job as "robots.txt returned 301". Every
-    // hop is re-validated against the policy's approved domains; the
-    // rules evaluated are the ones served at the FINAL robots URL, for
-    // the ORIGINAL page path.
+    // to dead-letter the whole job as "robots.txt returned 301". Hops
+    // inherit the starting origin's domain trust (redirect provenance —
+    // see assertDomainAllowed); scheme, credential, and LinkedIn checks
+    // still apply per hop. The rules evaluated are the ones served at
+    // the FINAL robots URL, for the ORIGINAL page path.
     let robotsUrl = new URL("/robots.txt", url.origin);
     let response: Response | null = null;
     for (let redirectCount = 0; redirectCount <= 5; redirectCount += 1) {
@@ -773,7 +787,7 @@ async function checkRobots(
       // abandoned stream would hold its connection open indefinitely).
       await response.body?.cancel().catch(() => undefined);
       const next = new URL(location, robotsUrl);
-      assertDomainAllowed(next, policy);
+      assertDomainAllowed(next, policy, true);
       robotsUrl = next;
       response = null;
     }
@@ -890,7 +904,11 @@ export async function collectUrl(
       // Same abandoned-body hazard as the robots chain: cancel the
       // redirect body so its socket is released before the next hop.
       await response.body?.cancel().catch(() => undefined);
-      current = assertUrlAllowed(new URL(location, current).toString(), policy);
+      current = assertUrlAllowed(
+        new URL(location, current).toString(),
+        policy,
+        true,
+      );
       await verifyHost(current.hostname);
       await checkRobots(current, policy, fetcher);
       response = null;
