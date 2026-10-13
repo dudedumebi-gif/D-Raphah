@@ -682,3 +682,12 @@
   margin: 0;
   max-width: 64ch;
 }
+/* Job Bank market view: role tables give the role name the wide track. */
+.jobbank-roles-table .table-head,
+.jobbank-roles-table .table-row {
+  grid-template-columns: 2fr 0.7fr 0.7fr 0.7fr;
+}
+.jobbank-cities-table .table-head,
+.jobbank-cities-table .table-row {
+  grid-template-columns: 1.4fr 1fr 0.7fr 1fr;
+}

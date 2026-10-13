@@ -166,6 +166,30 @@ export interface JobRecord {
 
 /** Discovery-funnel rollup served by GET /api/v1/funnel (see §4.2 of the
  * PRD audit: funnel width before threshold changes). */
+export interface JobBankRoleStat {
+  role: string;
+  currentMonth: number;
+  previousMonth: number;
+  deltaPct: number | null;
+}
+
+export interface JobBankMarketView {
+  syncedAt: string | null;
+  gateApproved: boolean;
+  threshold: number;
+  windowDays: number;
+  periods: { current: string | null; previous: string | null };
+  totalCities: number;
+  cities: Array<{
+    city: string;
+    province: string;
+    postings: number;
+    latestPosted: string | null;
+  }>;
+  toronto: { postings: number; roles: JobBankRoleStat[] };
+  nationalRoles: JobBankRoleStat[];
+}
+
 export interface FunnelStats {
   activeSources: number;
   candidatesEvaluated: number;
