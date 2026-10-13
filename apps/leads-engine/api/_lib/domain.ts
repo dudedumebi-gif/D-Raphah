@@ -9,6 +9,13 @@ export const CriteriaSchema = z
     minimumEvidenceCategories: z.number().int().min(1).max(6).default(2),
     // PRD §10.2: qualification is a single Opportunity Score threshold.
     qualificationScoreMin: z.number().min(0).max(100).default(60),
+    // Job Bank market-intent bridge: the strength of the synthetic
+    // market-hiring signal the worker adds when the clinic's city has
+    // active Job Bank demand for clinic front-desk roles. Market-level
+    // and inferential (the open data withholds employer identity), so
+    // the strength is operator-tunable from the Criteria UI; 0 disables
+    // the bridge for the campaign.
+    jobBankMarketStrength: z.number().min(0).max(40).default(20),
     // PRD §10.1: the Opportunity Score is a weighted sum of seven
     // factors; the weights are tunable per campaign and normalized at
     // scoring time, so any operator-supplied set is scaled to sum to 1.

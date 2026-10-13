@@ -14,6 +14,7 @@ type CampaignWithAutoApply = CampaignRecord & {
 type EditableCriteria = {
   automationMaturityMax?: number;
   qualificationScoreMin?: number;
+  jobBankMarketStrength?: number;
   confidenceMin?: number;
   minimumEvidenceCategories?: number;
   targetQualifiedLeadsPerWeek?: number;
@@ -42,6 +43,9 @@ function CampaignSettings({
 }) {
   const criteria = campaign.criteria as EditableCriteria;
   const [mode, setMode] = useState(criteria.geography?.mode ?? "regions");
+  const [jobBankStrength, setJobBankStrength] = useState(
+    criteria.jobBankMarketStrength ?? 20,
+  );
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
   const [requeuing, setRequeuing] = useState(false);
@@ -120,6 +124,7 @@ function CampaignSettings({
               ...campaign.criteria,
               automationMaturityMax: Number(form.get("maturity")),
               qualificationScoreMin: Number(form.get("qualification")),
+              jobBankMarketStrength: Number(form.get("jobbank")),
               confidenceMin: Number(form.get("confidence")) / 100,
               targetQualifiedLeadsPerWeek: Number(form.get("target")),
               geography: {
@@ -261,6 +266,27 @@ function CampaignSettings({
               />
             </label>
           </div>
+          <label>
+            Job Bank market signal strength — {jobBankStrength}
+            <input
+              name="jobbank"
+              type="range"
+              min="0"
+              max="40"
+              step="1"
+              value={jobBankStrength}
+              onChange={(event) =>
+                setJobBankStrength(Number(event.target.value))
+              }
+            />
+            <small>
+              Adds market-level hiring evidence (Canada Job Bank postings
+              for clinic front-desk roles in the clinic's city, last 60
+              days) to the intent/trigger factor. Inferential — Job Bank
+              does not disclose employers. 0 turns it off; on-site hiring
+              signals weigh 14–22.
+            </small>
+          </label>
           <label>
             Geography mode
             <select
