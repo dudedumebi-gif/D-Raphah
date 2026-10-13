@@ -51,6 +51,15 @@ describe("sanitizePayloadStrings at the persist boundary", () => {
     expect(parsed.score.opportunityScore).toBe(57);
     expect(parsed.missing).toBeNull();
   });
+
+  it("sanitizes object keys as well as values", () => {
+    const payload = { ["bad\u0000key"]: "ok", ["lone\uD83D"]: 1 };
+    const json = JSON.stringify(sanitizePayloadStrings(payload));
+    expect(json).not.toContain("\\u0000");
+    expect(json).not.toMatch(/\\ud[89a-f][0-9a-f]{2}/i);
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    expect(parsed["badkey"]).toBe("ok");
+  });
 });
 
 describe("truncateChars", () => {

@@ -43,7 +43,9 @@ export function sanitizePayloadStrings<T>(value: T): T {
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      out[key] = sanitizePayloadStrings(entry);
+      // Keys too: a generated property name carrying a NUL or a
+      // lone surrogate would poison the JSON just as a value does.
+      out[sanitizeForJsonb(key)] = sanitizePayloadStrings(entry);
     }
     return out as T;
   }
