@@ -415,10 +415,18 @@ describe("collectUrl enrichment", () => {
 });
 
 describe("collectUrl robots handling", () => {
+  // The sprint context: a discovery-linked job under a policy whose owner
+  // enabled allow_discovered_domains — the envelope inside which redirect
+  // provenance applies. strictPolicy below is the PRD §8.2 default.
   const robotsPolicy: CollectionPolicy = {
     ...testPolicy,
     respectRobots: true,
     allowedDomains: ["example.com", "www.example.com"],
+    allowDiscoveredDomains: true,
+  };
+  const strictPolicy: CollectionPolicy = {
+    ...robotsPolicy,
+    allowDiscoveredDomains: false,
   };
   const plainPage = () => htmlResponse("<html><body>plain</body></html>");
   const collect = (fetcher: MockFetch) =>
@@ -483,17 +491,54 @@ describe("collectUrl robots handling", () => {
     );
   });
 
-  it("refuses a robots.txt redirect to an unapproved domain", async () => {
+  it("follows a robots.txt redirect to an unapproved domain reached from the approved host", async () => {
+    // Redirect provenance: the approved host's own canonical redirect
+    // (.com -> .ca) is the same business, not a new source. The clinic
+    // sprint dead-lettered four clinics on exactly this hop before the
+    // provenance rule landed.
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://clinic-canada.ca/robots.txt" },
+        });
+      if (url.hostname === "clinic-canada.ca" && url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      return plainPage();
+    });
+    const collected = await collect(fetcher);
+    expect(collected.statusCode).toBe(200);
+    expect(collected.robotsDecision).toBe("allowed");
+    expect(fetcher.calls).toContain("https://clinic-canada.ca/robots.txt");
+  });
+
+  it("still enforces a Disallow served cross-domain at the redirect target", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://clinic-canada.ca/robots.txt" },
+        });
+      if (url.hostname === "clinic-canada.ca" && url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nDisallow: /\n");
+      return plainPage();
+    });
+    await expect(collect(fetcher)).rejects.toThrow(
+      "robots.txt denies collection for this path",
+    );
+  });
+
+  it("still refuses a robots.txt redirect to LinkedIn", async () => {
     const fetcher = createMockFetcher((url) => {
       if (url.pathname === "/robots.txt")
         return new Response(null, {
           status: 301,
-          headers: { location: "https://unapproved.example.net/robots.txt" },
+          headers: { location: "https://www.linkedin.com/robots.txt" },
         });
       return plainPage();
     });
     await expect(collect(fetcher)).rejects.toThrow(
-      "Domain unapproved.example.net is not approved",
+      "Automated LinkedIn collection is prohibited",
     );
   });
 
@@ -517,6 +562,106 @@ describe("collectUrl robots handling", () => {
     const collected = await collect(fetcher);
     expect(collected.statusCode).toBe(200);
     expect(cancelled).toBe(true);
+  });
+
+  it("follows a page redirect to an unapproved domain reached from the approved host", async () => {
+    // The bathurstdental pattern: the approved .com homepage 301s to the
+    // clinic's .ca domain. Provenance admits the hop; the landed domain
+    // still gets its own robots check before the page is read.
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      if (url.hostname === "example.com")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://clinic-canada.ca/" },
+        });
+      return htmlResponse("<html><body>clinic home</body></html>");
+    });
+    const collected = await collect(fetcher);
+    expect(collected.statusCode).toBe(200);
+    expect(collected.finalUrl).toBe("https://clinic-canada.ca/");
+    expect(fetcher.calls).toContain("https://clinic-canada.ca/robots.txt");
+  });
+
+  it("rejects a page redirect to an unapproved domain when discovered domains are not approved", async () => {
+    // PRD §8.2 default: outside the allow_discovered_domains envelope,
+    // redirects to unapproved domains are rejected outright.
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      if (url.hostname === "example.com")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://clinic-canada.ca/" },
+        });
+      return plainPage();
+    });
+    await expect(
+      collectUrl("https://example.com/", strictPolicy, fetcher, {
+        skipPublicHostCheck: true,
+        geocode: false,
+      }),
+    ).rejects.toThrow("Domain clinic-canada.ca is not approved");
+  });
+
+  it("rejects a robots.txt redirect to an unapproved domain when discovered domains are not approved", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.hostname === "example.com" && url.pathname === "/robots.txt")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://clinic-canada.ca/robots.txt" },
+        });
+      return plainPage();
+    });
+    await expect(
+      collectUrl("https://example.com/", strictPolicy, fetcher, {
+        skipPublicHostCheck: true,
+        geocode: false,
+      }),
+    ).rejects.toThrow("Domain clinic-canada.ca is not approved");
+  });
+
+  it("still refuses direct collection on an unapproved domain", async () => {
+    const fetcher = createMockFetcher(() => plainPage());
+    await expect(
+      collectUrl("https://unapproved.example.net/", robotsPolicy, fetcher, {
+        skipPublicHostCheck: true,
+        geocode: false,
+      }),
+    ).rejects.toThrow("Domain unapproved.example.net is not approved");
+  });
+
+  it("still refuses a page redirect to LinkedIn", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      if (url.hostname === "example.com")
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://www.linkedin.com/company/clinic" },
+        });
+      return plainPage();
+    });
+    await expect(collect(fetcher)).rejects.toThrow(
+      "Automated LinkedIn collection is prohibited",
+    );
+  });
+
+  it("still refuses a page redirect carrying URL credentials", async () => {
+    const fetcher = createMockFetcher((url) => {
+      if (url.pathname === "/robots.txt")
+        return new Response("User-agent: *\nAllow: /\n");
+      if (url.hostname === "example.com")
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://user:pass@clinic-canada.ca/" },
+        });
+      return plainPage();
+    });
+    await expect(collect(fetcher)).rejects.toThrow(
+      "URL credentials are prohibited",
+    );
   });
 
   it("gives up on a robots.txt redirect loop", async () => {
