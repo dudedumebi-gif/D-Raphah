@@ -39,8 +39,10 @@ import {
   type DetectedSignal,
   type ScoreResult,
 } from "./domain.js";
+import { sanitizePayloadStrings } from "./sanitize.js";
 import {
   jobBankMarketSignal,
+  jobBankSourceApproved,
   lookupJobBankMarket,
   type JobBankMarket,
 } from "./job-bank-market.js";
@@ -225,6 +227,7 @@ async function computeForRow(
   client: SqlClient,
   row: ScopeRow,
   criteria: LeadCriteria,
+  jbGateOpen: boolean,
 ): Promise<ComputedRescore> {
   const text = row.extracted_text ?? "";
   const storedCity = row.job_result?.geography?.city ?? row.org_city ?? null;
@@ -233,7 +236,7 @@ async function computeForRow(
     row.job_result?.geography?.eligible ??
     evaluateGeography(text, criteria, undefined).eligible;
   const market =
-    city && criteria.jobBankMarketStrength > 0
+    city && criteria.jobBankMarketStrength > 0 && jbGateOpen
       ? await lookupJobBankMarket(client, city)
       : null;
   const observations = await loadObservations(client, row.evidence_artifact_id);
@@ -263,13 +266,17 @@ export async function rescoreCampaignBatch(
 ): Promise<RescoreBatchResult> {
   const criteria = effectiveCriteria(args.criteriaInput, args.overrides);
   const scope = await loadScope(client, args);
+  // The Job Bank gate governs scoring, not just the daily refresh:
+  // with no approved Job Bank source + accepted terms, stored market
+  // evidence must not flow into new scores (Codex P1 on PR #45).
+  const jbGateOpen = await jobBankSourceApproved(client);
   let rescanned = 0;
   let alreadyCurrent = 0;
   let newlyQualified = 0;
   let unqualified = 0;
   let remaining = 0;
   for (const row of scope) {
-    const computed = await computeForRow(client, row, criteria);
+    const computed = await computeForRow(client, row, criteria, jbGateOpen);
     if (row.rescore_fingerprint === computed.fingerprint) {
       alreadyCurrent += 1;
       continue;
@@ -287,7 +294,7 @@ export async function rescoreCampaignBatch(
     };
     const result = (await client`
       select public.rescore_scrape_result(
-        ${row.id}::uuid, ${JSON.stringify(payload)}::jsonb
+        ${row.id}::uuid, ${JSON.stringify(sanitizePayloadStrings(payload))}::jsonb
       ) as result
     `) as unknown as Array<{ result: { qualified: boolean } }>;
     const qualifiedNow = result[0]?.result?.qualified ?? computed.score.qualified;
@@ -340,9 +347,13 @@ export async function dryRunRescore(
 ): Promise<RescoreDryRunResult> {
   const criteria = effectiveCriteria(args.criteriaInput, args.overrides);
   const scope = await loadScope(client, args);
+  // The Job Bank gate governs scoring, not just the daily refresh:
+  // with no approved Job Bank source + accepted terms, stored market
+  // evidence must not flow into new scores (Codex P1 on PR #45).
+  const jbGateOpen = await jobBankSourceApproved(client);
   const projections: RescoreProjection[] = [];
   for (const row of scope) {
-    const computed = await computeForRow(client, row, criteria);
+    const computed = await computeForRow(client, row, criteria, jbGateOpen);
     projections.push({
       organization: row.org_name,
       domain: row.org_domain,

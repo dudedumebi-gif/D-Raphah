@@ -3267,8 +3267,13 @@ function HelpGuide() {
             Job Bank does not disclose which employer is hiring. The{" "}
             <b>Job Bank market</b> view shows the current snapshot —
             postings by city, the top roles, and month-over-month change.
-            The bridge only runs while an approved Job Bank discovery
-            source exists and the Canada Job Bank terms are accepted.
+            The bridge applies market evidence only while an approved
+            Job Bank discovery source exists and the Canada Job Bank
+            terms are accepted: retire that source (or remove the
+            acceptance) and the daily refresh stops <i>and</i> scoring
+            and rescoring stop applying the stored snapshot. The last
+            snapshot remains visible in the market view for reference,
+            with its sync date.
           </p>
           <p>
             <b>Job Bank market signal strength</b> (Criteria &amp;

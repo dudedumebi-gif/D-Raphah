@@ -682,6 +682,39 @@
   margin: 0;
   max-width: 64ch;
 }
+/* Rescore block: a stacked panel section (description, a wrapping
+   controls row, then results) — the one-line .requeue-row flex
+   squeezed its long description into a sliver. */
+.rescore-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 20px 20px;
+}
+.rescore-block .muted {
+  margin: 0;
+}
+.rescore-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+.rescore-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85em;
+}
+.rescore-controls input {
+  width: 110px;
+}
+.rescore-controls button {
+  white-space: nowrap;
+}
+.rescore-block .jobbank-table {
+  width: 100%;
+}
 /* Job Bank market view: role tables give the role name the wide track. */
 .jobbank-roles-table .table-head,
 .jobbank-roles-table .table-row {
