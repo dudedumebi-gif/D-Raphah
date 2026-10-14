@@ -24,7 +24,13 @@ import {
   tryImmediateDispatch,
   type SqlClient,
 } from "./handoff.js";
-import { generateUseCases, type SignalLike } from "./use-cases.js";
+import {
+  cleanEvidenceText,
+  draftUseCasesWithLlm,
+  generateUseCases,
+  mergeUseCaseCandidates,
+  type SignalLike,
+} from "./use-cases.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
 import {
   dedupeRows,
@@ -1386,6 +1392,27 @@ async function authenticatedRoutes(
     if (!existing || existing.length === 0) {
       const admin = createAdminClient();
       let signals: SignalLike[] = [];
+      let evidenceText = "";
+      let orgName = "this business";
+      let orgDomain: string | null = null;
+      let assessmentSummary: string | null = null;
+      const orgRows = (await admin`
+        select o.title, org.name as org_name, org.normalized_domain as org_domain,
+               o.latest_assessment_id
+        from public.opportunities o
+        join public.organizations org on org.id = o.organization_id
+        where o.id = ${opportunityId}::uuid
+          and o.workspace_id = ${workspaceId}::uuid
+      `) as unknown as Array<{
+        title: string;
+        org_name: string;
+        org_domain: string | null;
+        latest_assessment_id: string | null;
+      }>;
+      if (orgRows[0]) {
+        orgName = orgRows[0].org_name || orgRows[0].title;
+        orgDomain = orgRows[0].org_domain;
+      }
       if (opportunity.primary_evidence_id) {
         signals = (await admin`
           select code, category, polarity, strength, excerpt
@@ -1395,8 +1422,45 @@ async function authenticatedRoutes(
           order by strength desc
           limit 12
         `) as unknown as SignalLike[];
+        const evidenceRows = (await admin`
+          select raw_content from public.evidence_artifacts
+          where id = ${opportunity.primary_evidence_id}::uuid
+            and workspace_id = ${workspaceId}::uuid
+        `) as unknown as Array<{ raw_content: string | null }>;
+        if (evidenceRows[0]?.raw_content)
+          evidenceText = cleanEvidenceText(evidenceRows[0].raw_content);
       }
-      const candidates = generateUseCases(signals);
+      if (orgRows[0]?.latest_assessment_id) {
+        const assessmentRows = (await admin`
+          select explanation from public.maturity_assessments
+          where id = ${orgRows[0].latest_assessment_id}::uuid
+        `) as unknown as Array<{ explanation: unknown }>;
+        const explanation = assessmentRows[0]?.explanation;
+        if (typeof explanation === "string")
+          assessmentSummary = explanation.slice(0, 600);
+        else if (explanation && typeof explanation === "object") {
+          const summary = (explanation as Record<string, unknown>).summary;
+          if (typeof summary === "string")
+            assessmentSummary = summary.slice(0, 600);
+        }
+      }
+      // The LLM drafter reads the FULL evidence (operator decision
+      // 2026-10-14); every candidate it returns is citation-
+      // verified against that text inside draftUseCasesWithLlm.
+      // Any failure falls back to the rules catalog via the merge.
+      const drafted = evidenceText
+        ? await draftUseCasesWithLlm({
+            orgName,
+            orgDomain,
+            evidenceText,
+            signals,
+            assessmentSummary,
+          })
+        : null;
+      const candidates = mergeUseCaseCandidates(
+        drafted,
+        generateUseCases(signals),
+      );
       const { error: insertError } = await client
         .from("opportunity_use_cases")
         .upsert(
@@ -1409,6 +1473,7 @@ async function authenticatedRoutes(
             statement: candidate.statement,
             rationale: candidate.rationale,
             acceptance_criteria: candidate.acceptanceCriteria,
+            generation_source: candidate.source,
             status: "suggested",
           })),
           { onConflict: "opportunity_id,use_case_key", ignoreDuplicates: true },

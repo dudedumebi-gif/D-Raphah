@@ -2228,6 +2228,7 @@ interface UseCaseRow {
   rationale: string;
   acceptance_criteria: string[];
   status: string;
+  generation_source?: string;
 }
 
 interface HandoffStatusRow {
@@ -2573,6 +2574,14 @@ export function Leads({
               requirements, with you recorded as the validator. Send to
               DF stays blocked until at least one is approved.
             </p>
+            {useCaseRows?.some((row) => row.generation_source === "llm") ? (
+              <p className="muted">
+                Rows marked <b>AI-identified</b> were drafted by the AI
+                from this lead&apos;s full stored evidence; each one is
+                backed by a quote from the business&apos;s own pages
+                that the system verified before showing it here.
+              </p>
+            ) : null}
             {useCaseError ? (
               <p className="error-text">{useCaseError}</p>
             ) : null}
@@ -2595,6 +2604,11 @@ export function Leads({
                   <span className="usecase-body">
                     <span className="usecase-title">
                       <b>{row.title}</b>
+                      {row.generation_source === "llm" ? (
+                        <span className="badge status-queued">
+                          AI-identified
+                        </span>
+                      ) : null}
                       {row.status === "approved" ? (
                         <span className="badge status-success">
                           Approved — ships to DF

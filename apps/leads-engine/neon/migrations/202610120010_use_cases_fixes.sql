@@ -18,6 +18,9 @@
 --
 -- Idempotent throughout. Schema 3.3.14
 
+alter table public.opportunity_use_cases
+  add column if not exists generation_source text not null default 'rules';
+
 grant select, insert, update on public.opportunity_use_cases to authenticated;
 grant select, insert, update on public.consent_records to authenticated;
 

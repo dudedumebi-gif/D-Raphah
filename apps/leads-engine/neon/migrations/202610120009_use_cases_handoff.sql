@@ -31,6 +31,7 @@ create table public.opportunity_use_cases (
   statement text not null,
   rationale text not null default '',
   acceptance_criteria jsonb not null default '[]'::jsonb,
+  generation_source text not null default 'rules',
   status text not null default 'suggested'
     check (status in ('suggested', 'approved', 'dismissed')),
   human_validator_id text,

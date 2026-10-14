@@ -3,8 +3,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  cleanEvidenceText,
+  draftUseCasesWithLlm,
   generateUseCases,
   mapUseCaseToRequirement,
+  mergeUseCaseCandidates,
+  quoteIsGrounded,
   type SignalLike,
 } from "../api/_lib/use-cases.js";
 import { RequirementSchema } from "@raphah/handoff-contract";
@@ -169,5 +173,111 @@ describe("use-case handoff wiring — source contracts", () => {
     expect(router).toContain('"/api/v1/handoffs" && request.method === "GET"');
     expect(main).toContain("Landed — the Delivery Factory accepted");
     expect(main).toContain("toast.kind === \"error\" ? 8000 : 5000");
+  });
+});
+
+describe("LLM drafter — full evidence, citation-verified", () => {
+  const evidence =
+    "Welcome to Donddental. To book an appointment please call us at 416-555-0100 during office hours. " +
+    "New patients: download our intake form (PDF), print it, and bring the completed paperwork to your first visit. " +
+    "We send referrals by fax to your family doctor.";
+
+  it("cleanEvidenceText strips markup", () => {
+    const cleaned = cleanEvidenceText(
+      "<html><style>.a{}</style><body><p>Call   us</p><script>var x=1;</script></body></html>",
+    );
+    expect(cleaned).toBe("Call us");
+  });
+
+  it("quoteIsGrounded requires a verbatim passage from the evidence", () => {
+    expect(
+      quoteIsGrounded("please call us at 416-555-0100 during office hours", evidence),
+    ).toBe(true);
+    expect(
+      quoteIsGrounded("book online instantly through our portal", evidence),
+    ).toBe(false);
+    expect(quoteIsGrounded("call us", evidence)).toBe(false); // too short
+  });
+
+  const fakeFetch = (content: unknown, ok = true) =>
+    (async () => ({
+      ok,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify(content) } }],
+      }),
+    })) as never;
+
+  it("keeps only grounded candidates and marks them as LLM-sourced", async () => {
+    const drafted = await draftUseCasesWithLlm(
+      { orgName: "Donddental", evidenceText: evidence, signals: [] },
+      {
+        apiKey: "test-key",
+        fetchFn: fakeFetch({
+          useCases: [
+            {
+              title: "Online appointment booking",
+              statement:
+                "Patients can book appointments online instead of phoning during office hours.",
+              evidenceQuote:
+                "To book an appointment please call us at 416-555-0100 during office hours",
+              rationale: "Booking is phone-only today.",
+              acceptanceCriteria: [
+                "Patients can book online at any hour",
+                "Bookings land directly in the schedule",
+              ],
+            },
+            {
+              title: "Patient portal",
+              statement:
+                "Patients manage everything through a self-service portal.",
+              evidenceQuote: "our patient portal gives you full control",
+              rationale: "Invented — must be dropped.",
+              acceptanceCriteria: ["Portal exists", "Patients use it"],
+            },
+          ],
+        }),
+      },
+    );
+    expect(drafted).toHaveLength(1);
+    expect(drafted?.[0].source).toBe("llm");
+    expect(drafted?.[0].rationale).toContain("Evidence:");
+  });
+
+  it("returns null without an API key or on provider failure", async () => {
+    expect(
+      await draftUseCasesWithLlm(
+        { orgName: "X", evidenceText: evidence, signals: [] },
+        { apiKey: "", fetchFn: fakeFetch({}) },
+      ),
+    ).toBeNull();
+    expect(
+      await draftUseCasesWithLlm(
+        { orgName: "X", evidenceText: evidence, signals: [] },
+        { apiKey: "k", fetchFn: fakeFetch({}, false) },
+      ),
+    ).toBeNull();
+  });
+
+  it("mergeUseCaseCandidates tops up a thin drafted set to the floor of 3", () => {
+    const rules = generateUseCases([]);
+    const merged = mergeUseCaseCandidates(
+      [
+        {
+          key: "ai-one",
+          code: "UC-AI-ONE",
+          title: "A very specific case",
+          statement: "A specific statement for the merged case.",
+          rationale: "Grounded in evidence.",
+          acceptanceCriteria: ["One", "Two"],
+          source: "llm" as const,
+        },
+      ],
+      rules,
+    );
+    expect(merged.length).toBeGreaterThanOrEqual(3);
+    expect(merged[0].key).toBe("ai-one");
+    expect(
+      mergeUseCaseCandidates(null, rules).map((c) => c.key),
+    ).toEqual(rules.map((c) => c.key));
   });
 });
