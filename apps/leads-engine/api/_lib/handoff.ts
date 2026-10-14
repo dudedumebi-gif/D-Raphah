@@ -213,7 +213,7 @@ export async function buildHandoffPackage(
   // package's requirement baseline (validated Must requirements).
   const useCaseRows = (await client`
     select id, code, statement, acceptance_criteria, human_validator_id,
-           created_at, updated_at
+           created_at, updated_at, success_metric, success_target
     from public.opportunity_use_cases
     where workspace_id = ${input.workspaceId}::uuid
       and opportunity_id = ${input.opportunityId}::uuid
@@ -223,6 +223,15 @@ export async function buildHandoffPackage(
   const requirements = useCaseRows.map((row) =>
     mapUseCaseToRequirement(row, opportunity.id, opportunity.primary_evidence_id),
   );
+  // The OKRs promised to the lead in its proposal (approved with
+  // the use cases) ship as the package's success measures — DF
+  // verifies delivery against exactly these, nothing invented.
+  const successMeasures = useCaseRows
+    .filter((row) => row.success_metric && row.success_target)
+    .map((row) => ({
+      metric: row.success_metric as string,
+      target: row.success_target as string,
+    }));
 
   const base = {
     schemaVersion: HANDOFF_SCHEMA_VERSION,
@@ -245,7 +254,7 @@ export async function buildHandoffPackage(
     requirementBaseline: { version: 1, requirements, features: [] },
     constraints: [],
     risksAndAssumptions: [],
-    successMeasures: [],
+    successMeasures,
     commercialScope: {
       scopeSummary: `${opportunity.title} — qualified automation opportunity`,
     },
@@ -299,6 +308,7 @@ export interface EnqueueHandoffInput {
 export interface EnqueuedHandoff {
   id: string;
   status: string;
+  manifestChecksum: string;
 }
 
 /**
@@ -322,9 +332,13 @@ export async function enqueueHandoffOutbox(
     p_signature: input.signature,
   });
   if (error) throw new Error(error.message);
-  const row = data as EnqueuedHandoff | null;
+  const row = data as (EnqueuedHandoff & { manifest_checksum?: string }) | null;
   if (!row?.id) throw new Error("Handoff enqueue returned no row");
-  return { id: row.id, status: row.status };
+  return {
+    id: row.id,
+    status: row.status,
+    manifestChecksum: row.manifest_checksum ?? row.manifestChecksum ?? "",
+  };
 }
 
 interface OutboxRow {

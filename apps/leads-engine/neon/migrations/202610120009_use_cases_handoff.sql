@@ -13,8 +13,11 @@
 --    approving its use cases would have kept dispatching the stale
 --    empty-baseline package until the attempts ran out. The RPC now
 --    refreshes the package and resets dispatch state whenever the
---    existing row was never successfully sent; a sent row remains
---    an untouched idempotent replay.
+--    existing row is still pending or terminally failed; a row
+--    that is mid-dispatch ('dispatching', request in flight to the
+--    Delivery Factory) or already sent is left untouched, so a
+--    resend can never rewrite a package underneath an in-flight
+--    delivery and corrupt its outcome record.
 --
 -- Schema 3.3.13
 
@@ -28,6 +31,9 @@ create table public.opportunity_use_cases (
   statement text not null,
   rationale text not null default '',
   acceptance_criteria jsonb not null default '[]'::jsonb,
+  generation_source text not null default 'rules',
+  success_metric text,
+  success_target text,
   status text not null default 'suggested'
     check (status in ('suggested', 'approved', 'dismissed')),
   human_validator_id text,
@@ -44,8 +50,8 @@ alter table public.opportunity_use_cases enable row level security;
 create policy opportunity_use_cases_member_select on public.opportunity_use_cases
   for select using (public.is_workspace_member(workspace_id));
 create policy opportunity_use_cases_operator_write on public.opportunity_use_cases
-  for all using (public.has_workspace_role(workspace_id, array['owner', 'administrator', 'analyst']::public.workspace_role[]))
-  with check (public.has_workspace_role(workspace_id, array['owner', 'administrator', 'analyst']::public.workspace_role[]));
+  for all using (public.has_workspace_role(workspace_id, array['owner', 'administrator', 'analyst', 'reviewer']::public.workspace_role[]))
+  with check (public.has_workspace_role(workspace_id, array['owner', 'administrator', 'analyst', 'reviewer']::public.workspace_role[]));
 
 create trigger audit_opportunity_use_cases
   after insert or update or delete on public.opportunity_use_cases
@@ -53,6 +59,18 @@ create trigger audit_opportunity_use_cases
 
 create trigger opportunity_use_cases_updated before update on public.opportunity_use_cases
   for each row execute function public.set_updated_at();
+
+-- Neon Data API permissions are explicit (base-migration rule):
+-- RLS policies are the tenant boundary, but the authenticated role
+-- still needs table privileges or every Data API read/write on the
+-- table fails. The reviewer role is included because approving use
+-- cases IS the reviewer's step in this flow.
+grant select on public.opportunity_use_cases to authenticated;
+-- Same defect, found while fixing this one: consent_records
+-- (202609260002) never received its Data API privileges either,
+-- although its policies intend member select + operator write and
+-- the consent routes use the Data API client.
+grant select on public.consent_records to authenticated;
 
 create or replace function public.enqueue_handoff_outbox(
   p_workspace_id uuid,
@@ -81,8 +99,7 @@ begin
           next_attempt_at = now(),
           last_error = null,
           dispatched_at = null
-      where public.handoff_outbox.dispatched_at is null
-        and public.handoff_outbox.status <> 'sent';
+      where public.handoff_outbox.status in ('pending', 'failed');
   select * into result from public.handoff_outbox
     where idempotency_key = p_idempotency_key and workspace_id = p_workspace_id;
   if result.id is null then

@@ -24,7 +24,18 @@ import {
   tryImmediateDispatch,
   type SqlClient,
 } from "./handoff.js";
-import { generateUseCases, type SignalLike } from "./use-cases.js";
+import {
+  cleanEvidenceText,
+  draftUseCasesWithLlm,
+  generateUseCases,
+  mergeUseCaseCandidates,
+  type SignalLike,
+} from "./use-cases.js";
+import {
+  draftProposalWithLlm,
+  templateProposal,
+  type ApprovedUseCaseForProposal,
+} from "./proposals.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
 import {
   dedupeRows,
@@ -700,6 +711,18 @@ async function authenticatedRoutes(
   );
   const opportunityUseCasesApprove = pathname.match(
     /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/use-cases\/approve$/i,
+  );
+  const opportunityProposal = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal$/i,
+  );
+  const opportunityProposalDraft = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal\/draft$/i,
+  );
+  const opportunityProposalApprove = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal\/approve$/i,
+  );
+  const opportunityProposalSent = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal\/sent$/i,
   );
   const sourceRetire = pathname.match(
     /^\/api\/v1\/sources\/([0-9a-f-]+)\/(retire|restore)$/i,
@@ -1386,6 +1409,27 @@ async function authenticatedRoutes(
     if (!existing || existing.length === 0) {
       const admin = createAdminClient();
       let signals: SignalLike[] = [];
+      let evidenceText = "";
+      let orgName = "this business";
+      let orgDomain: string | null = null;
+      let assessmentSummary: string | null = null;
+      const orgRows = (await admin`
+        select o.title, org.name as org_name, org.normalized_domain as org_domain,
+               o.latest_assessment_id
+        from public.opportunities o
+        join public.organizations org on org.id = o.organization_id
+        where o.id = ${opportunityId}::uuid
+          and o.workspace_id = ${workspaceId}::uuid
+      `) as unknown as Array<{
+        title: string;
+        org_name: string;
+        org_domain: string | null;
+        latest_assessment_id: string | null;
+      }>;
+      if (orgRows[0]) {
+        orgName = orgRows[0].org_name || orgRows[0].title;
+        orgDomain = orgRows[0].org_domain;
+      }
       if (opportunity.primary_evidence_id) {
         signals = (await admin`
           select code, category, polarity, strength, excerpt
@@ -1395,25 +1439,66 @@ async function authenticatedRoutes(
           order by strength desc
           limit 12
         `) as unknown as SignalLike[];
+        const evidenceRows = (await admin`
+          select raw_content from public.evidence_artifacts
+          where id = ${opportunity.primary_evidence_id}::uuid
+            and workspace_id = ${workspaceId}::uuid
+        `) as unknown as Array<{ raw_content: string | null }>;
+        if (evidenceRows[0]?.raw_content)
+          evidenceText = cleanEvidenceText(evidenceRows[0].raw_content);
       }
-      const candidates = generateUseCases(signals);
-      const { error: insertError } = await client
-        .from("opportunity_use_cases")
-        .upsert(
-          candidates.map((candidate) => ({
-            workspace_id: workspaceId,
-            opportunity_id: opportunityId,
-            use_case_key: candidate.key,
-            code: candidate.code,
-            title: candidate.title,
-            statement: candidate.statement,
-            rationale: candidate.rationale,
-            acceptance_criteria: candidate.acceptanceCriteria,
-            status: "suggested",
-          })),
-          { onConflict: "opportunity_id,use_case_key", ignoreDuplicates: true },
-        );
-      if (insertError) throw new Error(insertError.message);
+      if (orgRows[0]?.latest_assessment_id) {
+        const assessmentRows = (await admin`
+          select explanation from public.maturity_assessments
+          where id = ${orgRows[0].latest_assessment_id}::uuid
+        `) as unknown as Array<{ explanation: unknown }>;
+        const explanation = assessmentRows[0]?.explanation;
+        if (typeof explanation === "string")
+          assessmentSummary = explanation.slice(0, 600);
+        else if (explanation && typeof explanation === "object") {
+          const summary = (explanation as Record<string, unknown>).summary;
+          if (typeof summary === "string")
+            assessmentSummary = summary.slice(0, 600);
+        }
+      }
+      // The LLM drafter reads the FULL evidence (operator decision
+      // 2026-10-14); every candidate it returns is citation-
+      // verified against that text inside draftUseCasesWithLlm.
+      // Any failure falls back to the rules catalog via the merge.
+      const drafted = evidenceText
+        ? await draftUseCasesWithLlm({
+            orgName,
+            orgDomain,
+            evidenceText,
+            signals,
+            assessmentSummary,
+          })
+        : null;
+      const candidates = mergeUseCaseCandidates(
+        drafted,
+        generateUseCases(signals),
+      );
+      // Writes to the approval-bearing tables go through the
+      // server connection, never the member Data API: migration
+      // 202610120010 grants authenticated SELECT only, so an
+      // approved row (and its validator stamp) can only ever be
+      // produced by these routes, from the authenticated session
+      // (Codex P1 on PR #49).
+      for (const candidate of candidates) {
+        await admin`
+          insert into public.opportunity_use_cases (
+            workspace_id, opportunity_id, use_case_key, code, title,
+            statement, rationale, acceptance_criteria,
+            generation_source, success_metric, success_target, status)
+          values (${workspaceId}::uuid, ${opportunityId}::uuid,
+            ${candidate.key}, ${candidate.code}, ${candidate.title},
+            ${candidate.statement}, ${candidate.rationale},
+            ${JSON.stringify(candidate.acceptanceCriteria)}::jsonb,
+            ${candidate.source}, ${candidate.successMetric},
+            ${candidate.successTarget}, 'suggested')
+          on conflict (opportunity_id, use_case_key) do nothing
+        `;
+      }
       const refreshed = await client
         .from("opportunity_use_cases")
         .select("*")
@@ -1426,58 +1511,352 @@ async function authenticatedRoutes(
   }
 
   if (opportunityUseCasesApprove && request.method === "POST") {
-    requireRole(context, ["owner", "administrator", "analyst"]);
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
     const opportunityId = opportunityUseCasesApprove[1];
     const input = z
       .object({
         useCaseIds: z.array(z.string().uuid()).min(1).max(20),
+        // Reviewer-edited success measures (the OKRs), keyed by
+        // use-case id; approved together with the use case.
+        measures: z
+          .record(
+            z.string().uuid(),
+            z.object({
+              metric: z.string().min(3).max(120),
+              target: z.string().min(5).max(200),
+            }),
+          )
+          .optional(),
       })
       .parse(await bodyJson(request));
     const validator = context.user.email ?? context.user.id;
-    const { data: approvedNow, error: approveError } = await client
-      .from("opportunity_use_cases")
-      .update({
-        status: "approved",
-        human_validator_id: validator,
-        approved_at: new Date().toISOString(),
-      })
-      .eq("workspace_id", workspaceId)
-      .eq("opportunity_id", opportunityId)
-      .in("id", input.useCaseIds)
-      .select("id");
-    if (approveError) throw new Error(approveError.message);
-    if (!approvedNow || approvedNow.length === 0)
+    // ONE atomic statement replaces the whole approved set
+    // (Codex P2 on PR #49: the previous read-modify-write across
+    // separate calls could interleave two reviewers into an empty
+    // set), executed on the server connection (Codex P1: the
+    // validator stamp is only ever written here, from the
+    // session). Reviewer-edited success measures ride the same
+    // statement via the jsonb overrides map.
+    const admin = createAdminClient();
+    // Pre-validate BEFORE any write (Codex P2): a submission of
+    // only stale/foreign ids must 404 WITHOUT clearing the
+    // existing approved set, and every selected row must end up
+    // with a success measure (its stored one or the reviewer's
+    // override) — an approved case without an OKR would silently
+    // ship no promise.
+    const selectedRows = (await admin`
+      select id, title, success_metric, success_target
+      from public.opportunity_use_cases
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and id::text = any(${input.useCaseIds}::text[])
+        and status in ('suggested', 'approved')
+    `) as unknown as Array<{
+      id: string;
+      title: string;
+      success_metric: string | null;
+      success_target: string | null;
+    }>;
+    if (selectedRows.length === 0)
       throw Object.assign(new Error("No matching use cases for this lead"), {
         statusCode: 404,
       });
-    // The approved set is exactly the submitted selection: rows
-    // approved earlier but not re-selected revert to suggested.
-    const { data: stillApproved } = await client
+    const missingMeasures = selectedRows.filter((row) => {
+      const override = input.measures?.[row.id];
+      return (
+        !(override?.metric ?? row.success_metric) ||
+        !(override?.target ?? row.success_target)
+      );
+    });
+    if (missingMeasures.length > 0)
+      throw Object.assign(
+        new Error(
+          `These use cases have no success measure yet — add a metric and target in the panel before approving: ${missingMeasures.map((row) => row.title).join(", ")}`,
+        ),
+        { statusCode: 422 },
+      );
+    const measuresJson = JSON.stringify(input.measures ?? {});
+    const counts = (await admin`
+      with updated as (
+        update public.opportunity_use_cases uc
+        set status = case when uc.id::text = any(${input.useCaseIds}::text[])
+                          then 'approved' else 'suggested' end,
+            human_validator_id = case when uc.id::text = any(${input.useCaseIds}::text[])
+                          then ${validator} else null end,
+            approved_at = case when uc.id::text = any(${input.useCaseIds}::text[])
+                          then now() else null end,
+            success_metric = coalesce(
+              (${measuresJson}::jsonb -> uc.id::text) ->> 'metric',
+              uc.success_metric),
+            success_target = coalesce(
+              (${measuresJson}::jsonb -> uc.id::text) ->> 'target',
+              uc.success_target)
+        where uc.workspace_id = ${workspaceId}::uuid
+          and uc.opportunity_id = ${opportunityId}::uuid
+          and uc.status in ('suggested', 'approved')
+        returning uc.status
+      )
+      select count(*) filter (where status = 'approved')::int as approved_count
+      from updated
+    `) as unknown as Array<{ approved_count: number }>;
+    const approvedCount = counts[0]?.approved_count ?? 0;
+    if (approvedCount === 0)
+      throw Object.assign(new Error("No matching use cases for this lead"), {
+        statusCode: 404,
+      });
+    await logWorkspaceEvent(client, workspaceId, {
+      action: "opportunity.use_cases_approved",
+      resourceType: "opportunities",
+      resourceId: opportunityId,
+      reason: `${approvedCount} use case(s) approved for handoff by ${validator}; they ship to the Delivery Factory as validated Must requirements.`,
+      after: { approvedUseCaseIds: input.useCaseIds },
+    });
+    return json({ data: { approved: approvedCount } });
+  }
+
+  // Lead proposals (placement decision 2026-10-14): outreach is
+  // drafted in LE from the lead's evidence + approved use cases,
+  // approved by the reviewer, gated on a recorded CASL consent
+  // basis, and sent by a human. Outcomes land in lead_feedback.
+  if (opportunityProposal && request.method === "GET") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposal[1];
+    const { data: opportunity, error: opportunityError } = await client
+      .from("opportunities")
+      .select("id, organization_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", opportunityId)
+      .single();
+    if (opportunityError || !opportunity)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    const { data: proposals } = await client
+      .from("lead_proposals")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const { data: consent } = await client
+      .from("consent_records")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .or(
+        `opportunity_id.eq.${opportunityId},organization_id.eq.${opportunity.organization_id}`,
+      )
+      .limit(1);
+    const { data: approvedCases } = await client
       .from("opportunity_use_cases")
       .select("id")
       .eq("workspace_id", workspaceId)
       .eq("opportunity_id", opportunityId)
       .eq("status", "approved");
-    const toRevert = ((stillApproved ?? []) as Array<{ id: string }>)
-      .map((row) => row.id)
-      .filter((id) => !input.useCaseIds.includes(id));
-    if (toRevert.length > 0) {
-      const { error: revertError } = await client
-        .from("opportunity_use_cases")
-        .update({ status: "suggested", human_validator_id: null, approved_at: null })
-        .eq("workspace_id", workspaceId)
-        .eq("opportunity_id", opportunityId)
-        .in("id", toRevert);
-      if (revertError) throw new Error(revertError.message);
+    return json({
+      data: {
+        proposal: proposals?.[0] ?? null,
+        consentRecorded: (consent?.length ?? 0) > 0,
+        approvedUseCases: approvedCases?.length ?? 0,
+      },
+    });
+  }
+
+  if (opportunityProposalDraft && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposalDraft[1];
+    const { data: approvedCases, error: casesError } = await client
+      .from("opportunity_use_cases")
+      .select("title, statement, success_metric, success_target")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .eq("status", "approved")
+      .order("approved_at", { ascending: true });
+    if (casesError) throw new Error(casesError.message);
+    if (!approvedCases || approvedCases.length === 0)
+      throw Object.assign(
+        new Error(
+          "Approve at least one use case first — the proposal is drafted from the approved use cases and their success measures.",
+        ),
+        { statusCode: 409 },
+      );
+    const admin = createAdminClient();
+    const orgRows = (await admin`
+      select o.title, o.primary_evidence_id, o.latest_assessment_id,
+             org.name as org_name, org.normalized_domain as org_domain
+      from public.opportunities o
+      join public.organizations org on org.id = o.organization_id
+      where o.id = ${opportunityId}::uuid
+        and o.workspace_id = ${workspaceId}::uuid
+    `) as unknown as Array<{
+      title: string;
+      primary_evidence_id: string | null;
+      latest_assessment_id: string | null;
+      org_name: string;
+      org_domain: string | null;
+    }>;
+    const org = orgRows[0];
+    if (!org)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    let evidenceText = "";
+    if (org.primary_evidence_id) {
+      const evidenceRows = (await admin`
+        select raw_content from public.evidence_artifacts
+        where id = ${org.primary_evidence_id}::uuid
+          and workspace_id = ${workspaceId}::uuid
+      `) as unknown as Array<{ raw_content: string | null }>;
+      if (evidenceRows[0]?.raw_content)
+        evidenceText = cleanEvidenceText(evidenceRows[0].raw_content);
     }
+    let assessmentSummary: string | null = null;
+    if (org.latest_assessment_id) {
+      const assessmentRows = (await admin`
+        select explanation from public.maturity_assessments
+        where id = ${org.latest_assessment_id}::uuid
+      `) as unknown as Array<{ explanation: unknown }>;
+      const explanation = assessmentRows[0]?.explanation;
+      if (typeof explanation === "string")
+        assessmentSummary = explanation.slice(0, 600);
+      else if (explanation && typeof explanation === "object") {
+        const summary = (explanation as Record<string, unknown>).summary;
+        if (typeof summary === "string")
+          assessmentSummary = summary.slice(0, 600);
+      }
+    }
+    const useCases: ApprovedUseCaseForProposal[] = approvedCases.map(
+      (row: Record<string, unknown>) => ({
+        title: row.title as string,
+        statement: row.statement as string,
+        successMetric: (row.success_metric as string | null) ?? null,
+        successTarget: (row.success_target as string | null) ?? null,
+      }),
+    );
+    const drafted =
+      (evidenceText
+        ? await draftProposalWithLlm({
+            orgName: org.org_name || org.title,
+            orgDomain: org.org_domain,
+            evidenceText,
+            useCases,
+            assessmentSummary,
+          })
+        : null) ??
+      templateProposal({ orgName: org.org_name || org.title, useCases });
+    // Proposal writes also go through the server connection
+    // (same boundary as the use-case approvals: SELECT-only for
+    // the member Data API — see migration 202610120011).
+    await admin`
+      update public.lead_proposals set status = 'superseded'
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and status = 'draft'
+    `;
+    const inserted = (await admin`
+      insert into public.lead_proposals (
+        workspace_id, opportunity_id, draft_text, evidence_quotes,
+        status, drafted_by, model)
+      values (${workspaceId}::uuid, ${opportunityId}::uuid,
+        ${drafted.text}, ${JSON.stringify(drafted.evidenceQuotes)}::jsonb,
+        'draft', ${drafted.draftedBy}, ${drafted.model})
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    return json({ data: inserted[0] }, 201);
+  }
+
+  if (opportunityProposalApprove && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposalApprove[1];
+    const input = z
+      .object({
+        proposalId: z.string().uuid(),
+        text: z.string().min(40).max(6_000),
+      })
+      .parse(await bodyJson(request));
+    const { data: opportunity } = await client
+      .from("opportunities")
+      .select("id, organization_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", opportunityId)
+      .single();
+    if (!opportunity)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    const { data: consent } = await client
+      .from("consent_records")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .or(
+        `opportunity_id.eq.${opportunityId},organization_id.eq.${opportunity.organization_id}`,
+      )
+      .limit(1);
+    if (!consent || consent.length === 0)
+      throw Object.assign(
+        new Error(
+          "Record a CASL consent basis for this lead before approving the proposal — outreach without a recorded basis is not permitted. Use the consent form in the Proposal panel.",
+        ),
+        { statusCode: 409 },
+      );
+    const approver = context.user.email ?? context.user.id;
+    const admin = createAdminClient();
+    const updatedRows = (await admin`
+      update public.lead_proposals
+      set draft_text = ${input.text}, status = 'approved',
+          approved_by = ${approver}, approved_at = now()
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and id = ${input.proposalId}::uuid
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    const proposal = updatedRows[0];
+    if (!proposal)
+      throw Object.assign(new Error("Proposal not found"), {
+        statusCode: 404,
+      });
     await logWorkspaceEvent(client, workspaceId, {
-      action: "opportunity.use_cases_approved",
+      action: "opportunity.proposal_approved",
       resourceType: "opportunities",
       resourceId: opportunityId,
-      reason: `${approvedNow.length} use case(s) approved for handoff by ${validator}; they ship to the Delivery Factory as validated Must requirements.`,
-      after: { approvedUseCaseIds: input.useCaseIds },
+      reason: `Outreach proposal approved by ${approver}; a human sends it externally. Consent basis on record.`,
+      after: { proposalId: input.proposalId },
     });
-    return json({ data: { approved: approvedNow.length } });
+    return json({ data: proposal });
+  }
+
+  if (opportunityProposalSent && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposalSent[1];
+    const input = z
+      .object({ proposalId: z.string().uuid() })
+      .parse(await bodyJson(request));
+    const admin = createAdminClient();
+    const sentRows = (await admin`
+      update public.lead_proposals
+      set status = 'sent', sent_at = now()
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and id = ${input.proposalId}::uuid
+        and status = 'approved'
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    const proposal = sentRows[0];
+    if (!proposal)
+      throw Object.assign(
+        new Error(
+          "Proposal not found or not approved — only an approved proposal can be marked sent.",
+        ),
+        { statusCode: 409 },
+      );
+    await admin`
+      insert into public.lead_feedback (
+        workspace_id, opportunity_id, reviewer_id, decision,
+        reason_code, notes)
+      values (${workspaceId}::uuid, ${opportunityId}::uuid,
+        ${context.user.id}, 'contacted', 'PROPOSAL_SENT',
+        'Approved proposal sent by the operator (human-sent from LE).')
+    `;
+    return json({ data: proposal });
   }
 
   // Delivery status for handoffs: the outbox row is the delivery
@@ -1550,6 +1929,21 @@ async function authenticatedRoutes(
         signature,
       },
     );
+    // Truth-in-confirmation (Codex P2 on PR #49): when the outbox
+    // row is mid-dispatch or already delivered, the RPC returns it
+    // unchanged — so a resend carrying a CHANGED baseline would
+    // otherwise report success for a package that was discarded.
+    // Compare what is actually stored with what was just built.
+    if (enqueued.manifestChecksum !== manifestChecksum) {
+      throw Object.assign(
+        new Error(
+          enqueued.status === "sent"
+            ? "This lead was already delivered to the Delivery Factory with an earlier baseline — the changed use cases were not sent (the v1 handoff delivers one package per lead)."
+            : "A delivery for this lead is already in progress with an earlier package — the changed use cases were not sent. Wait for the current delivery to finish, then resend.",
+        ),
+        { statusCode: 409 },
+      );
+    }
     // Best-effort immediate dispatch (handoff gap 1): the 5-minute worker
     // tick stays the durable fallback, but an accepted lead should reach DF
     // in seconds, not minutes. tryImmediateDispatch never rejects, so the
@@ -1620,21 +2014,26 @@ async function authenticatedRoutes(
           statusCode: 404,
         });
     }
-    const { data, error } = await client
-      .from("consent_records")
-      .insert({
-        workspace_id: workspaceId,
-        organization_id: input.organizationId ?? null,
-        opportunity_id: input.opportunityId ?? null,
-        basis_type: input.basisType,
-        evidence_reference: input.evidenceReference ?? null,
-        recorded_by: context.user.email ?? context.user.id,
-        notes: input.notes ?? null,
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
-    return json({ data }, 201);
+    // Consent records are gate-trusted (handoff + proposal
+    // approvals rely on them), so the insert goes through the
+    // server connection — the member Data API is SELECT-only on
+    // this table (Codex P1 boundary, PR #49).
+    const admin = createAdminClient();
+    const recordedBy = context.user.email ?? context.user.id;
+    const consentRows = (await admin`
+      insert into public.consent_records (
+        workspace_id, organization_id, opportunity_id, basis_type,
+        evidence_reference, recorded_by, notes)
+      values (${workspaceId}::uuid,
+        ${input.organizationId ?? null}::uuid,
+        ${input.opportunityId ?? null}::uuid,
+        ${input.basisType},
+        ${input.evidenceReference ?? null},
+        ${recordedBy},
+        ${input.notes ?? null})
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    return json({ data: consentRows[0] }, 201);
   }
 
   // Third-party terms acceptance (audit gap 2). Owners/administrators only.

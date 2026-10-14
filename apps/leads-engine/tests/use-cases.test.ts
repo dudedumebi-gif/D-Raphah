@@ -3,8 +3,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  cleanEvidenceText,
+  draftUseCasesWithLlm,
   generateUseCases,
   mapUseCaseToRequirement,
+  mergeUseCaseCandidates,
+  quoteIsGrounded,
   type SignalLike,
 } from "../api/_lib/use-cases.js";
 import { RequirementSchema } from "@raphah/handoff-contract";
@@ -132,13 +136,179 @@ describe("use-case handoff wiring — source contracts", () => {
 
   it("the enqueue RPC refreshes an unsent package instead of pinning the first", () => {
     expect(migration).toContain("on conflict(idempotency_key) do update");
-    expect(migration).toContain("dispatched_at is null");
+    // Only settled rows refresh: a 'dispatching' row has a request
+    // in flight to DF and must never be rewritten under it.
+    expect(migration).toContain("status in ('pending', 'failed')");
     expect(migration).toContain("attempts = 0");
+  });
+
+  it("the use-case table carries explicit Data API privileges (Codex P1)", () => {
+    expect(migration).toContain(
+      "grant select on public.opportunity_use_cases to authenticated",
+    );
+    // The production correction migration carries the same fixes
+    // for databases that already ran the original 0009.
+    const correction = readFileSync(
+      join(here, "../neon/migrations/202610120010_use_cases_fixes.sql"),
+      "utf8",
+    );
+    expect(correction).toContain(
+      "grant select on public.opportunity_use_cases to authenticated",
+    );
+    expect(correction).toContain(
+      "grant select on public.consent_records to authenticated",
+    );
+    expect(correction).toContain("status in ('pending', 'failed')");
+    expect(correction).toContain("'analyst', 'reviewer'");
+    // Grants are additive: the SELECT-only boundary needs revokes.
+    expect(correction).toContain(
+      "revoke insert, update on public.opportunity_use_cases from authenticated",
+    );
+    expect(correction).toContain(
+      "revoke insert, update on public.consent_records from authenticated",
+    );
+  });
+
+  it("approval writes stay behind the server boundary (Codex P1 + P2)", () => {
+    // Atomic set replacement in ONE statement, on the server client.
+    expect(router).toContain("with updated as (");
+    expect(router).toContain("uc.id::text = any(");
+    // Generation + consent inserts run on the server connection too.
+    expect(router).toContain("insert into public.opportunity_use_cases");
+    expect(router).toContain("insert into public.consent_records");
+    // Unknown selections 404 before any write; measures are
+    // required at approval (Codex P2s on the bundle head).
+    expect(router).toContain("have no success measure yet");
+  });
+
+  it("the reviewer who selects use cases can also approve them (Codex P2)", () => {
+    const at = router.indexOf("opportunityUseCasesApprove &&");
+    expect(at).toBeGreaterThan(-1);
+    expect(router.slice(at, at + 400)).toContain('"reviewer"');
+    expect(migration).toContain("'analyst', 'reviewer'");
+  });
+
+  it("a resend never reports a discarded package as enqueued (Codex P2)", () => {
+    expect(router).toContain("enqueued.manifestChecksum !== manifestChecksum");
+    expect(router).toContain("the changed use cases were not sent");
+    expect(handoff).toContain("manifestChecksum: row.manifest_checksum");
   });
 
   it("delivery confirmation is wired: status feed, landed banner, 5s toasts", () => {
     expect(router).toContain('"/api/v1/handoffs" && request.method === "GET"');
     expect(main).toContain("Landed — the Delivery Factory accepted");
     expect(main).toContain("toast.kind === \"error\" ? 8000 : 5000");
+  });
+});
+
+describe("LLM drafter — full evidence, citation-verified", () => {
+  const evidence =
+    "Welcome to Donddental. To book an appointment please call us at 416-555-0100 during office hours. " +
+    "New patients: download our intake form (PDF), print it, and bring the completed paperwork to your first visit. " +
+    "We send referrals by fax to your family doctor.";
+
+  it("cleanEvidenceText strips markup", () => {
+    const cleaned = cleanEvidenceText(
+      "<html><style>.a{}</style><body><p>Call   us</p><script>var x=1;</script></body></html>",
+    );
+    expect(cleaned).toBe("Call us");
+  });
+
+  it("quoteIsGrounded requires a verbatim passage from the evidence", () => {
+    expect(
+      quoteIsGrounded("please call us at 416-555-0100 during office hours", evidence),
+    ).toBe(true);
+    expect(
+      quoteIsGrounded("book online instantly through our portal", evidence),
+    ).toBe(false);
+    expect(quoteIsGrounded("call us", evidence)).toBe(false); // too short
+  });
+
+  const fakeFetch = (content: unknown, ok = true) =>
+    (async () => ({
+      ok,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify(content) } }],
+      }),
+    })) as never;
+
+  it("keeps only grounded candidates and marks them as LLM-sourced", async () => {
+    const drafted = await draftUseCasesWithLlm(
+      { orgName: "Donddental", evidenceText: evidence, signals: [] },
+      {
+        apiKey: "test-key",
+        fetchFn: fakeFetch({
+          useCases: [
+            {
+              title: "Online appointment booking",
+              statement:
+                "Patients can book appointments online instead of phoning during office hours.",
+              evidenceQuote:
+                "To book an appointment please call us at 416-555-0100 during office hours",
+              rationale: "Booking is phone-only today.",
+              acceptanceCriteria: [
+                "Patients can book online at any hour",
+                "Bookings land directly in the schedule",
+              ],
+              successMetric: "Online booking share",
+              successTarget: "At least 50% of new appointments booked online within 90 days",
+            },
+            {
+              title: "Patient portal",
+              statement:
+                "Patients manage everything through a self-service portal.",
+              evidenceQuote: "our patient portal gives you full control",
+              rationale: "Invented — must be dropped.",
+              acceptanceCriteria: ["Portal exists", "Patients use it"],
+              successMetric: "Portal adoption",
+              successTarget: "Most patients use the portal",
+            },
+          ],
+        }),
+      },
+    );
+    expect(drafted).toHaveLength(1);
+    expect(drafted?.[0].source).toBe("llm");
+    expect(drafted?.[0].rationale).toContain("Evidence:");
+  });
+
+  it("returns null without an API key or on provider failure", async () => {
+    expect(
+      await draftUseCasesWithLlm(
+        { orgName: "X", evidenceText: evidence, signals: [] },
+        { apiKey: "", fetchFn: fakeFetch({}) },
+      ),
+    ).toBeNull();
+    expect(
+      await draftUseCasesWithLlm(
+        { orgName: "X", evidenceText: evidence, signals: [] },
+        { apiKey: "k", fetchFn: fakeFetch({}, false) },
+      ),
+    ).toBeNull();
+  });
+
+  it("mergeUseCaseCandidates tops up a thin drafted set to the floor of 3", () => {
+    const rules = generateUseCases([]);
+    const merged = mergeUseCaseCandidates(
+      [
+        {
+          key: "ai-one",
+          code: "UC-AI-ONE",
+          title: "A very specific case",
+          statement: "A specific statement for the merged case.",
+          rationale: "Grounded in evidence.",
+          acceptanceCriteria: ["One", "Two"],
+          successMetric: "A metric",
+          successTarget: "A target",
+          source: "llm" as const,
+        },
+      ],
+      rules,
+    );
+    expect(merged.length).toBeGreaterThanOrEqual(3);
+    expect(merged[0].key).toBe("ai-one");
+    expect(
+      mergeUseCaseCandidates(null, rules).map((c) => c.key),
+    ).toEqual(rules.map((c) => c.key));
   });
 });
