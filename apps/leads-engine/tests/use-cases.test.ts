@@ -169,6 +169,12 @@ describe("use-case handoff wiring — source contracts", () => {
     expect(migration).toContain("'analyst', 'reviewer'");
   });
 
+  it("a resend never reports a discarded package as enqueued (Codex P2)", () => {
+    expect(router).toContain("enqueued.manifestChecksum !== manifestChecksum");
+    expect(router).toContain("the changed use cases were not sent");
+    expect(handoff).toContain("manifestChecksum: row.manifest_checksum");
+  });
+
   it("delivery confirmation is wired: status feed, landed banner, 5s toasts", () => {
     expect(router).toContain('"/api/v1/handoffs" && request.method === "GET"');
     expect(main).toContain("Landed — the Delivery Factory accepted");

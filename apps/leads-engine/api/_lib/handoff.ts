@@ -299,6 +299,7 @@ export interface EnqueueHandoffInput {
 export interface EnqueuedHandoff {
   id: string;
   status: string;
+  manifestChecksum: string;
 }
 
 /**
@@ -322,9 +323,13 @@ export async function enqueueHandoffOutbox(
     p_signature: input.signature,
   });
   if (error) throw new Error(error.message);
-  const row = data as EnqueuedHandoff | null;
+  const row = data as (EnqueuedHandoff & { manifest_checksum?: string }) | null;
   if (!row?.id) throw new Error("Handoff enqueue returned no row");
-  return { id: row.id, status: row.status };
+  return {
+    id: row.id,
+    status: row.status,
+    manifestChecksum: row.manifest_checksum ?? row.manifestChecksum ?? "",
+  };
 }
 
 interface OutboxRow {

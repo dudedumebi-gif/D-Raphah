@@ -1615,6 +1615,21 @@ async function authenticatedRoutes(
         signature,
       },
     );
+    // Truth-in-confirmation (Codex P2 on PR #49): when the outbox
+    // row is mid-dispatch or already delivered, the RPC returns it
+    // unchanged — so a resend carrying a CHANGED baseline would
+    // otherwise report success for a package that was discarded.
+    // Compare what is actually stored with what was just built.
+    if (enqueued.manifestChecksum !== manifestChecksum) {
+      throw Object.assign(
+        new Error(
+          enqueued.status === "sent"
+            ? "This lead was already delivered to the Delivery Factory with an earlier baseline — the changed use cases were not sent (the v1 handoff delivers one package per lead)."
+            : "A delivery for this lead is already in progress with an earlier package — the changed use cases were not sent. Wait for the current delivery to finish, then resend.",
+        ),
+        { statusCode: 409 },
+      );
+    }
     // Best-effort immediate dispatch (handoff gap 1): the 5-minute worker
     // tick stays the durable fallback, but an accepted lead should reach DF
     // in seconds, not minutes. tryImmediateDispatch never rejects, so the
