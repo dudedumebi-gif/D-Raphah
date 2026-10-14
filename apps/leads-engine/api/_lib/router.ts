@@ -31,6 +31,7 @@ import {
   normalizeSourceUrl,
 } from "./source-import.js";
 import { enqueueCanary, runWorkerTick } from "./worker.js";
+import { dryRunRescore, rescoreCampaignBatch } from "./rescore.js";
 import { readJobBankMarketView } from "./job-bank-market.js";
 import {
   DiscoveryGeoInputSchema,
@@ -469,6 +470,7 @@ async function authenticatedRoutes(
             "*,organizations(name,normalized_domain),maturity_assessments!latest_assessment_id(explanation,components,scoring_version)",
           )
           .eq("workspace_id", workspaceId)
+          .eq("status", "active")
           .order("opportunity_score", { ascending: false })
           .limit(100),
         client
@@ -806,6 +808,82 @@ async function authenticatedRoutes(
     });
   }
 
+  // Audited rescore: recompute the campaign's assessments from
+  // STORED evidence and signal observations under current criteria —
+  // never a re-scrape. dryRun returns projected qualifiers + the top
+  // 20 for human review and writes nothing; the real pass writes NEW
+  // immutable assessments through rescore_scrape_result (migration
+  // 202610120006) and is fingerprint-idempotent. Both are audited as
+  // the acting human.
+  const rescoreRoute = pathname.match(
+    /^\/api\/v1\/criteria\/([0-9a-f-]+)\/rescore$/i,
+  );
+  if (rescoreRoute && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const campaignId = rescoreRoute[1];
+    const input = z
+      .object({
+        dryRun: z.boolean().default(false),
+        thresholdOverride: z.number().int().min(0).max(100).optional(),
+        strengthOverride: z.number().int().min(0).max(40).optional(),
+        limit: z.number().int().min(1).max(50).default(25),
+      })
+      .parse(await bodyJson(request).catch(() => ({})));
+    const { data: campaign, error: campaignError } = await client
+      .from("scrape_campaigns")
+      .select("id,source_id,criteria")
+      .eq("workspace_id", workspaceId)
+      .eq("id", campaignId)
+      .single();
+    if (campaignError || !campaign)
+      throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
+    const overrides = {
+      thresholdOverride: input.thresholdOverride,
+      strengthOverride: input.strengthOverride,
+    };
+    const admin = createAdminClient();
+    if (input.dryRun) {
+      const result = await dryRunRescore(admin, {
+        workspaceId,
+        campaignId,
+        sourceId: campaign.source_id as string,
+        criteriaInput: campaign.criteria,
+        overrides,
+      });
+      await logWorkspaceEvent(client, workspaceId, {
+        action: "assessments.rescore_dry_run",
+        resourceType: "scrape_campaigns",
+        resourceId: campaignId,
+        reason:
+          `Rescore dry-run at threshold ${result.threshold} / market strength ${result.marketStrength} by ${context.user.email ?? context.user.id}: ` +
+          `${result.projectedQualified} of ${result.total} projected qualified (${result.newlyQualified} newly). No records written.`,
+        after: {
+          total: result.total,
+          projectedQualified: result.projectedQualified,
+          newlyQualified: result.newlyQualified,
+        },
+      });
+      return json({ data: result });
+    }
+    const result = await rescoreCampaignBatch(admin, {
+      workspaceId,
+      campaignId,
+      sourceId: campaign.source_id as string,
+      criteriaInput: campaign.criteria,
+      overrides,
+      limit: input.limit,
+    });
+    await logWorkspaceEvent(client, workspaceId, {
+      action: "assessments.rescored",
+      resourceType: "scrape_campaigns",
+      resourceId: campaignId,
+      reason:
+        `Rescored ${result.rescanned} assessments (${result.alreadyCurrent} already current) by ${context.user.email ?? context.user.id}: ` +
+        `${result.newlyQualified} newly qualified, ${result.unqualified} unqualified.`,
+      after: result,
+    });
+    return json({ data: result });
+  }
   // --- Lead-vision gap 3: one-click suggestion apply + auto-apply opt-in. ---
   // These routes reuse the existing criteria storage model (criteria jsonb on
   // scrape_campaigns) and the same CriteriaSchema validation the PATCH route
@@ -1062,6 +1140,7 @@ async function authenticatedRoutes(
       .from("opportunities")
       .select("*,organizations(*),maturity_assessments!latest_assessment_id(*)")
       .eq("workspace_id", workspaceId)
+      .eq("status", "active")
       .order("opportunity_score", { ascending: false });
     if (error) throw new Error(error.message);
     return json({ data });
@@ -1077,6 +1156,7 @@ async function authenticatedRoutes(
       .from("opportunities")
       .select("*,organizations(*),maturity_assessments!latest_assessment_id(*)")
       .eq("workspace_id", workspaceId)
+      .eq("status", "active")
       .order("opportunity_score", { ascending: false })
       .limit(EXPORT_MAX_LEADS);
     if (error) throw new Error(error.message);

@@ -58,6 +58,8 @@ export interface JobBankMarket {
   city: string;
   province: string | null;
   postings: number;
+  /** Snapshot timestamp (when present), for rescore fingerprints. */
+  syncedAt?: string;
 }
 
 /**
@@ -391,7 +393,7 @@ export async function lookupJobBankMarket(
 ): Promise<JobBankMarket | null> {
   try {
     const rows = (await client`
-      select city, province, postings_60d
+      select city, province, postings_60d, synced_at
       from public.job_bank_market_signals
       where lower(city) = lower(${city})
         and postings_60d >= ${JOB_BANK_MARKET_MIN_POSTINGS}
@@ -401,6 +403,7 @@ export async function lookupJobBankMarket(
       city: string;
       province: string;
       postings_60d: number;
+      synced_at: string;
     }>;
     const row = rows[0];
     if (!row) return null;
@@ -408,6 +411,7 @@ export async function lookupJobBankMarket(
       city: row.city,
       province: row.province,
       postings: Number(row.postings_60d),
+      syncedAt: row.synced_at,
     };
   } catch {
     return null;
