@@ -165,6 +165,16 @@ describe("pipeline wiring", () => {
     expect(main).toContain("row.opportunity_id");
   });
 
+  it("the board carries the Pipedrive-style stage skin", () => {
+    expect(main).toContain("pipeline-col--");
+    const styles = readFileSync(
+      new URL("../src/styles.css", import.meta.url),
+      "utf8",
+    );
+    expect(styles).toContain("--stage-accent");
+    expect(styles).toContain(".pipeline-col--won");
+  });
+
   it("the board discloses pipeline load failure instead of faking Qualified", () => {
     expect(main).toContain("pipelineStatus");
     expect(main).toContain("Pipeline state could not be loaded");
