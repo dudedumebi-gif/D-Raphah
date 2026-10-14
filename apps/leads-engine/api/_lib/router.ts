@@ -1478,26 +1478,27 @@ async function authenticatedRoutes(
         drafted,
         generateUseCases(signals),
       );
-      const { error: insertError } = await client
-        .from("opportunity_use_cases")
-        .upsert(
-          candidates.map((candidate) => ({
-            workspace_id: workspaceId,
-            opportunity_id: opportunityId,
-            use_case_key: candidate.key,
-            code: candidate.code,
-            title: candidate.title,
-            statement: candidate.statement,
-            rationale: candidate.rationale,
-            acceptance_criteria: candidate.acceptanceCriteria,
-            generation_source: candidate.source,
-            success_metric: candidate.successMetric,
-            success_target: candidate.successTarget,
-            status: "suggested",
-          })),
-          { onConflict: "opportunity_id,use_case_key", ignoreDuplicates: true },
-        );
-      if (insertError) throw new Error(insertError.message);
+      // Writes to the approval-bearing tables go through the
+      // server connection, never the member Data API: migration
+      // 202610120010 grants authenticated SELECT only, so an
+      // approved row (and its validator stamp) can only ever be
+      // produced by these routes, from the authenticated session
+      // (Codex P1 on PR #49).
+      for (const candidate of candidates) {
+        await admin`
+          insert into public.opportunity_use_cases (
+            workspace_id, opportunity_id, use_case_key, code, title,
+            statement, rationale, acceptance_criteria,
+            generation_source, success_metric, success_target, status)
+          values (${workspaceId}::uuid, ${opportunityId}::uuid,
+            ${candidate.key}, ${candidate.code}, ${candidate.title},
+            ${candidate.statement}, ${candidate.rationale},
+            ${JSON.stringify(candidate.acceptanceCriteria)}::jsonb,
+            ${candidate.source}, ${candidate.successMetric},
+            ${candidate.successTarget}, 'suggested')
+          on conflict (opportunity_id, use_case_key) do nothing
+        `;
+      }
       const refreshed = await client
         .from("opportunity_use_cases")
         .select("*")
@@ -1529,65 +1530,51 @@ async function authenticatedRoutes(
       })
       .parse(await bodyJson(request));
     const validator = context.user.email ?? context.user.id;
-    const { data: approvedNow, error: approveError } = await client
-      .from("opportunity_use_cases")
-      .update({
-        status: "approved",
-        human_validator_id: validator,
-        approved_at: new Date().toISOString(),
-      })
-      .eq("workspace_id", workspaceId)
-      .eq("opportunity_id", opportunityId)
-      .in("id", input.useCaseIds)
-      .select("id");
-    if (approveError) throw new Error(approveError.message);
-    if (!approvedNow || approvedNow.length === 0)
+    // ONE atomic statement replaces the whole approved set
+    // (Codex P2 on PR #49: the previous read-modify-write across
+    // separate calls could interleave two reviewers into an empty
+    // set), executed on the server connection (Codex P1: the
+    // validator stamp is only ever written here, from the
+    // session). Reviewer-edited success measures ride the same
+    // statement via the jsonb overrides map.
+    const admin = createAdminClient();
+    const measuresJson = JSON.stringify(input.measures ?? {});
+    const counts = (await admin`
+      with updated as (
+        update public.opportunity_use_cases uc
+        set status = case when uc.id::text = any(${input.useCaseIds}::text[])
+                          then 'approved' else 'suggested' end,
+            human_validator_id = case when uc.id::text = any(${input.useCaseIds}::text[])
+                          then ${validator} else null end,
+            approved_at = case when uc.id::text = any(${input.useCaseIds}::text[])
+                          then now() else null end,
+            success_metric = coalesce(
+              (${measuresJson}::jsonb -> uc.id::text) ->> 'metric',
+              uc.success_metric),
+            success_target = coalesce(
+              (${measuresJson}::jsonb -> uc.id::text) ->> 'target',
+              uc.success_target)
+        where uc.workspace_id = ${workspaceId}::uuid
+          and uc.opportunity_id = ${opportunityId}::uuid
+          and uc.status in ('suggested', 'approved')
+        returning uc.status
+      )
+      select count(*) filter (where status = 'approved')::int as approved_count
+      from updated
+    `) as unknown as Array<{ approved_count: number }>;
+    const approvedCount = counts[0]?.approved_count ?? 0;
+    if (approvedCount === 0)
       throw Object.assign(new Error("No matching use cases for this lead"), {
         statusCode: 404,
       });
-    // Persist any reviewer-edited success measures for the
-    // approved rows (they ship as the package's successMeasures).
-    for (const [useCaseId, measure] of Object.entries(input.measures ?? {})) {
-      if (!input.useCaseIds.includes(useCaseId)) continue;
-      const { error: measureError } = await client
-        .from("opportunity_use_cases")
-        .update({
-          success_metric: measure.metric,
-          success_target: measure.target,
-        })
-        .eq("workspace_id", workspaceId)
-        .eq("opportunity_id", opportunityId)
-        .eq("id", useCaseId);
-      if (measureError) throw new Error(measureError.message);
-    }
-    // The approved set is exactly the submitted selection: rows
-    // approved earlier but not re-selected revert to suggested.
-    const { data: stillApproved } = await client
-      .from("opportunity_use_cases")
-      .select("id")
-      .eq("workspace_id", workspaceId)
-      .eq("opportunity_id", opportunityId)
-      .eq("status", "approved");
-    const toRevert = ((stillApproved ?? []) as Array<{ id: string }>)
-      .map((row) => row.id)
-      .filter((id) => !input.useCaseIds.includes(id));
-    if (toRevert.length > 0) {
-      const { error: revertError } = await client
-        .from("opportunity_use_cases")
-        .update({ status: "suggested", human_validator_id: null, approved_at: null })
-        .eq("workspace_id", workspaceId)
-        .eq("opportunity_id", opportunityId)
-        .in("id", toRevert);
-      if (revertError) throw new Error(revertError.message);
-    }
     await logWorkspaceEvent(client, workspaceId, {
       action: "opportunity.use_cases_approved",
       resourceType: "opportunities",
       resourceId: opportunityId,
-      reason: `${approvedNow.length} use case(s) approved for handoff by ${validator}; they ship to the Delivery Factory as validated Must requirements.`,
+      reason: `${approvedCount} use case(s) approved for handoff by ${validator}; they ship to the Delivery Factory as validated Must requirements.`,
       after: { approvedUseCaseIds: input.useCaseIds },
     });
-    return json({ data: { approved: approvedNow.length } });
+    return json({ data: { approved: approvedCount } });
   }
 
   // Lead proposals (placement decision 2026-10-14): outreach is
@@ -1719,27 +1706,25 @@ async function authenticatedRoutes(
           })
         : null) ??
       templateProposal({ orgName: org.org_name || org.title, useCases });
-    await client
-      .from("lead_proposals")
-      .update({ status: "superseded" })
-      .eq("workspace_id", workspaceId)
-      .eq("opportunity_id", opportunityId)
-      .eq("status", "draft");
-    const { data: proposal, error: insertError } = await client
-      .from("lead_proposals")
-      .insert({
-        workspace_id: workspaceId,
-        opportunity_id: opportunityId,
-        draft_text: drafted.text,
-        evidence_quotes: drafted.evidenceQuotes,
-        status: "draft",
-        drafted_by: drafted.draftedBy,
-        model: drafted.model,
-      })
-      .select()
-      .single();
-    if (insertError) throw new Error(insertError.message);
-    return json({ data: proposal }, 201);
+    // Proposal writes also go through the server connection
+    // (same boundary as the use-case approvals: SELECT-only for
+    // the member Data API — see migration 202610120011).
+    await admin`
+      update public.lead_proposals set status = 'superseded'
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and status = 'draft'
+    `;
+    const inserted = (await admin`
+      insert into public.lead_proposals (
+        workspace_id, opportunity_id, draft_text, evidence_quotes,
+        status, drafted_by, model)
+      values (${workspaceId}::uuid, ${opportunityId}::uuid,
+        ${drafted.text}, ${JSON.stringify(drafted.evidenceQuotes)}::jsonb,
+        'draft', ${drafted.draftedBy}, ${drafted.model})
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    return json({ data: inserted[0] }, 201);
   }
 
   if (opportunityProposalApprove && request.method === "POST") {
@@ -1777,24 +1762,21 @@ async function authenticatedRoutes(
         { statusCode: 409 },
       );
     const approver = context.user.email ?? context.user.id;
-    const { data: proposal, error: approveError } = await client
-      .from("lead_proposals")
-      .update({
-        draft_text: input.text,
-        status: "approved",
-        approved_by: approver,
-        approved_at: new Date().toISOString(),
-      })
-      .eq("workspace_id", workspaceId)
-      .eq("opportunity_id", opportunityId)
-      .eq("id", input.proposalId)
-      .select()
-      .single();
-    if (approveError || !proposal)
-      throw Object.assign(
-        new Error(approveError?.message ?? "Proposal not found"),
-        { statusCode: 404 },
-      );
+    const admin = createAdminClient();
+    const updatedRows = (await admin`
+      update public.lead_proposals
+      set draft_text = ${input.text}, status = 'approved',
+          approved_by = ${approver}, approved_at = now()
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and id = ${input.proposalId}::uuid
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    const proposal = updatedRows[0];
+    if (!proposal)
+      throw Object.assign(new Error("Proposal not found"), {
+        statusCode: 404,
+      });
     await logWorkspaceEvent(client, workspaceId, {
       action: "opportunity.proposal_approved",
       resourceType: "opportunities",
@@ -1811,34 +1793,32 @@ async function authenticatedRoutes(
     const input = z
       .object({ proposalId: z.string().uuid() })
       .parse(await bodyJson(request));
-    const { data: proposal, error: sendError } = await client
-      .from("lead_proposals")
-      .update({ status: "sent", sent_at: new Date().toISOString() })
-      .eq("workspace_id", workspaceId)
-      .eq("opportunity_id", opportunityId)
-      .eq("id", input.proposalId)
-      .eq("status", "approved")
-      .select()
-      .single();
-    if (sendError || !proposal)
+    const admin = createAdminClient();
+    const sentRows = (await admin`
+      update public.lead_proposals
+      set status = 'sent', sent_at = now()
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and id = ${input.proposalId}::uuid
+        and status = 'approved'
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    const proposal = sentRows[0];
+    if (!proposal)
       throw Object.assign(
         new Error(
-          sendError?.message ??
-            "Proposal not found or not approved — only an approved proposal can be marked sent.",
+          "Proposal not found or not approved — only an approved proposal can be marked sent.",
         ),
         { statusCode: 409 },
       );
-    const { error: feedbackError } = await client
-      .from("lead_feedback")
-      .insert({
-        workspace_id: workspaceId,
-        opportunity_id: opportunityId,
-        reviewer_id: context.user.id,
-        decision: "contacted",
-        reason_code: "PROPOSAL_SENT",
-        notes: "Approved proposal sent by the operator (human-sent from LE).",
-      });
-    if (feedbackError) throw new Error(feedbackError.message);
+    await admin`
+      insert into public.lead_feedback (
+        workspace_id, opportunity_id, reviewer_id, decision,
+        reason_code, notes)
+      values (${workspaceId}::uuid, ${opportunityId}::uuid,
+        ${context.user.id}, 'contacted', 'PROPOSAL_SENT',
+        'Approved proposal sent by the operator (human-sent from LE).')
+    `;
     return json({ data: proposal });
   }
 
@@ -1997,21 +1977,26 @@ async function authenticatedRoutes(
           statusCode: 404,
         });
     }
-    const { data, error } = await client
-      .from("consent_records")
-      .insert({
-        workspace_id: workspaceId,
-        organization_id: input.organizationId ?? null,
-        opportunity_id: input.opportunityId ?? null,
-        basis_type: input.basisType,
-        evidence_reference: input.evidenceReference ?? null,
-        recorded_by: context.user.email ?? context.user.id,
-        notes: input.notes ?? null,
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
-    return json({ data }, 201);
+    // Consent records are gate-trusted (handoff + proposal
+    // approvals rely on them), so the insert goes through the
+    // server connection — the member Data API is SELECT-only on
+    // this table (Codex P1 boundary, PR #49).
+    const admin = createAdminClient();
+    const recordedBy = context.user.email ?? context.user.id;
+    const consentRows = (await admin`
+      insert into public.consent_records (
+        workspace_id, organization_id, opportunity_id, basis_type,
+        evidence_reference, recorded_by, notes)
+      values (${workspaceId}::uuid,
+        ${input.organizationId ?? null}::uuid,
+        ${input.opportunityId ?? null}::uuid,
+        ${input.basisType},
+        ${input.evidenceReference ?? null},
+        ${recordedBy},
+        ${input.notes ?? null})
+      returning *
+    `) as unknown as Array<Record<string, unknown>>;
+    return json({ data: consentRows[0] }, 201);
   }
 
   // Third-party terms acceptance (audit gap 2). Owners/administrators only.

@@ -144,7 +144,7 @@ describe("use-case handoff wiring — source contracts", () => {
 
   it("the use-case table carries explicit Data API privileges (Codex P1)", () => {
     expect(migration).toContain(
-      "grant select, insert, update on public.opportunity_use_cases to authenticated",
+      "grant select on public.opportunity_use_cases to authenticated",
     );
     // The production correction migration carries the same fixes
     // for databases that already ran the original 0009.
@@ -153,13 +153,22 @@ describe("use-case handoff wiring — source contracts", () => {
       "utf8",
     );
     expect(correction).toContain(
-      "grant select, insert, update on public.opportunity_use_cases to authenticated",
+      "grant select on public.opportunity_use_cases to authenticated",
     );
     expect(correction).toContain(
-      "grant select, insert, update on public.consent_records to authenticated",
+      "grant select on public.consent_records to authenticated",
     );
     expect(correction).toContain("status in ('pending', 'failed')");
     expect(correction).toContain("'analyst', 'reviewer'");
+  });
+
+  it("approval writes stay behind the server boundary (Codex P1 + P2)", () => {
+    // Atomic set replacement in ONE statement, on the server client.
+    expect(router).toContain("with updated as (");
+    expect(router).toContain("uc.id::text = any(");
+    // Generation + consent inserts run on the server connection too.
+    expect(router).toContain("insert into public.opportunity_use_cases");
+    expect(router).toContain("insert into public.consent_records");
   });
 
   it("the reviewer who selects use cases can also approve them (Codex P2)", () => {

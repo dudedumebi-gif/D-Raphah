@@ -21,8 +21,17 @@
 alter table public.opportunity_use_cases
   add column if not exists generation_source text not null default 'rules';
 
-grant select, insert, update on public.opportunity_use_cases to authenticated;
-grant select, insert, update on public.consent_records to authenticated;
+-- SELECT only (Codex P1 on PR #49): approval state and the
+-- validator stamp are written exclusively by the API routes over
+-- the server connection. Broad Data API insert/update would let
+-- any operator-role member forge an already-approved row with a
+-- self-chosen human_validator_id, and buildHandoffPackage would
+-- ship it as a validated Must requirement.
+grant select on public.opportunity_use_cases to authenticated;
+-- SELECT only, same boundary: consent records gate both the
+-- handoff and proposal approvals, so they are written only by
+-- the consent route over the server connection.
+grant select on public.consent_records to authenticated;
 
 drop policy if exists opportunity_use_cases_operator_write on public.opportunity_use_cases;
 create policy opportunity_use_cases_operator_write on public.opportunity_use_cases

@@ -65,7 +65,7 @@ create trigger opportunity_use_cases_updated before update on public.opportunity
 -- still needs table privileges or every Data API read/write on the
 -- table fails. The reviewer role is included because approving use
 -- cases IS the reviewer's step in this flow.
-grant select, insert, update on public.opportunity_use_cases to authenticated;
+grant select on public.opportunity_use_cases to authenticated;
 -- Same defect, found while fixing this one: consent_records
 -- (202609260002) never received its Data API privileges either,
 -- although its policies intend member select + operator write and

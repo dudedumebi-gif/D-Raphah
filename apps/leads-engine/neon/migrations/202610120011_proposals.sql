@@ -41,9 +41,11 @@ create policy lead_proposals_operator_write on public.lead_proposals
   for all using (public.has_workspace_role(workspace_id, array['owner', 'administrator', 'analyst', 'reviewer']::public.workspace_role[]))
   with check (public.has_workspace_role(workspace_id, array['owner', 'administrator', 'analyst', 'reviewer']::public.workspace_role[]));
 
--- Explicit Data API privileges (the base-migration rule; their
--- absence in 202610120009 is what broke the Use cases panel).
-grant select, insert, update on public.lead_proposals to authenticated;
+-- Data API privileges: SELECT only. Proposal state transitions
+-- (draft -> approved -> sent) are written by the API routes over
+-- the server connection — approval is consent-gated there, and a
+-- direct Data API write would bypass that gate entirely.
+grant select on public.lead_proposals to authenticated;
 
 create trigger audit_lead_proposals
   after insert or update or delete on public.lead_proposals

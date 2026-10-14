@@ -183,7 +183,7 @@ describe("Proposal migration + route wiring", () => {
   it("the proposal migration ships WITH its Data API grants", () => {
     expect(migration).toContain("create table public.lead_proposals");
     expect(migration).toContain(
-      "grant select, insert, update on public.lead_proposals to authenticated",
+      "grant select on public.lead_proposals to authenticated",
     );
     expect(migration).toContain("audit_lead_proposals");
     expect(migration).toContain("add column if not exists success_metric");
@@ -194,8 +194,9 @@ describe("Proposal migration + route wiring", () => {
     expect(router).toContain("opportunityProposalApprove");
     expect(router).toContain("opportunityProposalSent");
     expect(router).toContain("Record a CASL consent basis for this lead");
-    expect(router).toContain('"contacted"');
-    expect(router).toContain('"PROPOSAL_SENT"');
+    expect(router).toContain("'contacted'");
+    expect(router).toContain("'PROPOSAL_SENT'");
+    expect(router).toContain("insert into public.lead_proposals");
   });
 
   it("the builder no longer hard-codes empty success measures", () => {
