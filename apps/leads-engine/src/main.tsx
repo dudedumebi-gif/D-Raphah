@@ -27,6 +27,11 @@ import {
   type Membership,
   type Session,
 } from "./api";
+import {
+  derivePipelineStage,
+  PIPELINE_STAGES,
+  type PipelineStageId,
+} from "./pipeline-stage";
 import { Settings } from "./CriteriaSettings";
 import { JobBankMarket } from "./JobBankMarket";
 import { JobLiveWindow } from "./JobLiveWindow";
@@ -2258,6 +2263,14 @@ interface HandoffStatusRow {
   dispatched_at: string | null;
 }
 
+/** Per-lead pipeline state from GET /api/v1/leads/pipeline: the raw
+ *  inputs the board derives a stage from (src/pipeline-stage.ts). */
+interface PipelineLeadState {
+  opportunityId: string;
+  proposalStatus: string | null;
+  latestDecision: string | null;
+}
+
 export function Leads({
   data,
   mutate,
@@ -2290,6 +2303,35 @@ export function Leads({
     outcome: "sending" | "landed" | "failed";
     detail: string;
   } | null>(null);
+  // Pipeline board state: per-lead proposal + outcome inputs, and
+  // the List | Board view toggle.
+  const [pipelineByLead, setPipelineByLead] = useState<
+    Record<string, PipelineLeadState>
+  >({});
+  const [leadView, setLeadView] = useState<"list" | "board">("list");
+  const loadPipelineStates = useCallback(async () => {
+    try {
+      const result = await apiRequest<{ data: PipelineLeadState[] }>(
+        session,
+        workspaceId,
+        "/api/v1/leads/pipeline",
+      );
+      const map: Record<string, PipelineLeadState> = {};
+      for (const row of result.data ?? []) map[row.opportunityId] = row;
+      setPipelineByLead(map);
+    } catch {
+      // The board degrades to handoff-derived stages only.
+    }
+  }, [session, workspaceId]);
+  useEffect(() => {
+    void loadPipelineStates();
+    const interval = window.setInterval(
+      () => void loadPipelineStates(),
+      15_000,
+    );
+    return () => window.clearInterval(interval);
+  }, [loadPipelineStates]);
+
   const loadHandoffStatuses = useCallback(async () => {
     try {
       const result = await apiRequest<{ data: HandoffStatusRow[] }>(
@@ -2620,6 +2662,20 @@ export function Leads({
           </div>
           <div className="top-actions">
             <button
+              className="row-action view-toggle"
+              aria-pressed={leadView === "list"}
+              onClick={() => setLeadView("list")}
+            >
+              List
+            </button>
+            <button
+              className="row-action view-toggle"
+              aria-pressed={leadView === "board"}
+              onClick={() => setLeadView("board")}
+            >
+              Board
+            </button>
+            <button
               className="row-action"
               disabled={exporting !== null || data.leads.length === 0}
               onClick={() => void exportLeads("csv")}
@@ -2636,6 +2692,7 @@ export function Leads({
           </div>
         </div>
         {exportError ? <p className="error-text">{exportError}</p> : null}
+        {leadView === "list" ? (
         <LeadTable
           leads={data.leads}
           actions={(lead) => (
@@ -2677,6 +2734,15 @@ export function Leads({
             </>
           )}
         />
+        ) : (
+          <PipelineBoard
+            leads={data.leads}
+            handoffByLead={handoffByLead}
+            pipelineByLead={pipelineByLead}
+            onUseCases={(lead) => void toggleUseCases(lead)}
+            onProposal={(lead) => void toggleProposal(lead)}
+          />
+        )}
         {deliveryBanner ? (
           <div
             className={`delivery-banner delivery-${deliveryBanner.outcome}`}
@@ -3038,6 +3104,101 @@ function LeadTable({
           geography gates.
         </p>
       )}
+    </div>
+  );
+}
+
+function PipelineBoard({
+  leads,
+  handoffByLead,
+  pipelineByLead,
+  onUseCases,
+  onProposal,
+}: {
+  leads: LeadRecord[];
+  handoffByLead: Record<string, HandoffStatusRow>;
+  pipelineByLead: Record<string, PipelineLeadState>;
+  onUseCases: (lead: LeadRecord) => void;
+  onProposal: (lead: LeadRecord) => void;
+}) {
+  const stageOf = (lead: LeadRecord): PipelineStageId =>
+    derivePipelineStage({
+      handoffStatus: handoffByLead[lead.id]?.status ?? null,
+      proposalStatus: pipelineByLead[lead.id]?.proposalStatus ?? null,
+      latestDecision: pipelineByLead[lead.id]?.latestDecision ?? null,
+    });
+  return (
+    <div className="pipeline-board">
+      {PIPELINE_STAGES.map((stage) => {
+        const inStage = leads.filter((lead) => stageOf(lead) === stage.id);
+        return (
+          <div className="pipeline-col" key={stage.id}>
+            <div className="pipeline-col-head">
+              <b>{stage.label}</b>
+              <span>
+                {inStage.length} ·{" "}
+                {inStage.reduce(
+                  (sum, lead) => sum + lead.opportunity_score,
+                  0,
+                )}{" "}
+                pts
+              </span>
+            </div>
+            {inStage.map((lead) => {
+              const org = Array.isArray(lead.organizations)
+                ? lead.organizations[0]
+                : lead.organizations;
+              const state = pipelineByLead[lead.id];
+              const atDf = handoffByLead[lead.id]?.status === "sent";
+              return (
+                <div className="pipeline-card" key={lead.id}>
+                  <div className="op-name">
+                    <span className="avatar">
+                      {(org?.name ?? lead.title).slice(0, 2).toUpperCase()}
+                    </span>
+                    <div>
+                      <b>{org?.name ?? lead.title}</b>
+                      <small>{org?.normalized_domain ?? lead.routing}</small>
+                    </div>
+                  </div>
+                  <p className="pipeline-card-meta">
+                    Opportunity <b>{lead.opportunity_score}</b> · confidence{" "}
+                    <b>{Math.round(lead.confidence * 100)}%</b>
+                  </p>
+                  <p className="pipeline-card-status">
+                    {atDf ? (
+                      <span className="badge status-success">At DF ✓</span>
+                    ) : state?.proposalStatus ? (
+                      <>Proposal: {state.proposalStatus}</>
+                    ) : state?.latestDecision ? (
+                      <>Last outcome: {state.latestDecision}</>
+                    ) : (
+                      "Awaiting review"
+                    )}
+                  </p>
+                  <div className="pipeline-card-actions">
+                    <button
+                      className="row-action"
+                      onClick={() => onUseCases(lead)}
+                    >
+                      Use cases
+                    </button>
+                    <button
+                      className="row-action"
+                      onClick={() => onProposal(lead)}
+                    >
+                      Proposal
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {inStage.length === 0 ? (
+              <p className="empty-state">No leads in this stage.</p>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }

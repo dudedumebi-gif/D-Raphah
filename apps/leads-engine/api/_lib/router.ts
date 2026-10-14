@@ -1312,6 +1312,38 @@ async function authenticatedRoutes(
     if (error) throw new Error(error.message);
     return json({ data });
   }
+  // --- Lead pipeline board: the per-lead proposal + latest-outcome
+  // state the board derives stages from (src/pipeline-stage.ts).
+  // Read-only over the server connection; scoping is the
+  // opportunity's workspace (proposals and feedback hang off the
+  // opportunity, and their inserts enforce the same workspace), so
+  // no cross-tenant state can leak into the board.
+  if (pathname === "/api/v1/leads/pipeline" && request.method === "GET") {
+    const adminSql = getAdminDatabaseClient();
+    if (!adminSql)
+      throw new Error("Server database client is not configured.");
+    const stateRows = await adminSql`
+      select o.id as opportunity_id,
+        (select p.status from public.lead_proposals p
+          where p.opportunity_id = o.id
+          order by p.created_at desc limit 1) as proposal_status,
+        (select f.decision from public.lead_feedback f
+          where f.opportunity_id = o.id
+          order by f.created_at desc limit 1) as latest_decision
+      from public.opportunities o
+      where o.workspace_id = ${workspaceId}::uuid and o.status = 'active'`;
+    return json({
+      data: (stateRows as Array<Record<string, unknown>>).map((row) => ({
+        opportunityId: String(row.opportunity_id),
+        proposalStatus: row.proposal_status
+          ? String(row.proposal_status)
+          : null,
+        latestDecision: row.latest_decision
+          ? String(row.latest_decision)
+          : null,
+      })),
+    });
+  }
   // --- Lead-vision gap 2: lead export. Reuses the list endpoint's
   // filters/joins (same query shape pre-serialization), capped at
   // EXPORT_MAX_LEADS, and writes an audit entry via log_workspace_event.
