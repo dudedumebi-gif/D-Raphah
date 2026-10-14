@@ -107,7 +107,10 @@ const SourceInputSchema = z.object({
 
 const ManualJobSchema = z.object({
   sourceId: z.string().uuid(),
-  targetUrl: z.string().url(),
+  // Optional: the campaign card's "Re-queue scrape" sends only a
+  // sourceId and means "scrape the source's base URL again"; the
+  // route falls back to the source's base_url when it is omitted.
+  targetUrl: z.string().url().optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
 });
 
@@ -1175,7 +1178,7 @@ async function authenticatedRoutes(
     const { data, error } = await client.rpc("queue_scrape_job", {
       p_workspace_id: workspaceId,
       p_source_id: input.sourceId,
-      p_target_url: input.targetUrl,
+      p_target_url: input.targetUrl ?? source.base_url,
       p_key: idempotency,
       p_max_attempts: input.maxAttempts,
     });
