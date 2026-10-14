@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildRescorePayload,
   computeRescore,
   effectiveCriteria,
   rescoreFingerprint,
@@ -138,6 +139,35 @@ describe("computeRescore", () => {
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+describe("rescore payload — the WellÜ failure (2026-10-14)", () => {
+  it("omits marketSignal entirely when the clinic's city has no market", () => {
+    const computed = computeRescore({
+      observations: observationsFrom(CLINIC_TEXT),
+      text: CLINIC_TEXT,
+      criteria: effectiveCriteria({}, {}),
+      market: null,
+      geoEligible: true,
+    });
+    const payload = buildRescorePayload(computed, effectiveCriteria({}, {}));
+    // An explicit JSON null here becomes jsonb 'null' in Postgres —
+    // not SQL NULL — and rescore_scrape_result would insert a
+    // NULL-coded signal observation (the production failure).
+    expect(JSON.stringify(payload)).not.toContain("marketSignal");
+  });
+
+  it("includes the market signal when a market exists", () => {
+    const computed = computeRescore({
+      observations: observationsFrom(CLINIC_TEXT),
+      text: CLINIC_TEXT,
+      criteria: effectiveCriteria({}, {}),
+      market: MARKET,
+      geoEligible: true,
+    });
+    const payload = buildRescorePayload(computed, effectiveCriteria({}, {}));
+    expect(JSON.stringify(payload)).toContain(JOB_BANK_MARKET_SIGNAL_CODE);
+  });
+});
 
 describe("rescore payload hygiene", () => {
   it("sanitizes the payload before the jsonb cast", () => {

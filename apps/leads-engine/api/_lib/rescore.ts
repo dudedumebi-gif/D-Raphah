@@ -243,6 +243,32 @@ async function computeForRow(
   return computeRescore({ observations, text, criteria, market, geoEligible });
 }
 
+/**
+ * The jsonb payload shipped to rescore_scrape_result. A null
+ * marketSignal is OMITTED, never serialized: in Postgres,
+ * payload->'marketSignal' over an explicit JSON null yields jsonb
+ * 'null', which is NOT SQL NULL — the function's `m is not null`
+ * guard passes and its observation insert writes a NULL code.
+ * That is the exact failure that killed every v3 pass at the
+ * first clinic whose city has no Job Bank market (WellÜ,
+ * 2026-10-14). Clinics WITH a market were unaffected, which is
+ * why the pass always died at the same row.
+ */
+export function buildRescorePayload(
+  computed: ComputedRescore,
+  criteria: LeadCriteria,
+): Record<string, unknown> {
+  return {
+    signals: computed.signals,
+    ...(computed.marketSignal
+      ? { marketSignal: computed.marketSignal }
+      : {}),
+    criteria,
+    score: computed.score,
+    fingerprint: computed.fingerprint,
+  };
+}
+
 export interface RescoreBatchResult {
   total: number;
   rescanned: number;
@@ -285,13 +311,7 @@ export async function rescoreCampaignBatch(
       remaining += 1;
       continue;
     }
-    const payload = {
-      signals: computed.signals,
-      marketSignal: computed.marketSignal,
-      criteria,
-      score: computed.score,
-      fingerprint: computed.fingerprint,
-    };
+    const payload = buildRescorePayload(computed, criteria);
     let result: Array<{ result: { qualified: boolean } }>;
     try {
       result = (await client`
