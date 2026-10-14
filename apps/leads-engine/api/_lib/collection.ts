@@ -449,8 +449,14 @@ export async function geocodeAddress(
   }
 }
 
-function truncateChars(text: string, maxChars: number): string {
-  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+export function truncateChars(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  let end = maxChars;
+  // Never split a surrogate pair: a slice ending on a lone high
+  // surrogate poisons downstream jsonb persistence.
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
 }
 
 export interface CollectUrlOptions {
