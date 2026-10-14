@@ -2259,6 +2259,7 @@ interface ProposalData {
 interface HandoffStatusRow {
   id: string;
   idempotency_key: string;
+  opportunity_id: string | null;
   status: string;
   attempts: number;
   last_error: string | null;
@@ -2351,7 +2352,11 @@ export function Leads({
       );
       const map: Record<string, HandoffStatusRow> = {};
       for (const row of result.data ?? []) {
-        const opportunityId = row.idempotency_key.split(":").pop() ?? "";
+        // The server derives opportunity_id from the stored
+        // package; the key text is caller-controlled and is only a
+        // legacy fallback for rows that predate the derivation.
+        const opportunityId =
+          row.opportunity_id ?? row.idempotency_key.split(":").pop() ?? "";
         // Rows arrive newest-first; the first per opportunity wins.
         if (opportunityId && !map[opportunityId]) map[opportunityId] = row;
       }

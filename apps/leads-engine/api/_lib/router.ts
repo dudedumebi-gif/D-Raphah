@@ -1318,6 +1318,11 @@ async function authenticatedRoutes(
   // rather than coming from GET /handoffs: that list is capped at
   // 200 rows newest-first, so an older landed handoff could fall
   // outside the window and the board would misclassify the lead.
+  // The outbox row is associated through its stored package's
+  // opportunityId (+ workspace), never by parsing the
+  // caller-controlled idempotency key, whose format is free-form
+  // (the supported custom key need not contain the id after a
+  // colon at all).
   // Read-only over the server connection; scoping is the
   // opportunity's workspace (proposals and feedback hang off the
   // opportunity, and their inserts enforce the same workspace), so
@@ -1333,7 +1338,8 @@ async function authenticatedRoutes(
           where f.opportunity_id = o.id
           order by f.created_at desc limit 1) as latest_decision,
         (select h.status from public.handoff_outbox h
-          where h.idempotency_key like '%:' || o.id::text
+          where h.workspace_id = ${workspaceId}::uuid
+            and h.package->>'opportunityId' = o.id::text
           order by h.created_at desc limit 1) as handoff_status
       from public.opportunities o
       where o.workspace_id = ${workspaceId}::uuid and o.status = 'active'`;
@@ -1952,13 +1958,14 @@ async function authenticatedRoutes(
 
   // Delivery status for handoffs: the outbox row is the delivery
   // truth (pending/retrying, sent = DF accepted, failed = terminal).
-  // The leads UI maps rows to opportunities via the idempotency key
-  // suffix and shows a per-lead delivery chip + confirmation.
+  // The leads UI maps rows to opportunities via the opportunity_id
+  // derived here from the stored package (the idempotency key is
+  // caller-controlled free-form text and is never parsed).
   if (pathname === "/api/v1/handoffs" && request.method === "GET") {
     const { data, error } = await client
       .from("handoff_outbox")
       .select(
-        "id, idempotency_key, status, attempts, last_error, dispatched_at, created_at, updated_at",
+        "id, idempotency_key, status, attempts, last_error, dispatched_at, created_at, updated_at, opportunity_id:package->>opportunityId",
       )
       .eq("workspace_id", workspaceId)
       .order("created_at", { ascending: false })

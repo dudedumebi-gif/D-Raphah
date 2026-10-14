@@ -156,6 +156,13 @@ describe("pipeline wiring", () => {
     // capped at 200 rows, too small a window to classify from.
     expect(router).toContain("from public.handoff_outbox");
     expect(router).toContain("handoffStatus");
+    // Associated through the stored package's opportunityId and
+    // the workspace — never by parsing the caller-controlled
+    // idempotency key (custom keys need not embed the id at all).
+    expect(router).toContain("package->>'opportunityId'");
+    expect(router).not.toContain("idempotency_key like");
+    expect(router).toContain("opportunity_id:package->>opportunityId");
+    expect(main).toContain("row.opportunity_id");
   });
 
   it("the board discloses pipeline load failure instead of faking Qualified", () => {
