@@ -3167,9 +3167,14 @@ function PipelineBoard({
       {PIPELINE_STAGES.map((stage) => {
         const inStage = leads.filter((lead) => stageOf(lead) === stage.id);
         return (
-          <div className="pipeline-col" key={stage.id}>
+          <div
+            className={`pipeline-col pipeline-col--${stage.id}`}
+            key={stage.id}
+          >
             <div className="pipeline-col-head">
-              <b>{stage.label}</b>
+              <b>
+                <span className="pipeline-dot" /> {stage.label}
+              </b>
               <span>
                 {inStage.length} ·{" "}
                 {inStage.reduce(
