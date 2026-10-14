@@ -257,7 +257,11 @@ async function persistEvidenceAndLead(
   // campaign's configured targets, which would credit a clinic with a
   // market it was never shown to be in.
   const marketCity = geography.city;
-  if (marketCity && criteria.jobBankMarketStrength > 0) {
+  if (
+    marketCity &&
+    criteria.jobBankMarketStrength > 0 &&
+    (await jobBankSourceApproved(client))
+  ) {
     const market = await lookupJobBankMarket(client, marketCity);
     if (market) {
       signals.push(

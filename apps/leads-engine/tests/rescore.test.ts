@@ -129,3 +129,33 @@ describe("computeRescore", () => {
     );
   });
 });
+
+// The real pass ships its payload to Postgres as jsonb; stored
+// excerpts can carry characters jsonb rejects (U+0000, unpaired
+// surrogates — the PR #43 defect class). The dry-run never sends
+// the payload, which is why it succeeded while the real pass failed
+// partway in production. Pin the sanitize step at the call site.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+describe("rescore payload hygiene", () => {
+  it("sanitizes the payload before the jsonb cast", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "../api/_lib/rescore.ts"), "utf8");
+    expect(source).toContain(
+      "JSON.stringify(sanitizePayloadStrings(payload))",
+    );
+  });
+});
+
+describe("Job Bank gate governs scoring, not just the refresh", () => {
+  it("both scoring paths consult jobBankSourceApproved before the lookup", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const rescore = readFileSync(join(here, "../api/_lib/rescore.ts"), "utf8");
+    const worker = readFileSync(join(here, "../api/_lib/worker.ts"), "utf8");
+    expect(rescore).toContain("jobBankSourceApproved(client)");
+    expect(rescore).toContain("jbGateOpen");
+    expect(worker).toContain("(await jobBankSourceApproved(client))");
+  });
+});

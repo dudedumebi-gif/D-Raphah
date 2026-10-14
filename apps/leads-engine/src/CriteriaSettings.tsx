@@ -532,7 +532,7 @@ function CampaignSettings({
           </button>
         </div>
       ) : null}
-      <div className="requeue-row">
+      <div className="rescore-block">
         <p className="muted">
           Re-score this campaign&apos;s stored assessments from their
           stored evidence — no re-scraping. Run a dry-run first: it
@@ -547,6 +547,7 @@ function CampaignSettings({
             </>
           ) : null}
         </p>
+        <div className="rescore-controls">
         <label>
           Threshold (this run)
           <input
@@ -583,9 +584,10 @@ function CampaignSettings({
         >
           {rescoring ? "Rescoring…" : "Rescore assessments"}
         </button>
+        </div>
       </div>
       {dryRun ? (
-        <div className="requeue-row">
+        <div className="rescore-block">
           <p className="muted">
             Dry-run at threshold {dryRun.threshold} / strength{" "}
             {dryRun.marketStrength}: {dryRun.projectedQualified} of{" "}

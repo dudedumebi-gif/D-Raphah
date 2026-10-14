@@ -118,10 +118,19 @@ describe("archive migration + call-site contract", () => {
     );
   });
 
-  it("guards on a literal ANY array and routes call the RPCs via admin", () => {
-    expect(migration).toContain(
-      "status = any(array['queued', 'leased', 'running', 'retrying'])",
+  it("guards with enum-safe literals and routes call the RPCs via admin", () => {
+    // job_status is an ENUM: comparing it to a text[] (the original
+    // ANY(array[...]) shape) is SQLSTATE 42883 in production. The
+    // guard uses bare literals, which coerce to the enum — pinned
+    // here against migration 202610120008, which carries the fix.
+    const fix = readFileSync(
+      join(here, "../neon/migrations/202610120008_fix_source_retire_enum.sql"),
+      "utf8",
     );
+    expect(fix).toContain(
+      "status in ('queued', 'leased', 'running', 'retrying')",
+    );
+    expect(fix).not.toContain("any(array[");
     expect(router).not.toContain("status in ${");
     expect(router).toContain("public.set_source_retired(");
     expect(router).toContain("public.set_campaign_retired(");
