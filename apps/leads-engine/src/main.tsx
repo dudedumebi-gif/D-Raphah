@@ -27,6 +27,13 @@ import {
   type Membership,
   type Session,
 } from "./api";
+import {
+  derivePipelineStage,
+  pipelineCardStatus,
+  PIPELINE_STAGES,
+  type PipelineStageId,
+  type PipelineStageInputs,
+} from "./pipeline-stage";
 import { Settings } from "./CriteriaSettings";
 import { JobBankMarket } from "./JobBankMarket";
 import { JobLiveWindow } from "./JobLiveWindow";
@@ -2252,10 +2259,20 @@ interface ProposalData {
 interface HandoffStatusRow {
   id: string;
   idempotency_key: string;
+  opportunity_id: string | null;
   status: string;
   attempts: number;
   last_error: string | null;
   dispatched_at: string | null;
+}
+
+/** Per-lead pipeline state from GET /api/v1/leads/pipeline: the raw
+ *  inputs the board derives a stage from (src/pipeline-stage.ts). */
+interface PipelineLeadState {
+  opportunityId: string;
+  proposalStatus: string | null;
+  latestDecision: string | null;
+  handoffStatus: string | null;
 }
 
 export function Leads({
@@ -2290,6 +2307,42 @@ export function Leads({
     outcome: "sending" | "landed" | "failed";
     detail: string;
   } | null>(null);
+  // Pipeline board state: per-lead proposal + outcome inputs, and
+  // the List | Board view toggle.
+  const [pipelineByLead, setPipelineByLead] = useState<
+    Record<string, PipelineLeadState>
+  >({});
+  const [leadView, setLeadView] = useState<"list" | "board">("list");
+  // Pipeline load health: a failed load must never masquerade as
+  // "every lead is Qualified" — the board discloses it and keeps
+  // the last successful state.
+  const [pipelineStatus, setPipelineStatus] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
+  const loadPipelineStates = useCallback(async () => {
+    try {
+      const result = await apiRequest<{ data: PipelineLeadState[] }>(
+        session,
+        workspaceId,
+        "/api/v1/leads/pipeline",
+      );
+      const map: Record<string, PipelineLeadState> = {};
+      for (const row of result.data ?? []) map[row.opportunityId] = row;
+      setPipelineByLead(map);
+      setPipelineStatus("ready");
+    } catch {
+      setPipelineStatus("error");
+    }
+  }, [session, workspaceId]);
+  useEffect(() => {
+    void loadPipelineStates();
+    const interval = window.setInterval(
+      () => void loadPipelineStates(),
+      15_000,
+    );
+    return () => window.clearInterval(interval);
+  }, [loadPipelineStates]);
+
   const loadHandoffStatuses = useCallback(async () => {
     try {
       const result = await apiRequest<{ data: HandoffStatusRow[] }>(
@@ -2299,7 +2352,11 @@ export function Leads({
       );
       const map: Record<string, HandoffStatusRow> = {};
       for (const row of result.data ?? []) {
-        const opportunityId = row.idempotency_key.split(":").pop() ?? "";
+        // The server derives opportunity_id from the stored
+        // package; the key text is caller-controlled and is only a
+        // legacy fallback for rows that predate the derivation.
+        const opportunityId =
+          row.opportunity_id ?? row.idempotency_key.split(":").pop() ?? "";
         // Rows arrive newest-first; the first per opportunity wins.
         if (opportunityId && !map[opportunityId]) map[opportunityId] = row;
       }
@@ -2620,6 +2677,20 @@ export function Leads({
           </div>
           <div className="top-actions">
             <button
+              className="row-action view-toggle"
+              aria-pressed={leadView === "list"}
+              onClick={() => setLeadView("list")}
+            >
+              List
+            </button>
+            <button
+              className="row-action view-toggle"
+              aria-pressed={leadView === "board"}
+              onClick={() => setLeadView("board")}
+            >
+              Board
+            </button>
+            <button
               className="row-action"
               disabled={exporting !== null || data.leads.length === 0}
               onClick={() => void exportLeads("csv")}
@@ -2636,6 +2707,7 @@ export function Leads({
           </div>
         </div>
         {exportError ? <p className="error-text">{exportError}</p> : null}
+        {leadView === "list" ? (
         <LeadTable
           leads={data.leads}
           actions={(lead) => (
@@ -2677,6 +2749,29 @@ export function Leads({
             </>
           )}
         />
+        ) : (
+          <>
+          {pipelineStatus === "loading" ? (
+            <p className="pipeline-notice">Loading pipeline state…</p>
+          ) : null}
+          {pipelineStatus === "error" ? (
+            <p className="pipeline-notice pipeline-notice-error">
+              Pipeline state could not be loaded
+              {Object.keys(pipelineByLead).length > 0
+                ? " — showing the last known state"
+                : ""}
+              . Stages may be incomplete; retrying automatically.
+            </p>
+          ) : null}
+          <PipelineBoard
+            leads={data.leads}
+            handoffByLead={handoffByLead}
+            pipelineByLead={pipelineByLead}
+            onUseCases={(lead) => void toggleUseCases(lead)}
+            onProposal={(lead) => void toggleProposal(lead)}
+          />
+          </>
+        )}
         {deliveryBanner ? (
           <div
             className={`delivery-banner delivery-${deliveryBanner.outcome}`}
@@ -3038,6 +3133,108 @@ function LeadTable({
           geography gates.
         </p>
       )}
+    </div>
+  );
+}
+
+function PipelineBoard({
+  leads,
+  handoffByLead,
+  pipelineByLead,
+  onUseCases,
+  onProposal,
+}: {
+  leads: LeadRecord[];
+  handoffByLead: Record<string, HandoffStatusRow>;
+  pipelineByLead: Record<string, PipelineLeadState>;
+  onUseCases: (lead: LeadRecord) => void;
+  onProposal: (lead: LeadRecord) => void;
+}) {
+  const inputsOf = (lead: LeadRecord): PipelineStageInputs => ({
+    // The pipeline endpoint carries the complete per-lead handoff
+    // status; the /handoffs map (capped at 200 rows) is a fallback.
+    handoffStatus:
+      pipelineByLead[lead.id]?.handoffStatus ??
+      handoffByLead[lead.id]?.status ??
+      null,
+    proposalStatus: pipelineByLead[lead.id]?.proposalStatus ?? null,
+    latestDecision: pipelineByLead[lead.id]?.latestDecision ?? null,
+  });
+  const stageOf = (lead: LeadRecord): PipelineStageId =>
+    derivePipelineStage(inputsOf(lead));
+  return (
+    <div className="pipeline-board">
+      {PIPELINE_STAGES.map((stage) => {
+        const inStage = leads.filter((lead) => stageOf(lead) === stage.id);
+        return (
+          <div className="pipeline-col" key={stage.id}>
+            <div className="pipeline-col-head">
+              <b>{stage.label}</b>
+              <span>
+                {inStage.length} ·{" "}
+                {inStage.reduce(
+                  (sum, lead) => sum + lead.opportunity_score,
+                  0,
+                )}{" "}
+                pts
+              </span>
+            </div>
+            {inStage.map((lead) => {
+              const org = Array.isArray(lead.organizations)
+                ? lead.organizations[0]
+                : lead.organizations;
+              const cardStatus = pipelineCardStatus(inputsOf(lead));
+              return (
+                <div className="pipeline-card" key={lead.id}>
+                  <div className="op-name">
+                    <span className="avatar">
+                      {(org?.name ?? lead.title).slice(0, 2).toUpperCase()}
+                    </span>
+                    <div>
+                      <b>{org?.name ?? lead.title}</b>
+                      <small>{org?.normalized_domain ?? lead.routing}</small>
+                    </div>
+                  </div>
+                  <p className="pipeline-card-meta">
+                    Opportunity <b>{lead.opportunity_score}</b> · confidence{" "}
+                    <b>{Math.round(lead.confidence * 100)}%</b>
+                  </p>
+                  <p className="pipeline-card-status">
+                    {cardStatus.kind === "outcome" ? (
+                      <>Last outcome: {cardStatus.decision}</>
+                    ) : cardStatus.kind === "at_df" ? (
+                      <span className="badge status-success">At DF ✓</span>
+                    ) : cardStatus.kind === "proposal" ? (
+                      <>Proposal: {cardStatus.status}</>
+                    ) : cardStatus.kind === "decision" ? (
+                      <>Last outcome: {cardStatus.decision}</>
+                    ) : (
+                      "Awaiting review"
+                    )}
+                  </p>
+                  <div className="pipeline-card-actions">
+                    <button
+                      className="row-action"
+                      onClick={() => onUseCases(lead)}
+                    >
+                      Use cases
+                    </button>
+                    <button
+                      className="row-action"
+                      onClick={() => onProposal(lead)}
+                    >
+                      Proposal
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {inStage.length === 0 ? (
+              <p className="empty-state">No leads in this stage.</p>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }

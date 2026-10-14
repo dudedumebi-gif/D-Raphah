@@ -610,3 +610,60 @@ button {
   margin: 0 0 12px;
   font-size: 0.9rem;
 }
+
+/* Lead pipeline board (Pipedrive-style stage columns). */
+.pipeline-board {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  align-items: flex-start;
+  padding: 4px 2px 10px;
+}
+.pipeline-col {
+  flex: 0 0 242px;
+  background: #f6f7f9;
+  border: 1px solid #e3e6eb;
+  border-radius: 10px;
+  padding: 10px;
+}
+.pipeline-col-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+.pipeline-col-head span {
+  color: #667085;
+  font-size: 12px;
+}
+.pipeline-card {
+  background: #fff;
+  border: 1px solid #e3e6eb;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+.pipeline-card-meta,
+.pipeline-card-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #475467;
+}
+.pipeline-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.view-toggle[aria-pressed="true"] {
+  background: #101828;
+  color: #fff;
+}
+
+.pipeline-notice {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  color: #475467;
+}
+.pipeline-notice-error {
+  color: #b42318;
+}
