@@ -104,6 +104,24 @@ describe("mapUseCaseToRequirement — the DF freeze gate shape", () => {
     expect(() => RequirementSchema.parse(requirement)).not.toThrow();
   });
 
+  it("normalizes Date timestamps from the Neon driver to ISO strings", () => {
+    // Production regression (2026-10-14): the Neon SQL driver
+    // returns timestamptz as Date objects; the contract schema
+    // requires strings, and Send to DF failed on exactly this.
+    const requirement = mapUseCaseToRequirement(
+      {
+        ...row,
+        created_at: new Date("2026-10-14T13:00:00.000Z"),
+        updated_at: new Date("2026-10-14T13:05:00.000Z"),
+      },
+      "opp-1",
+      null,
+    );
+    expect(requirement.createdAt).toBe("2026-10-14T13:00:00.000Z");
+    expect(requirement.updatedAt).toBe("2026-10-14T13:05:00.000Z");
+    expect(() => RequirementSchema.parse(requirement)).not.toThrow();
+  });
+
   it("satisfies the freeze rule for Must requirements", () => {
     const requirement = mapUseCaseToRequirement(row, "opp-1", null);
     expect(requirement.priority).toBe("must");
@@ -167,6 +185,17 @@ describe("use-case handoff wiring — source contracts", () => {
     expect(correction).toContain(
       "revoke insert, update on public.consent_records from authenticated",
     );
+  });
+
+  it("the feedback route records decisions server-side (production 500 fix)", () => {
+    const at = router.indexOf("leadFeedback &&");
+    const block = router.slice(at, at + 2600);
+    expect(block).toContain("insert into public.lead_feedback");
+    expect(block).toContain("Could not record the review decision");
+    // The privileged insert re-checks the opportunity's workspace
+    // (the guarantee the bypassed RLS policy used to provide).
+    expect(block).toContain("and workspace_id = ${workspaceId}::uuid");
+    expect(block).toContain('"Opportunity not found"');
   });
 
   it("approval writes stay behind the server boundary (Codex P1 + P2)", () => {

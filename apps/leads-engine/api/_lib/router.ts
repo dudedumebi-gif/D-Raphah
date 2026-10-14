@@ -1367,20 +1367,46 @@ async function authenticatedRoutes(
         notes: z.string().max(2_000).optional(),
       })
       .parse(await bodyJson(request));
-    const { data, error } = await client
-      .from("lead_feedback")
-      .insert({
-        workspace_id: workspaceId,
-        opportunity_id: leadFeedback[1],
-        reviewer_id: context.user.id,
-        decision: input.decision,
-        reason_code: input.reasonCode,
-        notes: input.notes,
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
-    return json({ data }, 201);
+    // Server-side insert (same boundary as the other approval-
+    // bearing writes): the Data API path depends on the INSERT
+    // policy's reviewer_id = auth.user_id() comparison, which
+    // failed in production with a masked 500. The reviewer is
+    // taken from the verified session here. Failures surface
+    // their real message to the operator instead of a masked 500.
+    const admin = createAdminClient();
+    // The admin connection bypasses RLS, so the workspace scope
+    // the old Data API policy enforced (an opportunity may only
+    // receive feedback inside its own workspace) is restored
+    // explicitly (Codex on PR #50): a foreign opportunity id is
+    // a 404, never a cross-tenant insert or an existence oracle.
+    const opportunityRows = (await admin`
+      select id from public.opportunities
+      where id = ${leadFeedback[1]}::uuid
+        and workspace_id = ${workspaceId}::uuid
+    `) as unknown as Array<{ id: string }>;
+    if (opportunityRows.length === 0)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    try {
+      const rows = (await admin`
+        insert into public.lead_feedback (
+          workspace_id, opportunity_id, reviewer_id, decision,
+          reason_code, notes)
+        values (${workspaceId}::uuid, ${leadFeedback[1]}::uuid,
+          ${context.user.id}, ${input.decision}, ${input.reasonCode},
+          ${input.notes ?? null})
+        returning *
+      `) as unknown as Array<Record<string, unknown>>;
+      return json({ data: rows[0] }, 201);
+    } catch (error) {
+      throw Object.assign(
+        new Error(
+          `Could not record the review decision: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+        { statusCode: 422 },
+      );
+    }
   }
 
   // Reviewer-validated use cases (migration 202610120009): the

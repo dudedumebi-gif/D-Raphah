@@ -316,10 +316,17 @@ export interface ApprovedUseCaseRow {
   statement: string;
   acceptance_criteria: string[] | unknown;
   human_validator_id: string | null;
-  created_at: string;
-  updated_at: string;
+  /** The Neon SQL driver returns timestamptz as Date objects;
+   *  the tests' stubs historically returned strings — accept both. */
+  created_at: string | Date;
+  updated_at: string | Date;
   success_metric?: string | null;
   success_target?: string | null;
+}
+
+/** Contract timestamps are ISO strings; DB rows may carry Dates. */
+export function toIsoTimestamp(value: string | Date): string {
+  return value instanceof Date ? value.toISOString() : value;
 }
 
 /**
@@ -348,8 +355,8 @@ export function mapUseCaseToRequirement(
     humanValidatorId: row.human_validator_id ?? undefined,
     acceptanceCriteria: criteria,
     blockingQuestions: [],
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: toIsoTimestamp(row.created_at),
+    updatedAt: toIsoTimestamp(row.updated_at),
   };
 }
 
