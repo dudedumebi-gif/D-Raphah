@@ -292,11 +292,25 @@ export async function rescoreCampaignBatch(
       score: computed.score,
       fingerprint: computed.fingerprint,
     };
-    const result = (await client`
-      select public.rescore_scrape_result(
-        ${row.id}::uuid, ${JSON.stringify(sanitizePayloadStrings(payload))}::jsonb
-      ) as result
-    `) as unknown as Array<{ result: { qualified: boolean } }>;
+    let result: Array<{ result: { qualified: boolean } }>;
+    try {
+      result = (await client`
+        select public.rescore_scrape_result(
+          ${row.id}::uuid, ${JSON.stringify(sanitizePayloadStrings(payload))}::jsonb
+        ) as result
+      `) as unknown as typeof result;
+    } catch (error) {
+      // Surface the failing row and the real database message as a
+      // 422: the router masks 500s, and a masked failure cost two
+      // blind diagnosis rounds in production (2026-10-13).
+      const detail = error instanceof Error ? error.message : String(error);
+      throw Object.assign(
+        new Error(
+          `Rescore failed at ${row.org_name} (assessment ${row.id}): ${detail}`,
+        ),
+        { statusCode: 422 },
+      );
+    }
     const qualifiedNow = result[0]?.result?.qualified ?? computed.score.qualified;
     if (qualifiedNow && !row.current_qualified) newlyQualified += 1;
     if (!qualifiedNow && row.current_qualified) unqualified += 1;
