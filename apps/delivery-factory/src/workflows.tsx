@@ -124,6 +124,8 @@ function WorkflowList(props: {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     setLoading(true);
@@ -138,7 +140,48 @@ function WorkflowList(props: {
         setError(e instanceof Error ? e.message : "Failed to load"),
       )
       .finally(() => setLoading(false));
-  }, [props.refreshToken, props.environment]);
+  }, [props.refreshToken, props.environment, reloadTick]);
+
+  // Retire actions (the API has always supported them; the list
+  // never exposed them, so stray drafts — the auto-created
+  // "Untitled workflow" rows — could not be cleaned up from here).
+  // Archive flips the status and keeps the workflow listed;
+  // Delete is offered only for drafts and archived workflows —
+  // a published workflow is archived first, never deleted live.
+  async function archiveFromList(w: WorkflowSummary) {
+    setBusyId(w.id);
+    setError(null);
+    try {
+      await api(`/api/workflows/${w.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ action: "archive" }),
+      });
+      setReloadTick((n) => n + 1);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Archive failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function deleteFromList(w: WorkflowSummary) {
+    if (
+      !window.confirm(
+        `Delete "${w.name}" permanently? This cannot be undone.`,
+      )
+    )
+      return;
+    setBusyId(w.id);
+    setError(null);
+    try {
+      await api(`/api/workflows/${w.id}`, { method: "DELETE" });
+      setReloadTick((n) => n + 1);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   return (
     <div className="wf-list">
@@ -173,18 +216,41 @@ function WorkflowList(props: {
       )}
       <div className="wf-cards">
         {workflows.map((w) => (
-          <button
-            key={w.id}
-            className="wf-card"
-            onClick={() => props.onOpen(w.id)}
-          >
-            <span className={`wf-badge wf-badge-${w.status}`}>{w.status}</span>
-            <span className="wf-card-name">{w.name}</span>
-            <span className="wf-card-meta">
-              {w.trigger_type} · {w.environment} · updated{" "}
-              {new Date(w.updated_at).toLocaleString()}
-            </span>
-          </button>
+          <div key={w.id} className="wf-card">
+            <button
+              className="wf-card-open"
+              onClick={() => props.onOpen(w.id)}
+            >
+              <span className={`wf-badge wf-badge-${w.status}`}>
+                {w.status}
+              </span>
+              <span className="wf-card-name">{w.name}</span>
+              <span className="wf-card-meta">
+                {w.trigger_type} · {w.environment} · updated{" "}
+                {new Date(w.updated_at).toLocaleString()}
+              </span>
+            </button>
+            <div className="wf-card-actions">
+              {w.status !== "archived" && (
+                <button
+                  className="btn-ghost"
+                  disabled={busyId === w.id}
+                  onClick={() => void archiveFromList(w)}
+                >
+                  Archive
+                </button>
+              )}
+              {(w.status === "draft" || w.status === "archived") && (
+                <button
+                  className="btn-ghost wf-action-danger"
+                  disabled={busyId === w.id}
+                  onClick={() => void deleteFromList(w)}
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+          </div>
         ))}
       </div>
     </div>
@@ -921,6 +987,31 @@ export function WorkflowsSection(props: {
     }
   }, [workflow, save]);
 
+  const archive = useCallback(async () => {
+    if (!workflow) return;
+    setSaving(true);
+    setNotice(null);
+    try {
+      // Mirror Publish: persist unsaved draft edits first, or the
+      // status-only response would replace them with the older
+      // server copy (Codex on PR #56).
+      if (workflow.status === "draft") await save();
+      const d = await api<{ workflow: WorkflowDetail }>(
+        `/api/workflows/${workflow.id}`,
+        { method: "PUT", body: JSON.stringify({ action: "archive" }) },
+      );
+      setWorkflow(d.workflow);
+      setName(d.workflow.name);
+      setNotice(
+        "Archived — this workflow no longer runs. It stays listed so its history remains available.",
+      );
+    } catch (e: unknown) {
+      setNotice(e instanceof Error ? e.message : "Archive failed");
+    } finally {
+      setSaving(false);
+    }
+  }, [workflow]);
+
   const execute = useCallback(async () => {
     if (!workflow) return;
     setSaving(true);
@@ -946,6 +1037,28 @@ export function WorkflowsSection(props: {
     setWorkflow(null);
     setRefreshToken((t) => t + 1);
   };
+
+  // Permanent removal, offered for drafts and archived workflows
+  // only — a published workflow is archived first, never deleted
+  // live. (Child rows cascade at the database level.)
+  async function removeWorkflow() {
+    if (!workflow) return;
+    if (
+      !window.confirm(
+        `Delete "${workflow.name}" permanently? Its runs and history are deleted too. This cannot be undone.`,
+      )
+    )
+      return;
+    setSaving(true);
+    try {
+      await api(`/api/workflows/${workflow.id}`, { method: "DELETE" });
+      setNotice("Workflow deleted.");
+      back();
+    } catch (e: unknown) {
+      setNotice(e instanceof Error ? e.message : "Delete failed");
+      setSaving(false);
+    }
+  }
 
   if (walkthroughOpen && props.environment === "demo" && !openId) {
     return (
@@ -1018,6 +1131,24 @@ export function WorkflowsSection(props: {
           >
             {saving ? "Saving…" : "Save draft"}
           </button>
+          {workflow.status !== "archived" && (
+            <button
+              className="btn-ghost"
+              onClick={archive}
+              disabled={saving}
+            >
+              Archive
+            </button>
+          )}
+          {(isDraft || workflow.status === "archived") && (
+            <button
+              className="btn-ghost wf-action-danger"
+              onClick={() => void removeWorkflow()}
+              disabled={saving}
+            >
+              Delete
+            </button>
+          )}
           {isDraft && (
             <button
               className="btn-primary"
@@ -1027,7 +1158,7 @@ export function WorkflowsSection(props: {
               Publish
             </button>
           )}
-          {!isDraft && (
+          {workflow.status === "published" && (
             <button
               className="btn-primary"
               onClick={execute}

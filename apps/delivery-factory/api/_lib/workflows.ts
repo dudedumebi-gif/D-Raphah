@@ -842,7 +842,15 @@ export async function deleteWorkflow(
   db: NeonClient,
   id: string,
 ): Promise<boolean> {
-  const rows = await q(db)`delete from public.workflows where id = ${id} returning id`;
+  // The status guard lives IN the delete (Codex on PR #56): a
+  // client-side gate reads a possibly stale snapshot — a workflow
+  // published by another operator after the list loaded must not
+  // become deletable. Only drafts and archived workflows delete;
+  // a published workflow is archived first.
+  const rows = await q(db)`
+    delete from public.workflows
+    where id = ${id} and status in ('draft', 'archived')
+    returning id`;
   return rows.length > 0;
 }
 
