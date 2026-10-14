@@ -59,7 +59,7 @@ export async function assertDeliveryDatabaseReady(
     select version from public.schema_versions
     where service='delivery-factory' limit 1
   `) as unknown as Array<{ version: string }>;
-  if (rows[0]?.version !== "1.3.0")
+  if (rows[0]?.version !== "1.4.0")
     throw new Error("Database readiness failed: incompatible schema version");
 }
 

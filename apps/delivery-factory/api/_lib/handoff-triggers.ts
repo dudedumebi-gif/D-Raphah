@@ -17,9 +17,17 @@ import { transitionProjectStage } from "./projects.js";
 import type { IntakeEnv } from "./verify.js";
 import {
   buildLeadHandoffTriggerPayload,
+  claimFailedRunRetry,
+  claimProjectWorkflowStart,
   executeWorkflow,
   findLeadHandoffRunForPackage,
+  getProjectIdForPackage,
+  getProjectWorkflowStart,
+  getRun,
   listPublishedWorkflowsByTrigger,
+  reclaimStaleProjectWorkflowStart,
+  retryProjectWorkflowStart,
+  settleProjectWorkflowStart,
   type TriggerableWorkflow,
 } from "./workflows.js";
 
@@ -78,14 +86,54 @@ export async function triggerLeadHandoffWorkflows(
       skipped.push(wf.id);
       continue;
     }
+    // Reserve the start through the same row the manual begin
+    // claims (Codex on PR #53): without it, a begin racing this
+    // hook — or a second begin — could execute the workflow twice.
+    // The claim is fail-open: if the reservation layer is
+    // unavailable (its migration has not run yet), intake falls
+    // back to the pre-reservation direct execution rather than
+    // breaking package acceptance.
+    let claimId: string | null = null;
+    let reservedElsewhere = false;
+    const projectId = await getProjectIdForPackage(db, pkg.packageId);
+    if (projectId) {
+      try {
+        claimId = await claimProjectWorkflowStart(db, {
+          projectId,
+          workflowId: wf.id,
+          packageId: pkg.packageId,
+          environment,
+          runId: null,
+          state: "reserved",
+        });
+        reservedElsewhere = claimId === null;
+      } catch {
+        claimId = null;
+      }
+    }
+    if (reservedElsewhere) {
+      skipped.push(wf.id);
+      continue;
+    }
     try {
-      await executeWorkflow(
+      const run = await executeWorkflow(
         db,
         wf.id,
         payload as unknown as Record<string, unknown>,
       );
+      if (claimId)
+        await settleProjectWorkflowStart(
+          db,
+          claimId,
+          run.id,
+          run.status === "completed" ? "completed" : "failed",
+        );
       executed.push(wf.id);
     } catch (error) {
+      if (claimId)
+        await settleProjectWorkflowStart(db, claimId, null, "failed").catch(
+          () => undefined,
+        );
       failures.push({
         workflowId: wf.id,
         error: error instanceof Error ? error.message : String(error),
@@ -116,6 +164,15 @@ export async function triggerLeadHandoffWorkflows(
  * draft-first (no provider hooks, so send nodes record drafts).
  * Starting the workflow is what moves the project out of intake, so a
  * project still at 'intake' advances to 'onboarding'.
+ *
+ * Concurrency: the start is claimed atomically in
+ * project_workflow_starts (unique per project + workflow) BEFORE
+ * anything executes. Exactly one caller owns execution; a concurrent
+ * or repeated begin adopts a completed start, conflicts (409) while
+ * a run is still in flight — the stage never advances on a run that
+ * has not finished successfully — and may claim the retry of a
+ * failed start. Runs that predate the reservation table (started by
+ * the intake trigger) are adopted into it on first begin.
  */
 
 export type BeginWorkflowResolution =
@@ -240,27 +297,57 @@ export async function beginProjectWorkflow(
   }
   const workflow = resolution.workflow;
   const pkg = pkgData.package;
+  const payload = buildLeadHandoffTriggerPayload(pkg);
 
-  // Idempotency: a package accepted while this workflow was already
-  // published was already offered to it by the intake trigger, which
-  // leaves the project at 'intake' with no started marker. Adopt that
-  // run instead of executing the workflow a second time.
-  const existing = await findLeadHandoffRunForPackage(sql, {
-    workflowId: workflow.id,
-    packageId: pkg.packageId,
-    environment: project.environment,
-  });
+  const conflict = (message: string) =>
+    Object.assign(new Error(message), { statusCode: 409 });
+  const alreadyRunning = (runId?: string | null) =>
+    conflict(
+      `Workflow "${workflow.name}" is already running for this project` +
+        (runId ? ` (run ${runId})` : "") +
+        " — wait for it to finish, then begin again.",
+    );
 
-  let runId: string;
-  let alreadyStarted = false;
-  if (existing) {
-    runId = existing.id;
-    alreadyStarted = true;
-  } else {
-    const payload = buildLeadHandoffTriggerPayload(pkg);
-    if (!leadHandoffMinScoreAllows(workflow.trigger_config, payload.lead.score)) {
+  /** Move a still-intake project to onboarding and shape the result. */
+  const finishBegin = async (
+    runId: string,
+    alreadyStarted: boolean,
+  ): Promise<BeginProjectWorkflowResult> => {
+    let stage = project.current_stage;
+    if (stage === "intake") {
+      const updated = await transitionProjectStage(db, {
+        projectId: project.id,
+        toStage: "onboarding",
+        changedBy: input.changedBy,
+        environment: input.environment,
+      });
+      stage = updated.current_stage;
+    }
+    return {
+      workflowId: workflow.id,
+      workflowName: workflow.name,
+      runId,
+      stage,
+      alreadyStarted,
+    };
+  };
+
+  /**
+   * Execute the workflow as the owner of start row `startId`, then
+   * settle the reservation with the outcome. The minScore gate guards
+   * execution only — an already-run workflow is adopted, never
+   * re-gated. A failed run settles the start 'failed' (retryable) and
+   * surfaces as a 502 with the project left at intake.
+   */
+  const executeAsOwner = async (
+    startId: string,
+  ): Promise<BeginProjectWorkflowResult> => {
+    if (
+      !leadHandoffMinScoreAllows(workflow.trigger_config, payload.lead.score)
+    ) {
       const gate = (workflow.trigger_config as Record<string, unknown> | null)
         ?.minScore;
+      await settleProjectWorkflowStart(sql, startId, null, "failed");
       throw Object.assign(
         new Error(
           `Workflow "${workflow.name}" requires a minimum lead score of ${String(gate)}, ` +
@@ -270,16 +357,28 @@ export async function beginProjectWorkflow(
         { statusCode: 409 },
       );
     }
-    const run = await executeWorkflow(
-      sql,
-      workflow.id,
-      payload as unknown as Record<string, unknown>,
-    );
+    let run: Awaited<ReturnType<typeof executeWorkflow>>;
+    try {
+      run = await executeWorkflow(
+        sql,
+        workflow.id,
+        payload as unknown as Record<string, unknown>,
+      );
+    } catch (error) {
+      // The engine rejected before a run existed (e.g. the workflow
+      // was unpublished in a race). Free the reservation for a retry
+      // instead of stranding it until the stale-claim window.
+      await settleProjectWorkflowStart(sql, startId, null, "failed").catch(
+        () => undefined,
+      );
+      throw error;
+    }
     // executeWorkflow resolves even when the run failed (the failure
     // is recorded on the run). A failed/cancelled run means delivery
-    // did not start: report it and keep the project at intake so the
-    // operator can fix the workflow and begin again.
+    // did not start: settle 'failed', report it, and keep the project
+    // at intake so the operator can fix the workflow and begin again.
     if (run.status === "failed" || run.status === "cancelled") {
+      await settleProjectWorkflowStart(sql, startId, run.id, "failed");
       throw Object.assign(
         new Error(
           `Workflow "${workflow.name}" run ${run.status}` +
@@ -289,24 +388,114 @@ export async function beginProjectWorkflow(
         { statusCode: 502 },
       );
     }
-    runId = run.id;
+    if (run.status !== "completed") {
+      // Defensive: the engine is synchronous and resolves with a
+      // terminal status, but if a run ever comes back still running,
+      // record it on the reservation and treat the begin as a
+      // conflict — never advance on an unfinished run.
+      await settleProjectWorkflowStart(sql, startId, run.id, "reserved");
+      throw alreadyRunning(run.id);
+    }
+    await settleProjectWorkflowStart(sql, startId, run.id, "completed");
+    return finishBegin(run.id, false);
+  };
+
+  let start = await getProjectWorkflowStart(sql, project.id, workflow.id);
+
+  if (!start) {
+    // Legacy adoption: a package accepted while this workflow was
+    // already published was offered to it by the intake trigger,
+    // which predates the reservation table — no start row exists,
+    // but a run may. A finished run is claimed as a 'completed'
+    // start and adopted; a still-running one is claimed as
+    // 'reserved' and reported as a conflict: the stage must not
+    // advance on a run that has not finished successfully, because
+    // it may yet fail.
+    const live = await findLeadHandoffRunForPackage(sql, {
+      workflowId: workflow.id,
+      packageId: pkg.packageId,
+      environment: project.environment,
+    });
+    if (live && live.status === "completed") {
+      const claimed = await claimProjectWorkflowStart(sql, {
+        projectId: project.id,
+        workflowId: workflow.id,
+        packageId: pkg.packageId,
+        environment: project.environment,
+        runId: live.id,
+        state: "completed",
+      });
+      if (claimed) return finishBegin(live.id, true);
+      start = await getProjectWorkflowStart(sql, project.id, workflow.id);
+    } else if (live) {
+      await claimProjectWorkflowStart(sql, {
+        projectId: project.id,
+        workflowId: workflow.id,
+        packageId: pkg.packageId,
+        environment: project.environment,
+        runId: live.id,
+        state: "reserved",
+      });
+      throw alreadyRunning(live.id);
+    }
   }
 
-  let stage = project.current_stage;
-  if (stage === "intake") {
-    const updated = await transitionProjectStage(db, {
+  if (!start) {
+    // The atomic claim: exactly one caller inserts the row and owns
+    // execution. Everyone else falls through to honoring that row.
+    const claimed = await claimProjectWorkflowStart(sql, {
       projectId: project.id,
-      toStage: "onboarding",
-      changedBy: input.changedBy,
-      environment: input.environment,
+      workflowId: workflow.id,
+      packageId: pkg.packageId,
+      environment: project.environment,
+      runId: null,
+      state: "reserved",
     });
-    stage = updated.current_stage;
+    if (claimed) return executeAsOwner(claimed);
+    start = await getProjectWorkflowStart(sql, project.id, workflow.id);
+    if (!start) throw alreadyRunning();
   }
-  return {
-    workflowId: workflow.id,
-    workflowName: workflow.name,
-    runId,
-    stage,
-    alreadyStarted,
-  };
+
+  if (start.state === "completed") {
+    if (!start.run_id) throw alreadyRunning();
+    return finishBegin(start.run_id, true);
+  }
+
+  if (start.state === "failed") {
+    // A previous attempt failed (or its claimant freed the row):
+    // claim the retry atomically, or defer to whoever claimed it.
+    if (await retryProjectWorkflowStart(sql, start.id)) {
+      return executeAsOwner(start.id);
+    }
+    throw alreadyRunning();
+  }
+
+  // state === 'reserved'
+  if (start.run_id) {
+    const run = await getRun(sql, start.run_id);
+    if (run && run.status === "running") throw alreadyRunning(run.id);
+    if (run && run.status === "completed") {
+      await settleProjectWorkflowStart(sql, start.id, run.id, "completed");
+      return finishBegin(run.id, true);
+    }
+    // The recorded run failed, was cancelled, or is gone: claim
+    // the retry with ONE conditional update keyed on the exact
+    // (state, run_id) observed (Codex on PR #53) — an unconditional
+    // settle to 'failed' followed by a separate retry claim let
+    // two concurrent begins both win an execution.
+    if (await claimFailedRunRetry(sql, start.id, start.run_id)) {
+      return executeAsOwner(start.id);
+    }
+    throw alreadyRunning();
+  }
+
+  // 'reserved' with no run yet: the claimant is between claiming and
+  // executing — unless it crashed, in which case the stale claim may
+  // be reclaimed (decided in SQL against the row's age).
+  if (await reclaimStaleProjectWorkflowStart(sql, start.id)) {
+    return executeAsOwner(start.id);
+  }
+  throw conflict(
+    `A begin for workflow "${workflow.name}" is already in progress for this project — wait a moment, then begin again.`,
+  );
 }

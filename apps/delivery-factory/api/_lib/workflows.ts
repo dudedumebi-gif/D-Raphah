@@ -507,6 +507,190 @@ export async function findLeadHandoffRunForPackage(
   return { id: String(rows[0].id), status: String(rows[0].status) };
 }
 
+/* ── Project workflow starts (the begin reservation) ──────────────────
+   One row per (project, workflow): the atomic claim that makes the
+   manual begin idempotent under concurrency. workflow_runs has no
+   uniqueness guarantee for a package, so "check for a run, then
+   execute" races — two begins could both execute. Claiming the start
+   row first (INSERT ... ON CONFLICT DO NOTHING) means exactly one
+   caller ever owns execution; everyone else adopts, waits (409), or
+   claims the retry of a failed start. See the migration
+   202610140001_project_workflow_starts. */
+
+export type ProjectWorkflowStartState = "reserved" | "completed" | "failed";
+
+export interface ProjectWorkflowStart {
+  id: string;
+  project_id: string;
+  workflow_id: string;
+  package_id: string;
+  environment: DeliveryEnvironment;
+  run_id: string | null;
+  state: ProjectWorkflowStartState;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapProjectWorkflowStart(
+  r: Record<string, unknown>,
+): ProjectWorkflowStart {
+  return {
+    id: String(r.id),
+    project_id: String(r.project_id),
+    workflow_id: String(r.workflow_id),
+    package_id: String(r.package_id),
+    environment: rowEnvironment(r.environment),
+    run_id: r.run_id ? String(r.run_id) : null,
+    state: r.state as ProjectWorkflowStartState,
+    created_at: String(r.created_at),
+    updated_at: String(r.updated_at),
+  };
+}
+
+export async function getProjectWorkflowStart(
+  db: NeonClient,
+  projectId: string,
+  workflowId: string,
+): Promise<ProjectWorkflowStart | null> {
+  const rows = await q(db)`
+    select id, project_id, workflow_id, package_id, environment,
+           run_id, state, created_at, updated_at
+    from public.project_workflow_starts
+    where project_id = ${projectId} and workflow_id = ${workflowId}`;
+  if (!rows.length) return null;
+  return mapProjectWorkflowStart(rows[0]);
+}
+
+/**
+ * Atomically claim the start for (project, workflow). Returns the new
+ * row's id when this caller won the claim, or null when a row already
+ * existed (the caller must then read and honor it). The initial state
+ * is the caller's to choose: 'reserved' for a fresh execution claim,
+ * or — when adopting a run that already exists — the state that run
+ * maps to, with its run_id recorded at claim time.
+ */
+export async function claimProjectWorkflowStart(
+  db: NeonClient,
+  input: {
+    projectId: string;
+    workflowId: string;
+    packageId: string;
+    environment: DeliveryEnvironment;
+    runId: string | null;
+    state: ProjectWorkflowStartState;
+  },
+): Promise<string | null> {
+  const rows = await q(db)`
+    insert into public.project_workflow_starts
+      (project_id, workflow_id, package_id, environment, run_id, state)
+    values (${input.projectId}, ${input.workflowId}, ${input.packageId},
+            ${input.environment}, ${input.runId}, ${input.state})
+    on conflict (project_id, workflow_id) do nothing
+    returning id`;
+  if (!rows.length) return null;
+  return String(rows[0].id);
+}
+
+/** Record the outcome of an owned start: the run it produced and the
+ *  terminal state that run maps to. */
+export async function settleProjectWorkflowStart(
+  db: NeonClient,
+  id: string,
+  runId: string | null,
+  state: ProjectWorkflowStartState,
+): Promise<void> {
+  await q(db)`
+    update public.project_workflow_starts
+    set run_id = ${runId}, state = ${state}, updated_at = now()
+    where id = ${id}`;
+}
+
+/**
+ * Claim the retry of a failed start. Returns true when this caller won
+ * (the row is 'reserved' again, with no run yet); false when another
+ * caller claimed it first.
+ */
+export async function retryProjectWorkflowStart(
+  db: NeonClient,
+  id: string,
+): Promise<boolean> {
+  const rows = await q(db)`
+    update public.project_workflow_starts
+    set state = 'reserved', run_id = null, updated_at = now()
+    where id = ${id} and state = 'failed'
+    returning id`;
+  return rows.length > 0;
+}
+
+/**
+ * Claim the retry of a start whose recorded run failed, was
+ * cancelled, or vanished — as ONE conditional update (Codex on
+ * PR #53). The previous shape settled the row to 'failed'
+ * unconditionally and then claimed the retry as a second step: two
+ * concurrent begins could both settle, and the loser's settle could
+ * overwrite the winner's fresh reservation back to 'failed',
+ * letting both claim and execute. Keyed on the exact (state,
+ * run_id) the caller observed, exactly one caller wins.
+ */
+export async function claimFailedRunRetry(
+  db: NeonClient,
+  id: string,
+  runId: string,
+): Promise<boolean> {
+  const rows = await q(db)`
+    update public.project_workflow_starts
+    set run_id = null, state = 'reserved', updated_at = now()
+    where id = ${id} and state = 'reserved' and run_id = ${runId}
+    returning id`;
+  return rows.length > 0;
+}
+
+/**
+ * The delivery project a handoff package produced, if one exists.
+ * Intake persists the project before the trigger hook runs, so the
+ * trigger can reserve its start through the same row the manual
+ * begin claims. A lookup failure (e.g. the reservation migration
+ * has not run yet) resolves to null and the caller falls back to
+ * the pre-reservation direct execution — the intake path must never
+ * break on the reservation layer.
+ */
+export async function getProjectIdForPackage(
+  db: NeonClient,
+  packageId: string,
+): Promise<string | null> {
+  try {
+    const rows = await q(db)`
+      select id
+      from public.delivery_projects
+      where package_id = ${packageId}
+      limit 1`;
+    if (!rows.length) return null;
+    return String(rows[0].id);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reclaim a start whose claimant crashed between claiming and
+ * executing: still 'reserved', no run recorded, and the claim is
+ * older than ten minutes (the staleness test runs in SQL so no
+ * client-side clock or driver Date handling is involved). Returns
+ * true when this caller now owns the start.
+ */
+export async function reclaimStaleProjectWorkflowStart(
+  db: NeonClient,
+  id: string,
+): Promise<boolean> {
+  const rows = await q(db)`
+    update public.project_workflow_starts
+    set created_at = now(), updated_at = now()
+    where id = ${id} and state = 'reserved' and run_id is null
+      and updated_at < now() - interval '10 minutes'
+    returning id`;
+  return rows.length > 0;
+}
+
 export function buildLeadHandoffTriggerPayload(
   pkg: LeadEngineHandoffPackage,
 ): LeadHandoffTriggerPayload {
