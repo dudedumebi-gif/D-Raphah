@@ -34,12 +34,27 @@ export default defineRoute(
     }
     if (req.method === "DELETE") {
       const ok = await deleteWorkflow(db, id);
-      sendJson(
-        res,
-        ok ? 200 : 404,
-        {},
-        ok ? { deleted: true } : { error: "Workflow not found" },
-      );
+      if (ok) {
+        sendJson(res, 200, {}, { deleted: true });
+        return;
+      }
+      // deleteWorkflow is status-guarded: distinguish "not there"
+      // from "there but published" so the operator gets the real
+      // reason instead of a misleading 404.
+      const existing = await getWorkflow(db, id);
+      if (existing) {
+        sendJson(
+          res,
+          409,
+          {},
+          {
+            error:
+              "Only draft or archived workflows can be deleted — archive it first.",
+          },
+        );
+        return;
+      }
+      sendJson(res, 404, {}, { error: "Workflow not found" });
       return;
     }
     // PUT

@@ -18,7 +18,10 @@ function makeDb(row: Record<string, unknown> | null) {
   const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const head = strings.join(" ");
     if (head.includes("delete from public.workflows")) {
+      // Mirrors the lib's status guard: only draft/archived delete.
       if (!state.row) return [];
+      if (state.row.status !== "draft" && state.row.status !== "archived")
+        return [];
       state.deleted = true;
       return [{ id: values[0] }];
     }
@@ -65,6 +68,15 @@ describe("archive/delete workflow semantics", () => {
     const empty = makeDb(null);
     await expect(deleteWorkflow(empty.db, "wf-1")).resolves.toBe(false);
   });
+
+  it("delete refuses a published workflow inside the transaction", async () => {
+    const { db, state } = makeDb({ ...ROW, status: "published" });
+    await expect(deleteWorkflow(db, "wf-1")).resolves.toBe(false);
+    expect(state.deleted).toBe(false);
+    // ...while the same workflow, once archived, deletes cleanly.
+    const archived = makeDb({ ...ROW, status: "archived" });
+    await expect(deleteWorkflow(archived.db, "wf-1")).resolves.toBe(true);
+  });
 });
 
 describe("workflow retire wiring", () => {
@@ -81,6 +93,17 @@ describe("workflow retire wiring", () => {
     expect(route).toContain("deleteWorkflow");
     expect(route).toContain('body?.action === "archive"');
     expect(route).toContain("archiveWorkflow");
+  });
+
+  it("the route answers 409 (not 404) for a published workflow", () => {
+    expect(route).toContain("Only draft or archived workflows can be deleted");
+    expect(route).toContain("409");
+  });
+
+  it("the editor saves drafts before archiving and never offers Execute to archived", () => {
+    expect(ui).toContain('if (workflow.status === "draft") await save();');
+    expect(ui).toContain('workflow.status === "published"');
+    expect(ui).toContain("setName(d.workflow.name)");
   });
 
   it("the list and editor both expose archive + delete", () => {

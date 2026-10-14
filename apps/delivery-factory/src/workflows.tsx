@@ -992,11 +992,16 @@ export function WorkflowsSection(props: {
     setSaving(true);
     setNotice(null);
     try {
+      // Mirror Publish: persist unsaved draft edits first, or the
+      // status-only response would replace them with the older
+      // server copy (Codex on PR #56).
+      if (workflow.status === "draft") await save();
       const d = await api<{ workflow: WorkflowDetail }>(
         `/api/workflows/${workflow.id}`,
         { method: "PUT", body: JSON.stringify({ action: "archive" }) },
       );
       setWorkflow(d.workflow);
+      setName(d.workflow.name);
       setNotice(
         "Archived — this workflow no longer runs. It stays listed so its history remains available.",
       );
@@ -1153,7 +1158,7 @@ export function WorkflowsSection(props: {
               Publish
             </button>
           )}
-          {!isDraft && (
+          {workflow.status === "published" && (
             <button
               className="btn-primary"
               onClick={execute}
