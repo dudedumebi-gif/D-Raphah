@@ -1538,6 +1538,43 @@ async function authenticatedRoutes(
     // session). Reviewer-edited success measures ride the same
     // statement via the jsonb overrides map.
     const admin = createAdminClient();
+    // Pre-validate BEFORE any write (Codex P2): a submission of
+    // only stale/foreign ids must 404 WITHOUT clearing the
+    // existing approved set, and every selected row must end up
+    // with a success measure (its stored one or the reviewer's
+    // override) — an approved case without an OKR would silently
+    // ship no promise.
+    const selectedRows = (await admin`
+      select id, title, success_metric, success_target
+      from public.opportunity_use_cases
+      where workspace_id = ${workspaceId}::uuid
+        and opportunity_id = ${opportunityId}::uuid
+        and id::text = any(${input.useCaseIds}::text[])
+        and status in ('suggested', 'approved')
+    `) as unknown as Array<{
+      id: string;
+      title: string;
+      success_metric: string | null;
+      success_target: string | null;
+    }>;
+    if (selectedRows.length === 0)
+      throw Object.assign(new Error("No matching use cases for this lead"), {
+        statusCode: 404,
+      });
+    const missingMeasures = selectedRows.filter((row) => {
+      const override = input.measures?.[row.id];
+      return (
+        !(override?.metric ?? row.success_metric) ||
+        !(override?.target ?? row.success_target)
+      );
+    });
+    if (missingMeasures.length > 0)
+      throw Object.assign(
+        new Error(
+          `These use cases have no success measure yet — add a metric and target in the panel before approving: ${missingMeasures.map((row) => row.title).join(", ")}`,
+        ),
+        { statusCode: 422 },
+      );
     const measuresJson = JSON.stringify(input.measures ?? {});
     const counts = (await admin`
       with updated as (

@@ -160,6 +160,13 @@ describe("use-case handoff wiring — source contracts", () => {
     );
     expect(correction).toContain("status in ('pending', 'failed')");
     expect(correction).toContain("'analyst', 'reviewer'");
+    // Grants are additive: the SELECT-only boundary needs revokes.
+    expect(correction).toContain(
+      "revoke insert, update on public.opportunity_use_cases from authenticated",
+    );
+    expect(correction).toContain(
+      "revoke insert, update on public.consent_records from authenticated",
+    );
   });
 
   it("approval writes stay behind the server boundary (Codex P1 + P2)", () => {
@@ -169,6 +176,9 @@ describe("use-case handoff wiring — source contracts", () => {
     // Generation + consent inserts run on the server connection too.
     expect(router).toContain("insert into public.opportunity_use_cases");
     expect(router).toContain("insert into public.consent_records");
+    // Unknown selections 404 before any write; measures are
+    // required at approval (Codex P2s on the bundle head).
+    expect(router).toContain("have no success measure yet");
   });
 
   it("the reviewer who selects use cases can also approve them (Codex P2)", () => {

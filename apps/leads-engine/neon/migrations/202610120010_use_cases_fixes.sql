@@ -28,10 +28,15 @@ alter table public.opportunity_use_cases
 -- self-chosen human_validator_id, and buildHandoffPackage would
 -- ship it as a validated Must requirement.
 grant select on public.opportunity_use_cases to authenticated;
+-- Grants are additive in Postgres (Codex P1): a database that ran
+-- a broader-grant variant keeps the write privileges unless they
+-- are revoked explicitly.
+revoke insert, update on public.opportunity_use_cases from authenticated;
 -- SELECT only, same boundary: consent records gate both the
 -- handoff and proposal approvals, so they are written only by
 -- the consent route over the server connection.
 grant select on public.consent_records to authenticated;
+revoke insert, update on public.consent_records from authenticated;
 
 drop policy if exists opportunity_use_cases_operator_write on public.opportunity_use_cases;
 create policy opportunity_use_cases_operator_write on public.opportunity_use_cases

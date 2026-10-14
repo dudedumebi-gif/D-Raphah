@@ -70,7 +70,7 @@ grant select on public.opportunity_use_cases to authenticated;
 -- (202609260002) never received its Data API privileges either,
 -- although its policies intend member select + operator write and
 -- the consent routes use the Data API client.
-grant select, insert, update on public.consent_records to authenticated;
+grant select on public.consent_records to authenticated;
 
 create or replace function public.enqueue_handoff_outbox(
   p_workspace_id uuid,

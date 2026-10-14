@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -17,11 +18,9 @@ process.env.HANDOFF_SIGNING_PUBLIC_KEY_PEM = testKeys.publicKey
   .export({ type: "spki", format: "pem" })
   .toString();
 
-const staging = (name: string) =>
-  readFileSync(
-    fileURLToPath(new URL(`../../staging48/${name}`, import.meta.url)),
-    "utf8",
-  );
+const here = dirname(fileURLToPath(import.meta.url));
+const repoFile = (rel: string) =>
+  readFileSync(join(here, "..", rel), "utf8");
 
 const useCases: ApprovedUseCaseForProposal[] = [
   {
@@ -176,9 +175,9 @@ describe("Handoff package ships the approved OKRs", () => {
 });
 
 describe("Proposal migration + route wiring", () => {
-  const migration = staging("202610120011_proposals.sql");
-  const router = staging("router.ts");
-  const handoff = staging("handoff.ts");
+  const migration = repoFile("neon/migrations/202610120011_proposals.sql");
+  const router = repoFile("api/_lib/router.ts");
+  const handoff = repoFile("api/_lib/handoff.ts");
 
   it("the proposal migration ships WITH its Data API grants", () => {
     expect(migration).toContain("create table public.lead_proposals");
@@ -187,6 +186,7 @@ describe("Proposal migration + route wiring", () => {
     );
     expect(migration).toContain("audit_lead_proposals");
     expect(migration).toContain("add column if not exists success_metric");
+    expect(migration).toContain("where uc.use_case_key = c.key");
   });
 
   it("the proposal routes exist and approval is consent-gated", () => {

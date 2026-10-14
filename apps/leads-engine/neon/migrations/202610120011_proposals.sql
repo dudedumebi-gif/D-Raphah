@@ -54,6 +54,25 @@ create trigger audit_lead_proposals
 create trigger lead_proposals_updated before update on public.lead_proposals
   for each row execute function public.set_updated_at();
 
+-- Backfill (Codex P2): use-case rows generated before success
+-- measures existed carry NULLs, and the builder excludes
+-- measure-less rows — upgraded databases would ship handoffs
+-- with no promised OKRs. Restore the catalog defaults by key.
+update public.opportunity_use_cases uc
+set success_metric = c.metric, success_target = c.target
+from (values
+  ('online_booking', 'Online booking share', 'At least 50% of new appointments booked online within 90 days of launch'),
+  ('digital_intake', 'Intake completed before arrival', 'At least 80% of new patients complete intake online before their visit'),
+  ('digital_exchange', 'Fax volume for referrals and records', 'Fax use reduced by at least 80% within 90 days'),
+  ('ops_automation', 'Staff hours on duplicate entry and manual tracking', 'At least 5 hours per week returned to the front desk'),
+  ('legacy_modernization', 'Legacy system in daily front-desk use', 'Retired or reduced to read-only archive within 6 months'),
+  ('automated_reminders', 'Appointment no-show rate', 'Reduced by at least 25% within 90 days of launch'),
+  ('patient_recall', 'Overdue patients reactivated per recall cycle', 'At least 15% of overdue patients rebooked in the first cycle'),
+  ('review_requests', 'New public reviews per month', 'At least 10 new Google reviews per month'),
+  ('front_desk_capacity', 'Booking lead time', 'Kept under 2 business days while demand grows')
+) as c(key, metric, target)
+where uc.use_case_key = c.key and uc.success_metric is null;
+
 insert into public.schema_versions(service, version)
 values ('lead-engine', '3.3.15')
 on conflict (service) do update
