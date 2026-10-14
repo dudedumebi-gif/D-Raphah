@@ -192,6 +192,10 @@ describe("use-case handoff wiring — source contracts", () => {
     const block = router.slice(at, at + 2600);
     expect(block).toContain("insert into public.lead_feedback");
     expect(block).toContain("Could not record the review decision");
+    // The privileged insert re-checks the opportunity's workspace
+    // (the guarantee the bypassed RLS policy used to provide).
+    expect(block).toContain("and workspace_id = ${workspaceId}::uuid");
+    expect(block).toContain('"Opportunity not found"');
   });
 
   it("approval writes stay behind the server boundary (Codex P1 + P2)", () => {

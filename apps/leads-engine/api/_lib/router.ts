@@ -1374,6 +1374,20 @@ async function authenticatedRoutes(
     // taken from the verified session here. Failures surface
     // their real message to the operator instead of a masked 500.
     const admin = createAdminClient();
+    // The admin connection bypasses RLS, so the workspace scope
+    // the old Data API policy enforced (an opportunity may only
+    // receive feedback inside its own workspace) is restored
+    // explicitly (Codex on PR #50): a foreign opportunity id is
+    // a 404, never a cross-tenant insert or an existence oracle.
+    const opportunityRows = (await admin`
+      select id from public.opportunities
+      where id = ${leadFeedback[1]}::uuid
+        and workspace_id = ${workspaceId}::uuid
+    `) as unknown as Array<{ id: string }>;
+    if (opportunityRows.length === 0)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
     try {
       const rows = (await admin`
         insert into public.lead_feedback (
