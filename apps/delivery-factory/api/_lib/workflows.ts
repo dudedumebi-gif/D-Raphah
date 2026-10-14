@@ -471,6 +471,42 @@ export interface LeadHandoffTriggerPayload {
  * templates must tolerate their absence. Recording a basis here never
  * authorizes sending: DF outreach nodes stay draft-first with human approval.
  */
+export interface LeadHandoffRunRef {
+  id: string;
+  status: string;
+}
+
+/**
+ * The earliest live (not failed/cancelled) lead_handoff run of this
+ * workflow for this handoff package, if any. The manual project begin
+ * uses it to stay idempotent: a package accepted while the workflow
+ * was already published was already offered to it by the intake
+ * trigger, so beginning again must not execute it a second time.
+ * Failed/cancelled runs don't count — delivery never started, and
+ * the operator may retry.
+ */
+export async function findLeadHandoffRunForPackage(
+  db: NeonClient,
+  input: {
+    workflowId: string;
+    packageId: string;
+    environment: DeliveryEnvironment;
+  },
+): Promise<LeadHandoffRunRef | null> {
+  const rows = await q(db)`
+    select id, status
+    from public.workflow_runs
+    where workflow_id = ${input.workflowId}
+      and environment = ${input.environment}
+      and trigger_type = 'lead_handoff'
+      and status not in ('failed', 'cancelled')
+      and trigger_payload->'package'->>'packageId' = ${input.packageId}
+    order by started_at asc
+    limit 1`;
+  if (!rows.length) return null;
+  return { id: String(rows[0].id), status: String(rows[0].status) };
+}
+
 export function buildLeadHandoffTriggerPayload(
   pkg: LeadEngineHandoffPackage,
 ): LeadHandoffTriggerPayload {

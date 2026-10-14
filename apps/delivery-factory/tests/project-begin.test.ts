@@ -213,6 +213,24 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
       }
       return [];
     }
+    if (
+      head.includes("from public.workflow_runs") &&
+      head.includes("where workflow_id =")
+    ) {
+      // findLeadHandoffRunForPackage: values are workflow id,
+      // environment, package id (in query order).
+      const match = [...runs.values()].find(
+        (run) =>
+          run.workflow_id === values[0] &&
+          run.environment === values[1] &&
+          run.trigger_type === "lead_handoff" &&
+          run.status !== "failed" &&
+          run.status !== "cancelled" &&
+          (run.trigger_payload as { package?: { packageId?: string } })
+            ?.package?.packageId === values[2],
+      );
+      return match ? [{ id: match.id, status: match.status }] : [];
+    }
     if (head.includes("from public.workflow_runs where id =")) {
       const run = runs.get(String(values[0]));
       if (!run) return [];
@@ -420,6 +438,109 @@ describe("beginProjectWorkflow", () => {
 
     expect(result.workflowId).toBe(b.id);
     expect(engine.runs.get(result.runId)?.workflow_id).toBe(b.id);
+  });
+
+  it("adopts the run already started for this package instead of executing a duplicate", async () => {
+    const db = new FakeDeliveryDb();
+    const { project } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+
+    const first = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+    expect(first.alreadyStarted).toBe(false);
+
+    // The intake-trigger end state: a live run exists for the package
+    // but the project still sits at intake with no marker.
+    const stored = db.projects.get(project.id);
+    if (stored) stored.current_stage = "intake";
+    db.stageHistory.length = 0;
+
+    const second = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      changedBy: "operator@example.com",
+      environment: "production",
+    });
+
+    expect(second.alreadyStarted).toBe(true);
+    expect(second.runId).toBe(first.runId);
+    expect(engine.runs.size).toBe(1);
+    expect(second.stage).toBe("onboarding");
+    expect(db.stageHistory).toHaveLength(1);
+  });
+
+  it("ignores a failed prior run and executes again", async () => {
+    const db = new FakeDeliveryDb();
+    const { project, pkg } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    const failedId = randomUUID();
+    engine.runs.set(failedId, {
+      id: failedId,
+      workflow_id: wf.id,
+      trigger_type: "lead_handoff",
+      trigger_payload: {
+        organization_name: "Acme Corp",
+        package: { packageId: pkg.packageId },
+      },
+      environment: "production",
+      status: "failed",
+      output: null,
+      error: "earlier failure",
+      started_at: new Date().toISOString(),
+    });
+
+    const result = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+
+    expect(result.alreadyStarted).toBe(false);
+    expect(result.runId).not.toBe(failedId);
+    expect(engine.runs.size).toBe(2);
+    expect(result.stage).toBe("onboarding");
+  });
+
+  it("reports a failed run and keeps the project at intake", async () => {
+    const db = new FakeDeliveryDb();
+    const { project } = await seedProject(db);
+    // Mirrors the seeded lead-followup workflow against a v1 package:
+    // the package carries no lead phone, so {{trigger.lead.phone}}
+    // renders empty, the send_sms step throws, and executeWorkflow
+    // resolves with a failed run (it does not reject).
+    const failing = fixtureWorkflow({
+      nodes: [
+        {
+          node_key: "trigger-1", type: "trigger", kind: "lead_handoff",
+          label: "Lead Handoff", position_x: 0, position_y: 0,
+          config: {}, enabled: true,
+        },
+        {
+          node_key: "action-1", type: "action", kind: "send_sms",
+          label: "Queue SMS draft", position_x: 0, position_y: 0,
+          config: {
+            to: "{{trigger.lead.phone}}",
+            message: "Following up on your project.",
+          },
+          enabled: true,
+        },
+      ],
+    });
+    const engine = makeEngineDb([failing]);
+
+    await expectBeginError(
+      beginProjectWorkflow(db, engine.db, {
+        projectId: project.id,
+        environment: "production",
+      }),
+      502,
+      "stays at intake",
+    );
+    expect(engine.runs.size).toBe(1);
+    expect(db.projects.get(project.id)?.current_stage).toBe("intake");
+    expect(db.stageHistory).toHaveLength(0);
   });
 
   it("does not move a project that already left intake", async () => {

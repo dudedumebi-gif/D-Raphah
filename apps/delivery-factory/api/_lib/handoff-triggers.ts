@@ -18,6 +18,7 @@ import type { IntakeEnv } from "./verify.js";
 import {
   buildLeadHandoffTriggerPayload,
   executeWorkflow,
+  findLeadHandoffRunForPackage,
   listPublishedWorkflowsByTrigger,
   type TriggerableWorkflow,
 } from "./workflows.js";
@@ -177,6 +178,10 @@ export interface BeginProjectWorkflowResult {
   workflowName: string;
   runId: string;
   stage: string;
+  /** True when the workflow already had a live run for this package
+   *  (e.g. started by the intake trigger at accept time) and this
+   *  begin simply adopted it instead of executing a duplicate. */
+  alreadyStarted: boolean;
 }
 
 export async function beginProjectWorkflow(
@@ -234,24 +239,59 @@ export async function beginProjectWorkflow(
     );
   }
   const workflow = resolution.workflow;
-  const payload = buildLeadHandoffTriggerPayload(pkgData.package);
-  if (!leadHandoffMinScoreAllows(workflow.trigger_config, payload.lead.score)) {
-    const gate = (workflow.trigger_config as Record<string, unknown> | null)
-      ?.minScore;
-    throw Object.assign(
-      new Error(
-        `Workflow "${workflow.name}" requires a minimum lead score of ${String(gate)}, ` +
-          "but the v1 handoff package carries no numeric lead score, so the gate cannot be verified. " +
-          "Lower the workflow's minimum score gate, or run it from Automations instead.",
-      ),
-      { statusCode: 409 },
+  const pkg = pkgData.package;
+
+  // Idempotency: a package accepted while this workflow was already
+  // published was already offered to it by the intake trigger, which
+  // leaves the project at 'intake' with no started marker. Adopt that
+  // run instead of executing the workflow a second time.
+  const existing = await findLeadHandoffRunForPackage(sql, {
+    workflowId: workflow.id,
+    packageId: pkg.packageId,
+    environment: project.environment,
+  });
+
+  let runId: string;
+  let alreadyStarted = false;
+  if (existing) {
+    runId = existing.id;
+    alreadyStarted = true;
+  } else {
+    const payload = buildLeadHandoffTriggerPayload(pkg);
+    if (!leadHandoffMinScoreAllows(workflow.trigger_config, payload.lead.score)) {
+      const gate = (workflow.trigger_config as Record<string, unknown> | null)
+        ?.minScore;
+      throw Object.assign(
+        new Error(
+          `Workflow "${workflow.name}" requires a minimum lead score of ${String(gate)}, ` +
+            "but the v1 handoff package carries no numeric lead score, so the gate cannot be verified. " +
+            "Lower the workflow's minimum score gate, or run it from Automations instead.",
+        ),
+        { statusCode: 409 },
+      );
+    }
+    const run = await executeWorkflow(
+      sql,
+      workflow.id,
+      payload as unknown as Record<string, unknown>,
     );
+    // executeWorkflow resolves even when the run failed (the failure
+    // is recorded on the run). A failed/cancelled run means delivery
+    // did not start: report it and keep the project at intake so the
+    // operator can fix the workflow and begin again.
+    if (run.status === "failed" || run.status === "cancelled") {
+      throw Object.assign(
+        new Error(
+          `Workflow "${workflow.name}" run ${run.status}` +
+            (run.error ? `: ${run.error}` : "") +
+            ` (run ${run.id}). The project stays at intake — inspect the run under Workflows → ${workflow.name} → Runs, fix the workflow, and begin again.`,
+        ),
+        { statusCode: 502 },
+      );
+    }
+    runId = run.id;
   }
-  const run = await executeWorkflow(
-    sql,
-    workflow.id,
-    payload as unknown as Record<string, unknown>,
-  );
+
   let stage = project.current_stage;
   if (stage === "intake") {
     const updated = await transitionProjectStage(db, {
@@ -262,5 +302,11 @@ export async function beginProjectWorkflow(
     });
     stage = updated.current_stage;
   }
-  return { workflowId: workflow.id, workflowName: workflow.name, runId: run.id, stage };
+  return {
+    workflowId: workflow.id,
+    workflowName: workflow.name,
+    runId,
+    stage,
+    alreadyStarted,
+  };
 }

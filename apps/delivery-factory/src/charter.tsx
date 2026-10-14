@@ -243,6 +243,7 @@ interface BeginResult {
   workflowName: string;
   runId: string;
   stage: string;
+  alreadyStarted: boolean;
 }
 
 /* ── Delivery workflow (manual begin) ────────────────────────────────
@@ -320,10 +321,13 @@ function BeginWorkflowSection(props: {
           </p>
           {done ? (
             <p className="begin-done">
-              ✓ Workflow “{done.workflowName}” started — run{" "}
-              <code>{done.runId.slice(0, 8)}…</code>. View the run under
-              Workflows → {done.workflowName} → Runs. The project advanced
-              to stage <b>{done.stage}</b>.
+              ✓ Workflow “{done.workflowName}”{" "}
+              {done.alreadyStarted
+                ? "was already started when this package arrived"
+                : "started"}{" "}
+              — run <code>{done.runId.slice(0, 8)}…</code>. View the run
+              under Workflows → {done.workflowName} → Runs. The project
+              advanced to stage <b>{done.stage}</b>.
             </p>
           ) : workflows.length === 0 ? (
             <p className="muted">
