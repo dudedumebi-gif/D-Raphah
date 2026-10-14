@@ -1319,9 +1319,7 @@ async function authenticatedRoutes(
   // opportunity, and their inserts enforce the same workspace), so
   // no cross-tenant state can leak into the board.
   if (pathname === "/api/v1/leads/pipeline" && request.method === "GET") {
-    const adminSql = getAdminDatabaseClient();
-    if (!adminSql)
-      throw new Error("Server database client is not configured.");
+    const adminSql = createAdminClient();
     const stateRows = await adminSql`
       select o.id as opportunity_id,
         (select p.status from public.lead_proposals p
