@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  mapUseCaseToRequirement,
+  type ApprovedUseCaseRow,
+} from "./use-cases.js";
+import {
   HANDOFF_SCHEMA_VERSION,
   LeadEngineHandoffPackageSchema,
   canonicalJsonStringify,
@@ -113,9 +117,12 @@ function explanationSummary(explanation: unknown): string {
  * HANDOFF_SIGNING_* key pair.
  *
  * The package is human-approved: `approvedBy` must be the authenticated
- * operator who invoked POST /api/v1/handoffs. Requirement baselines are left
- * empty here — no model-suggested requirement becomes authoritative without
- * a human validator, per the repo's deterministic controls.
+ * operator who invoked POST /api/v1/handoffs. The requirement baseline
+ * carries the opportunity's reviewer-approved use cases (see
+ * use-cases.ts): the engine suggests, a human selects and approves, and
+ * only approved rows become authoritative Must requirements — stamped
+ * with the approver as humanValidatorId, which is what the Delivery
+ * Factory's baseline freeze gate requires.
  */
 export async function buildHandoffPackage(
   client: SqlClient,
@@ -202,6 +209,21 @@ export async function buildHandoffPackage(
   }>;
   const consentRow = consentRows[0];
 
+  // Reviewer-approved use cases for this opportunity become the
+  // package's requirement baseline (validated Must requirements).
+  const useCaseRows = (await client`
+    select id, code, statement, acceptance_criteria, human_validator_id,
+           created_at, updated_at
+    from public.opportunity_use_cases
+    where workspace_id = ${input.workspaceId}::uuid
+      and opportunity_id = ${input.opportunityId}::uuid
+      and status = 'approved'
+    order by approved_at asc, created_at asc
+  `) as unknown as ApprovedUseCaseRow[];
+  const requirements = useCaseRows.map((row) =>
+    mapUseCaseToRequirement(row, opportunity.id, opportunity.primary_evidence_id),
+  );
+
   const base = {
     schemaVersion: HANDOFF_SCHEMA_VERSION,
     packageId: randomUUID(),
@@ -220,7 +242,7 @@ export async function buildHandoffPackage(
         owner: undefined,
         painPoint: truncateToByteLength(signal.excerpt, 500),
       })),
-    requirementBaseline: { version: 1, requirements: [], features: [] },
+    requirementBaseline: { version: 1, requirements, features: [] },
     constraints: [],
     risksAndAssumptions: [],
     successMeasures: [],

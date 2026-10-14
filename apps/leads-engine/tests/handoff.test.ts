@@ -49,6 +49,7 @@ function opportunityHandlers(overrides: {
   evidence?: unknown[] | null;
   signals?: unknown[] | null;
   consent?: unknown[] | null;
+  useCases?: unknown[] | null;
 } = {}): Handler[] {
   return [
     {
@@ -58,7 +59,7 @@ function opportunityHandlers(overrides: {
           {
             id: OPPORTUNITY_ID,
             title: "Acme Manufacturing",
-            opportunity_potential_score: 82,
+            opportunity_score: 82,
             automation_maturity_score: 41,
             confidence: 0.78,
             latest_assessment_id: ASSESSMENT_ID,
@@ -109,6 +110,10 @@ function opportunityHandlers(overrides: {
       rows: () =>
         overrides.consent ?? [],
     },
+    {
+      match: (sql) => sql.includes("from public.opportunity_use_cases"),
+      rows: () => overrides.useCases ?? [],
+    },
   ];
 }
 
@@ -125,6 +130,50 @@ function consentRow() {
 }
 
 describe("buildHandoffPackage", () => {
+  it("ships approved use cases as validated Must requirements", async () => {
+    const captured: string[] = [];
+    const result = await buildHandoffPackage(
+      mockSql(
+        opportunityHandlers({
+          useCases: [
+            {
+              id: "55555555-5555-4555-8555-555555555555",
+              code: "UC-ONLINE-BOOKING",
+              statement:
+                "Patients can book, reschedule, and cancel appointments online without phoning the practice.",
+              acceptance_criteria: [
+                "A patient can complete a booking online in a few minutes, at any hour",
+              ],
+              human_validator_id: "reviewer@example.com",
+              created_at: "2026-10-14T13:00:00.000Z",
+              updated_at: "2026-10-14T13:05:00.000Z",
+            },
+          ],
+        }),
+        captured,
+      ),
+      {
+        workspaceId: WORKSPACE_ID,
+        opportunityId: OPPORTUNITY_ID,
+        approvedBy: "approver@example.com",
+      },
+    );
+    const requirements = result.package.requirementBaseline.requirements;
+    expect(requirements).toHaveLength(1);
+    expect(requirements[0]).toMatchObject({
+      code: "UC-ONLINE-BOOKING",
+      priority: "must",
+      status: "validated",
+      humanValidatorId: "reviewer@example.com",
+      blockingQuestions: [],
+      opportunityId: OPPORTUNITY_ID,
+    });
+    // The whole package still validates against the shared contract.
+    expect(() =>
+      LeadEngineHandoffPackageSchema.parse(result.package),
+    ).not.toThrow();
+  });
+
   it("builds a schema-valid package with a verifiable signature", async () => {
     const captured: string[] = [];
     const result = await buildHandoffPackage(
