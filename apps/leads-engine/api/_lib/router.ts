@@ -1380,10 +1380,10 @@ async function authenticatedRoutes(
     // explicitly (Codex on PR #50): a foreign opportunity id is
     // a 404, never a cross-tenant insert or an existence oracle.
     const opportunityRows = (await admin`
-      select id from public.opportunities
+      select id, data_mode from public.opportunities
       where id = ${leadFeedback[1]}::uuid
         and workspace_id = ${workspaceId}::uuid
-    `) as unknown as Array<{ id: string }>;
+    `) as unknown as Array<{ id: string; data_mode: string }>;
     if (opportunityRows.length === 0)
       throw Object.assign(new Error("Opportunity not found"), {
         statusCode: 404,
@@ -1392,10 +1392,10 @@ async function authenticatedRoutes(
       const rows = (await admin`
         insert into public.lead_feedback (
           workspace_id, opportunity_id, reviewer_id, decision,
-          reason_code, notes)
+          reason_code, notes, data_mode)
         values (${workspaceId}::uuid, ${leadFeedback[1]}::uuid,
           ${context.user.id}, ${input.decision}, ${input.reasonCode},
-          ${input.notes ?? null})
+          ${input.notes ?? null}, ${opportunityRows[0].data_mode})
         returning *
       `) as unknown as Array<Record<string, unknown>>;
       return json({ data: rows[0] }, 201);
@@ -1833,13 +1833,32 @@ async function authenticatedRoutes(
       where workspace_id = ${workspaceId}::uuid
         and opportunity_id = ${opportunityId}::uuid
         and id = ${input.proposalId}::uuid
+        and status = 'draft'
       returning *
     `) as unknown as Array<Record<string, unknown>>;
     const proposal = updatedRows[0];
-    if (!proposal)
-      throw Object.assign(new Error("Proposal not found"), {
-        statusCode: 404,
-      });
+    if (!proposal) {
+      // The conditional update matched nothing: either the
+      // proposal does not exist in this workspace (404) or it is
+      // no longer a draft (409) — approving an approved or sent
+      // proposal must never silently reset it.
+      const existing = (await admin`
+        select status from public.lead_proposals
+        where workspace_id = ${workspaceId}::uuid
+          and opportunity_id = ${opportunityId}::uuid
+          and id = ${input.proposalId}::uuid
+      `) as unknown as Array<{ status: string }>;
+      if (existing.length === 0)
+        throw Object.assign(new Error("Proposal not found"), {
+          statusCode: 404,
+        });
+      throw Object.assign(
+        new Error(
+          `Only a draft proposal can be approved — this proposal is already ${existing[0].status}.`,
+        ),
+        { statusCode: 409 },
+      );
+    }
     await logWorkspaceEvent(client, workspaceId, {
       action: "opportunity.proposal_approved",
       resourceType: "opportunities",
@@ -1874,13 +1893,19 @@ async function authenticatedRoutes(
         ),
         { statusCode: 409 },
       );
+    const sentOpportunity = (await admin`
+      select data_mode from public.opportunities
+      where id = ${opportunityId}::uuid
+        and workspace_id = ${workspaceId}::uuid
+    `) as unknown as Array<{ data_mode: string }>;
     await admin`
       insert into public.lead_feedback (
         workspace_id, opportunity_id, reviewer_id, decision,
-        reason_code, notes)
+        reason_code, notes, data_mode)
       values (${workspaceId}::uuid, ${opportunityId}::uuid,
         ${context.user.id}, 'contacted', 'PROPOSAL_SENT',
-        'Approved proposal sent by the operator (human-sent from LE).')
+        'Approved proposal sent by the operator (human-sent from LE).',
+        ${sentOpportunity[0]?.data_mode ?? "pilot"})
     `;
     return json({ data: proposal });
   }

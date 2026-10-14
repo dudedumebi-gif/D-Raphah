@@ -11,7 +11,7 @@ name: CI
 
 on:
   push:
-    branches: [feat/product-platform-design, "release/**"]
+    branches: [main, feat/product-platform-design, "release/**"]
   pull_request:
 
 concurrency:

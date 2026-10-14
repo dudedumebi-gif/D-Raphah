@@ -57,11 +57,11 @@ const CATALOG: CatalogEntry[] = [
     code: "UC-ONLINE-BOOKING",
     title: "Online appointment booking",
     statement:
-      "Patients can book, reschedule, and cancel appointments online without phoning the practice.",
+      "Customers can book, reschedule, and cancel appointments online without phoning the business.",
     acceptanceCriteria: [
-      "A patient can complete a booking online in a few minutes, at any hour",
+      "A customer can complete a booking online in a few minutes, at any hour",
       "Online bookings land directly in the practice schedule — no phone transcription by staff",
-      "The patient receives an immediate confirmation with visit details",
+      "The customer receives an immediate confirmation with the booking details",
     ],
     successMetric: "Online booking share",
     successTarget: "At least 50% of new appointments booked online within 90 days of launch",
@@ -72,16 +72,16 @@ const CATALOG: CatalogEntry[] = [
   {
     key: "digital_intake",
     code: "UC-DIGITAL-INTAKE",
-    title: "Digital patient intake",
+    title: "Digital intake forms",
     statement:
-      "New-patient intake, health-history, and consent forms are completed online before the visit instead of on paper or by emailed PDF.",
+      "Intake, information, and consent forms are completed online before the appointment instead of on paper or by emailed PDF.",
     acceptanceCriteria: [
       "Intake forms are fillable online with field validation",
-      "Submitted information reaches the patient record without manual re-keying",
-      "Staff can see which patients have completed intake before the appointment",
+      "Submitted information reaches the customer record without manual re-keying",
+      "Staff can see which customers have completed intake before the appointment",
     ],
     successMetric: "Intake completed before arrival",
-    successTarget: "At least 80% of new patients complete intake online before their visit",
+    successTarget: "At least 80% of new customers complete intake online before their appointment",
     gapSignals: ["paper_or_pdf", "email_to_apply"],
     rationaleFor: (excerpt) =>
       `Intake appears paper/PDF-based on the public evidence: "${excerpt}"`,
@@ -94,7 +94,7 @@ const CATALOG: CatalogEntry[] = [
       "Referrals, records, and documents are exchanged with other providers digitally instead of by fax.",
     acceptanceCriteria: [
       "Outbound referrals and records can be sent digitally with delivery confirmation",
-      "Inbound documents attach to the patient record without printing or scanning",
+      "Inbound documents attach to the customer record without printing or scanning",
       "Fax remains only as a fallback, not the primary channel",
     ],
     successMetric: "Fax volume for referrals and records",
@@ -160,18 +160,18 @@ const STANDARDS: Array<Omit<CatalogEntry, "gapSignals" | "rationaleFor"> & {
       "Standard high-impact automation for appointment-based practices; offered for every qualified lead.",
   },
   {
-    key: "patient_recall",
+    key: "reactivation",
     code: "UC-RECALL",
     title: "Automated recall & reactivation",
     statement:
-      "Patients who are due or overdue for hygiene, follow-up, or treatment are recalled automatically until they rebook.",
+      "Customers who are due or overdue for a follow-up or recurring service are contacted automatically until they rebook.",
     acceptanceCriteria: [
-      "Due/overdue patients are identified automatically from the schedule history",
-      "Recall messages go out on a set cadence and stop when the patient books",
+      "Due or overdue customers are identified automatically from the booking history",
+      "Follow-up messages go out on a set cadence and stop when the customer books",
       "Reactivation results are reported per campaign",
     ],
-    successMetric: "Overdue patients reactivated per recall cycle",
-    successTarget: "At least 15% of overdue patients rebooked in the first cycle",
+    successMetric: "Overdue customers reactivated per cycle",
+    successTarget: "At least 15% of overdue customers rebooked in the first cycle",
     rationale:
       "Standard high-impact automation for appointment-based practices; offered for every qualified lead.",
   },
@@ -180,7 +180,7 @@ const STANDARDS: Array<Omit<CatalogEntry, "gapSignals" | "rationaleFor"> & {
     code: "UC-REVIEWS",
     title: "Automated review & referral requests",
     statement:
-      "After a completed visit, patients are automatically invited to leave a public review or refer a friend.",
+      "After a completed appointment, customers are automatically invited to leave a public review or refer a friend.",
     acceptanceCriteria: [
       "Review invitations are sent automatically after completed appointments",
       "Unhappy responses route to the practice privately before anything is posted",
@@ -205,7 +205,7 @@ const CAPACITY_CASE: CandidateUseCase = {
   rationale: "",
   acceptanceCriteria: [
     "The top call reasons (booking, intake, reminders) are handled by self-service or automation",
-    "Front-desk staff time shifts from repetitive calls to patient care and follow-up",
+    "Front-desk staff time shifts from repetitive calls to customer care and follow-up",
     "Booking lead time and missed-call volume are tracked monthly",
   ],
 };
