@@ -159,3 +159,12 @@ describe("Job Bank gate governs scoring, not just the refresh", () => {
     expect(worker).toContain("(await jobBankSourceApproved(client))");
   });
 });
+
+describe("rescore failure surfacing", () => {
+  it("names the failing row instead of dying as a masked 500", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "../api/_lib/rescore.ts"), "utf8");
+    expect(source).toContain("Rescore failed at");
+    expect(source).toContain("statusCode: 422");
+  });
+});
