@@ -482,7 +482,7 @@ export async function runWorkerTick(
     const optedIn = (await client`
       select id, workspace_id, criteria, updated_by
       from public.scrape_campaigns
-      where auto_apply_criteria
+      where auto_apply_criteria and status = 'active'
     `) as unknown as Array<{
       id: string;
       workspace_id: string;

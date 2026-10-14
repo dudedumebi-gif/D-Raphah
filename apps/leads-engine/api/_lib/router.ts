@@ -32,6 +32,11 @@ import {
 } from "./source-import.js";
 import { enqueueCanary, runWorkerTick } from "./worker.js";
 import { dryRunRescore, rescoreCampaignBatch } from "./rescore.js";
+import {
+  isRetired,
+  retireDecision,
+  type RetireOutcome,
+} from "./archive.js";
 import { readJobBankMarketView } from "./job-bank-market.js";
 import {
   DiscoveryGeoInputSchema,
@@ -677,6 +682,64 @@ async function authenticatedRoutes(
     if (error) throw new Error(error.message);
     return json({ data });
   }
+  // Retire/restore a source (History). Retirement is not deletion:
+  // the row, its policy history, jobs, and assessments survive; the
+  // status change alone stops collection everywhere, because every
+  // collection path keys off status = 'active'. The transition runs
+  // through the set_source_retired RPC (migration 202610120007) on
+  // the admin connection: authenticated has no UPDATE grant on
+  // source_definitions at all, and the RPC makes the in-flight
+  // guard atomic with the write. EXECUTE is revoked from the API
+  // roles, so the owner/administrator check is the only way in.
+  const sourceRetire = pathname.match(
+    /^\/api\/v1\/sources\/([0-9a-f-]+)\/(retire|restore)$/i,
+  );
+  if (sourceRetire && request.method === "POST") {
+    requireRole(context, ["owner", "administrator"]);
+    const sourceId = sourceRetire[1];
+    const action = sourceRetire[2].toLowerCase();
+    const admin = createAdminClient();
+    const rpcRows = (await admin`
+      select public.set_source_retired(
+        ${workspaceId}::uuid, ${sourceId}::uuid, ${action === "retire"}
+      ) as result
+    `) as unknown as Array<{ result: RetireOutcome }>;
+    const outcome = rpcRows[0]?.result;
+    if (!outcome) throw new Error("Retire transition returned no result");
+    const decision = retireDecision(outcome, "Source");
+    if (decision.kind === "error")
+      throw Object.assign(new Error(decision.message), {
+        statusCode: decision.statusCode,
+      });
+    const { data: updated, error: readError } = await client
+      .from("source_definitions")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("id", sourceId)
+      .single();
+    if (readError || !updated)
+      throw new Error(readError?.message ?? "Source not found");
+    if (decision.kind === "retired") {
+      await logWorkspaceEvent(client, workspaceId, {
+        action: "source.retired",
+        resourceType: "source_definitions",
+        resourceId: sourceId,
+        reason: `Source "${outcome.name}" retired to History by ${context.user.email ?? context.user.id}. Collection stops; records and audit history are preserved.`,
+        before: { status: decision.fromStatus },
+        after: { status: "retired" },
+      });
+    } else {
+      await logWorkspaceEvent(client, workspaceId, {
+        action: "source.restored",
+        resourceType: "source_definitions",
+        resourceId: sourceId,
+        reason: `Source "${outcome.name}" restored from History to status "${decision.toStatus}" by ${context.user.email ?? context.user.id}.`,
+        before: { status: "retired" },
+        after: { status: decision.toStatus },
+      });
+    }
+    return json({ data: updated });
+  }
   const sourceUpdate = pathname.match(/^\/api\/v1\/sources\/([0-9a-f-]+)$/i);
   if (sourceUpdate && request.method === "PATCH") {
     requireRole(context, ["owner", "administrator"]);
@@ -743,6 +806,16 @@ async function authenticatedRoutes(
       })
       .parse(await bodyJson(request));
     const scheduleEnabled = input.scheduleEnabled;
+    const { data: patchTarget, error: patchTargetError } = await client
+      .from("scrape_campaigns")
+      .select("id,status")
+      .eq("workspace_id", workspaceId)
+      .eq("id", campaignCriteria[1])
+      .single();
+    if (patchTargetError || !patchTarget)
+      throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
+    if (isRetired(patchTarget.status as string))
+      throw Object.assign(new Error("Campaign is retired"), { statusCode: 409 });
     // Capture the current observed count so the suggestion stays suppressed
     // until fresh scrape output changes it.
     const { data: counts } = await client.rpc("campaign_qualified_counts", {
@@ -808,6 +881,63 @@ async function authenticatedRoutes(
     });
   }
 
+  // Retire/restore a campaign (History). Same contract as sources:
+  // records survive, automation stops (auto-apply and the due-job
+  // scheduler both skip retired campaigns, and discovery gates on
+  // campaign status), restore returns the exact prior status. The
+  // transition runs through the set_campaign_retired RPC on the
+  // admin connection — authenticated holds only column-scoped
+  // UPDATE grants on scrape_campaigns, which do not cover the
+  // lifecycle columns.
+  const criteriaRetire = pathname.match(
+    /^\/api\/v1\/criteria\/([0-9a-f-]+)\/(retire|restore)$/i,
+  );
+  if (criteriaRetire && request.method === "POST") {
+    requireRole(context, ["owner", "administrator"]);
+    const campaignId = criteriaRetire[1];
+    const action = criteriaRetire[2].toLowerCase();
+    const admin = createAdminClient();
+    const rpcRows = (await admin`
+      select public.set_campaign_retired(
+        ${workspaceId}::uuid, ${campaignId}::uuid, ${action === "retire"}
+      ) as result
+    `) as unknown as Array<{ result: RetireOutcome }>;
+    const outcome = rpcRows[0]?.result;
+    if (!outcome) throw new Error("Retire transition returned no result");
+    const decision = retireDecision(outcome, "Campaign");
+    if (decision.kind === "error")
+      throw Object.assign(new Error(decision.message), {
+        statusCode: decision.statusCode,
+      });
+    const { data: updated, error: readError } = await client
+      .from("scrape_campaigns")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("id", campaignId)
+      .single();
+    if (readError || !updated)
+      throw new Error(readError?.message ?? "Campaign not found");
+    if (decision.kind === "retired") {
+      await logWorkspaceEvent(client, workspaceId, {
+        action: "criteria.retired",
+        resourceType: "scrape_campaigns",
+        resourceId: campaignId,
+        reason: `Campaign "${outcome.name}" retired to History by ${context.user.email ?? context.user.id}. Criteria automation stops; records are preserved.`,
+        before: { status: decision.fromStatus },
+        after: { status: "retired" },
+      });
+    } else {
+      await logWorkspaceEvent(client, workspaceId, {
+        action: "criteria.restored",
+        resourceType: "scrape_campaigns",
+        resourceId: campaignId,
+        reason: `Campaign "${outcome.name}" restored from History to status "${decision.toStatus}" by ${context.user.email ?? context.user.id}.`,
+        before: { status: "retired" },
+        after: { status: decision.toStatus },
+      });
+    }
+    return json({ data: updated });
+  }
   // Audited rescore: recompute the campaign's assessments from
   // STORED evidence and signal observations under current criteria —
   // never a re-scrape. dryRun returns projected qualifiers + the top
@@ -896,12 +1026,14 @@ async function authenticatedRoutes(
     const campaignId = applySuggestion[1];
     const { data: campaign, error: campaignError } = await client
       .from("scrape_campaigns")
-      .select("id,criteria")
+      .select("id,criteria,status")
       .eq("workspace_id", workspaceId)
       .eq("id", campaignId)
       .single();
     if (campaignError || !campaign)
       throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
+    if (isRetired((campaign as { status?: string }).status))
+      throw Object.assign(new Error("Campaign is retired"), { statusCode: 409 });
     const { data: counts, error: countsError } = await client.rpc(
       "campaign_qualified_counts",
       { p_workspace_id: workspaceId },
@@ -985,12 +1117,14 @@ async function authenticatedRoutes(
       .parse(await bodyJson(request));
     const { data: existing, error: existingError } = await client
       .from("scrape_campaigns")
-      .select("id,auto_apply_criteria")
+      .select("id,auto_apply_criteria,status")
       .eq("workspace_id", workspaceId)
       .eq("id", campaignId)
       .single();
     if (existingError || !existing)
       throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
+    if (isRetired((existing as { status?: string }).status))
+      throw Object.assign(new Error("Campaign is retired"), { statusCode: 409 });
     const { data: updated, error: updateError } = await client
       .from("scrape_campaigns")
       .update({ auto_apply_criteria: input.autoApply })
@@ -1642,7 +1776,7 @@ async function authenticatedRoutes(
     requireRole(context, ["owner", "administrator", "analyst"]);
     const { data: discoverySource, error: discoverySourceError } = await client
       .from("discovery_sources")
-      .select("adapter_id")
+      .select("adapter_id,campaign_id")
       .eq("workspace_id", workspaceId)
       .eq("id", discoveryRun[1])
       .single();
@@ -1650,6 +1784,20 @@ async function authenticatedRoutes(
       throw Object.assign(new Error("Discovery source not found"), {
         statusCode: 404,
       });
+    // Retiring a campaign stops its discovery collection too: a
+    // discovery source linked to a retired campaign does not run.
+    if (discoverySource.campaign_id) {
+      const { data: linkedCampaign } = await client
+        .from("scrape_campaigns")
+        .select("status")
+        .eq("workspace_id", workspaceId)
+        .eq("id", discoverySource.campaign_id)
+        .maybeSingle();
+      if (isRetired(linkedCampaign?.status as string | null))
+        throw Object.assign(new Error("Campaign is retired"), {
+          statusCode: 409,
+        });
+    }
     const requiredTerms = termsForAdapter(discoverySource.adapter_id);
     await requireTermsAcceptance(
       {
