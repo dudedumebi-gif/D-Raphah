@@ -79,6 +79,7 @@ function CampaignSettings({
   const [strengthInput, setStrengthInput] = useState(
     criteria.jobBankMarketStrength ?? 20,
   );
+  const [retiring, setRetiring] = useState(false);
   const suggestion = campaign.criteria_suggestion;
   const usesRadius = mode === "radius" || mode === "hybrid";
   const hasSuggestedChanges =
@@ -101,6 +102,18 @@ function CampaignSettings({
       );
     } finally {
       setApplying(false);
+    }
+  }
+  async function retire() {
+    setRetiring(true);
+    try {
+      await mutate(
+        `/api/v1/criteria/${campaign.id}/retire`,
+        { method: "POST", body: JSON.stringify({}) },
+        `${campaign.name} retired to History.`,
+      );
+    } finally {
+      setRetiring(false);
     }
   }
   async function runDryRun() {
@@ -612,6 +625,20 @@ function CampaignSettings({
           </table>
         </div>
       ) : null}
+      <div className="requeue-row">
+        <p className="muted">
+          Retire this campaign to History when it is no longer in use.
+          Its criteria, jobs, and assessments are preserved, criteria
+          automation stops, and it can be restored at any time.
+        </p>
+        <button
+          type="button"
+          disabled={busy || applying || retiring}
+          onClick={() => void retire()}
+        >
+          {retiring ? "Retiring…" : "Retire campaign"}
+        </button>
+      </div>
       </>
       ) : null}
     </section>
@@ -628,9 +655,15 @@ export function Settings({
   // Accordion state: null follows the default (first campaign expanded,
   // the rest collapsed); a campaign id pins it open, "" pins all closed.
   const [openId, setOpenId] = useState<string | null>(null);
-  const campaigns = data.campaigns;
+  const campaigns = data.campaigns.filter(
+    (campaign) => campaign.status !== "retired",
+  );
+  const history = data.campaigns.filter(
+    (campaign) => campaign.status === "retired",
+  );
   const effectiveOpenId = openId ?? campaigns[0]?.id ?? null;
   return (
+    <>
     <div className="content settings-grid">
       {campaigns.length ? (
         campaigns.map((campaign) => (
@@ -652,5 +685,46 @@ export function Settings({
         <p>Create a source to configure its campaign.</p>
       )}
     </div>
+    {history.length ? (
+      <section className="panel history-panel">
+        <div className="panel-head">
+          <div>
+            <h3>History — retired campaigns</h3>
+            <p>
+              Retired criteria are preserved for audit and can be
+              restored; they no longer drive collection or automation.
+            </p>
+          </div>
+        </div>
+        <div className="record-list">
+          {history.map((campaign) => (
+            <div className="record-row" key={campaign.id}>
+              <div>
+                <b>{campaign.name}</b>
+                <small>
+                  Retired{" "}
+                  {campaign.retired_at
+                    ? new Date(campaign.retired_at).toLocaleDateString()
+                    : ""}
+                </small>
+              </div>
+              <button
+                className="row-action"
+                onClick={() =>
+                  void mutate(
+                    `/api/v1/criteria/${campaign.id}/restore`,
+                    { method: "POST", body: JSON.stringify({}) },
+                    `${campaign.name} restored.`,
+                  )
+                }
+              >
+                Restore
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+    ) : null}
+    </>
   );
 }

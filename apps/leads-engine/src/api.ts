@@ -119,6 +119,8 @@ export interface SourceRecord {
   collection_method: string;
   business_purpose: string;
   status: string;
+  retired_at?: string | null;
+  retired_from_status?: string | null;
   active_policy_id: string | null;
   created_at: string;
   data_mode: DataMode;
@@ -132,6 +134,9 @@ export interface CampaignRecord {
   interval_minutes: number;
   schedule_enabled: boolean;
   next_run_at: string | null;
+  status?: string;
+  retired_at?: string | null;
+  retired_from_status?: string | null;
   data_mode: DataMode;
   criteria_suggestion?: {
     direction: "loosen" | "hold" | "tighten";

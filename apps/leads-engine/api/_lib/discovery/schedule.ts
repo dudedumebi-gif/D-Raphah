@@ -266,6 +266,7 @@ function buildStore(client: ScheduleSqlClient): DiscoveryStore {
           select id, criteria from public.scrape_campaigns
           where source_id = ${sourceId}::uuid
             and workspace_id = ${workspaceId}::uuid
+            and status = 'active'
           limit 1
         ) sc on true
         on conflict (idempotency_key) do nothing
@@ -324,6 +325,25 @@ export async function runScheduledDiscovery(
   for (const source of sources) {
     result.checked += 1;
     try {
+      // Retiring a campaign stops its discovery collection too.
+      // (scrape_campaigns.status arrives with migration
+      // 202610120007; if the column is missing this query throws and
+      // the source lands in errors — fail-closed, never collected.)
+      if (source.campaign_id) {
+        const campaignRows = (await client`
+          select status from public.scrape_campaigns
+          where id = ${source.campaign_id}::uuid
+          limit 1
+        `) as unknown as Array<{ status: string }>;
+        if (campaignRows[0]?.status === "retired") {
+          log("warn", "discovery_skipped_campaign_retired", {
+            discoverySourceId: source.id,
+            campaignId: source.campaign_id,
+          });
+          result.skipped += 1;
+          continue;
+        }
+      }
       const recent = (await client`
         select 1 from public.discovery_runs
         where discovery_source_id = ${source.id}::uuid

@@ -1069,7 +1069,9 @@ function Sources({
             </div>
           </div>
           <div className="record-list">
-            {data.sources.map((source) => (
+            {data.sources
+              .filter((source) => source.status !== "retired")
+              .map((source) => (
               <div className="record-row" key={source.id}>
                 <div>
                   <b>{source.name}</b>
@@ -1085,6 +1087,18 @@ function Sources({
                   }
                 >
                   {editingId === source.id ? "Cancel" : "Edit"}
+                </button>
+                <button
+                  className="row-action"
+                  onClick={() =>
+                    void mutate(
+                      `/api/v1/sources/${source.id}/retire`,
+                      { method: "POST", body: JSON.stringify({}) },
+                      `${source.name} retired to History.`,
+                    )
+                  }
+                >
+                  Retire
                 </button>
                 {source.status === "pending_approval" ? (
                   <button
@@ -1169,6 +1183,39 @@ function Sources({
               </div>
             ))}
           </div>
+          {data.sources.some((source) => source.status === "retired") ? (
+            <div className="history-block">
+              <h4>History — retired sources</h4>
+              {data.sources
+                .filter((source) => source.status === "retired")
+                .map((source) => (
+                  <div className="record-row" key={source.id}>
+                    <div>
+                      <b>{source.name}</b>
+                      <small>
+                        {source.base_url} · retired{" "}
+                        {source.retired_at
+                          ? new Date(source.retired_at).toLocaleDateString()
+                          : ""}
+                      </small>
+                    </div>
+                    <Status value={source.status} />
+                    <button
+                      className="row-action"
+                      onClick={() =>
+                        void mutate(
+                          `/api/v1/sources/${source.id}/restore`,
+                          { method: "POST", body: JSON.stringify({}) },
+                          `${source.name} restored.`,
+                        )
+                      }
+                    >
+                      Restore
+                    </button>
+                  </div>
+                ))}
+            </div>
+          ) : null}
         </section>
         <section className="panel form-panel">
           <div className="panel-head">
