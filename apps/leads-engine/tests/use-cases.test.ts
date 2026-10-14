@@ -263,6 +263,21 @@ describe("production-safety bundle — source contracts", () => {
     expect(migration).toContain("'lead-engine', '3.3.16'");
   });
 
+  it("persisted use-case rows are migrated to the neutral catalog", () => {
+    // Stored rows keep their generation-time copy (the GET route
+    // only generates when no rows exist), so the copy fix needs a
+    // data migration for rows persisted before it (Codex on #52).
+    const migration = read(
+      "../neon/migrations/202610120013_use_case_copy_neutralization.sql",
+    );
+    expect(migration).toContain(
+      "set use_case_key = 'reactivation'",
+    );
+    expect(migration).toContain("patient_recall");
+    expect(migration).toContain("Digital intake forms");
+    expect(migration).toContain("'lead-engine', '3.3.17'");
+  });
+
   it("the deterministic catalog never speaks clinic", () => {
     // The rules floor and signal cases serve every vertical, so the
     // copy is customer-neutral: a field-service lead never reads
