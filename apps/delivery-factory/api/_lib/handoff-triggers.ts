@@ -17,9 +17,11 @@ import { transitionProjectStage } from "./projects.js";
 import type { IntakeEnv } from "./verify.js";
 import {
   buildLeadHandoffTriggerPayload,
+  claimFailedRunRetry,
   claimProjectWorkflowStart,
   executeWorkflow,
   findLeadHandoffRunForPackage,
+  getProjectIdForPackage,
   getProjectWorkflowStart,
   getRun,
   listPublishedWorkflowsByTrigger,
@@ -84,14 +86,54 @@ export async function triggerLeadHandoffWorkflows(
       skipped.push(wf.id);
       continue;
     }
+    // Reserve the start through the same row the manual begin
+    // claims (Codex on PR #53): without it, a begin racing this
+    // hook — or a second begin — could execute the workflow twice.
+    // The claim is fail-open: if the reservation layer is
+    // unavailable (its migration has not run yet), intake falls
+    // back to the pre-reservation direct execution rather than
+    // breaking package acceptance.
+    let claimId: string | null = null;
+    let reservedElsewhere = false;
+    const projectId = await getProjectIdForPackage(db, pkg.packageId);
+    if (projectId) {
+      try {
+        claimId = await claimProjectWorkflowStart(db, {
+          projectId,
+          workflowId: wf.id,
+          packageId: pkg.packageId,
+          environment,
+          runId: null,
+          state: "reserved",
+        });
+        reservedElsewhere = claimId === null;
+      } catch {
+        claimId = null;
+      }
+    }
+    if (reservedElsewhere) {
+      skipped.push(wf.id);
+      continue;
+    }
     try {
-      await executeWorkflow(
+      const run = await executeWorkflow(
         db,
         wf.id,
         payload as unknown as Record<string, unknown>,
       );
+      if (claimId)
+        await settleProjectWorkflowStart(
+          db,
+          claimId,
+          run.id,
+          run.status === "completed" ? "completed" : "failed",
+        );
       executed.push(wf.id);
     } catch (error) {
+      if (claimId)
+        await settleProjectWorkflowStart(db, claimId, null, "failed").catch(
+          () => undefined,
+        );
       failures.push({
         workflowId: wf.id,
         error: error instanceof Error ? error.message : String(error),
@@ -436,10 +478,12 @@ export async function beginProjectWorkflow(
       await settleProjectWorkflowStart(sql, start.id, run.id, "completed");
       return finishBegin(run.id, true);
     }
-    // The recorded run failed, was cancelled, or is gone: normalize
-    // the start to 'failed' and take the retry claim.
-    await settleProjectWorkflowStart(sql, start.id, start.run_id, "failed");
-    if (await retryProjectWorkflowStart(sql, start.id)) {
+    // The recorded run failed, was cancelled, or is gone: claim
+    // the retry with ONE conditional update keyed on the exact
+    // (state, run_id) observed (Codex on PR #53) — an unconditional
+    // settle to 'failed' followed by a separate retry claim let
+    // two concurrent begins both win an execution.
+    if (await claimFailedRunRetry(sql, start.id, start.run_id)) {
       return executeAsOwner(start.id);
     }
     throw alreadyRunning();

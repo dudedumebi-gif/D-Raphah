@@ -5,6 +5,7 @@ import {
   beginProjectWorkflow,
   getProjectBeginState,
   resolveBeginWorkflow,
+  triggerLeadHandoffWorkflows,
 } from "../api/_lib/handoff-triggers.js";
 import type { TriggerableWorkflow } from "../api/_lib/workflows.js";
 import { FakeDeliveryDb } from "./fake-db.js";
@@ -139,6 +140,7 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
   // project_workflow_starts, keyed like the table's unique
   // (project_id, workflow_id) constraint.
   const starts = new Map<string, FixtureStart>();
+  const projectsByPackage = new Map<string, string>();
   const startKey = (projectId: unknown, workflowId: unknown) =>
     `${String(projectId)}|${String(workflowId)}`;
 
@@ -283,6 +285,27 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
     }
     if (
       head.includes("update public.project_workflow_starts") &&
+      head.includes("set run_id = null, state = 'reserved'")
+    ) {
+      // claimFailedRunRetry: one conditional update keyed on the
+      // observed (state, run_id) — values are row id, run id.
+      const row = [...starts.values()].find((s) => s.id === values[0]);
+      if (!row || row.state !== "reserved" || row.run_id !== String(values[1]))
+        return [];
+      row.run_id = null;
+      row.updated_at = new Date();
+      return [{ id: row.id }];
+    }
+    if (
+      head.includes("from public.delivery_projects") &&
+      head.includes("package_id =")
+    ) {
+      // getProjectIdForPackage — seeded by the trigger tests.
+      const pid = projectsByPackage.get(String(values[0]));
+      return pid ? [{ id: pid }] : [];
+    }
+    if (
+      head.includes("update public.project_workflow_starts") &&
       head.includes("set run_id =")
     ) {
       // settleProjectWorkflowStart: values are run id, state, row id.
@@ -317,7 +340,7 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
         !row ||
         row.state !== "reserved" ||
         row.run_id !== null ||
-        Date.now() - row.created_at.getTime() <= 10 * 60 * 1000
+        Date.now() - row.updated_at.getTime() <= 10 * 60 * 1000
       )
         return [];
       row.created_at = new Date();
@@ -327,7 +350,7 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
     throw new Error(`Unexpected query: ${head.slice(0, 100)}`);
   }) as unknown as NeonClient;
 
-  return { db, runs, steps, starts };
+  return { db, runs, steps, starts, projectsByPackage };
 }
 
 function seedStart(
@@ -748,6 +771,7 @@ describe("beginProjectWorkflow", () => {
       state: "reserved",
       run_id: null,
       created_at: new Date(Date.now() - 15 * 60 * 1000),
+      updated_at: new Date(Date.now() - 15 * 60 * 1000),
     });
 
     const result = await beginProjectWorkflow(db, engine.db, {
@@ -939,5 +963,87 @@ describe("getProjectBeginState", () => {
       404,
       "Project not found",
     );
+  });
+});
+
+
+describe("begin reservation — Codex PR #53 follow-ups", () => {
+  it("two begins racing a failed recorded run execute exactly once", async () => {
+    const db = new FakeDeliveryDb();
+    const { project, pkg } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    // A previous start is 'reserved' against a run that FAILED.
+    const failedRunId = randomUUID();
+    engine.runs.set(failedRunId, {
+      id: failedRunId,
+      workflow_id: wf.id,
+      trigger_type: "lead_handoff",
+      trigger_payload: { package: { packageId: pkg.packageId } },
+      environment: "production",
+      status: "failed",
+      output: null,
+      error: "boom",
+      started_at: new Date().toISOString(),
+    });
+    seedStart(engine, {
+      project_id: project.id,
+      workflow_id: wf.id,
+      package_id: pkg.packageId,
+      run_id: failedRunId,
+      state: "reserved",
+    });
+    const attempts = await Promise.allSettled([
+      beginProjectWorkflow(db, engine.db, {
+        projectId: project.id,
+        environment: "production",
+      }),
+      beginProjectWorkflow(db, engine.db, {
+        projectId: project.id,
+        environment: "production",
+      }),
+    ]);
+    const fulfilled = attempts.filter((a) => a.status === "fulfilled");
+    const rejected = attempts.filter((a) => a.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    // The failed seed plus exactly ONE new execution.
+    expect(engine.runs.size).toBe(2);
+  });
+
+  it("the intake trigger reserves its start; a repeat trigger and a later begin do not re-execute", async () => {
+    const db = new FakeDeliveryDb();
+    const { project, pkg } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    engine.projectsByPackage.set(pkg.packageId, project.id);
+
+    const first = await triggerLeadHandoffWorkflows(
+      engine.db,
+      pkg,
+      "production",
+    );
+    expect(first.executed).toEqual([wf.id]);
+    expect(engine.runs.size).toBe(1);
+
+    const second = await triggerLeadHandoffWorkflows(
+      engine.db,
+      pkg,
+      "production",
+    );
+    expect(second.executed).toEqual([]);
+    expect(second.skipped).toEqual([wf.id]);
+    expect(engine.runs.size).toBe(1);
+
+    // The start row the trigger settled is 'completed': a manual
+    // begin adopts it (alreadyStarted) and advances the stage
+    // without executing again.
+    const begun = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+    expect(begun.alreadyStarted).toBe(true);
+    expect(engine.runs.size).toBe(1);
+    expect(db.projects.get(project.id)?.current_stage).toBe("onboarding");
   });
 });

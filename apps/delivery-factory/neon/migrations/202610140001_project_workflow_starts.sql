@@ -21,7 +21,7 @@
 
 create table if not exists public.project_workflow_starts (
   id uuid primary key default gen_random_uuid(),
-  project_id uuid not null references public.delivery_projects(id),
+  project_id uuid not null references public.delivery_projects(id) on delete cascade,
   workflow_id uuid not null,
   package_id uuid not null,
   environment text not null,

@@ -623,6 +623,55 @@ export async function retryProjectWorkflowStart(
 }
 
 /**
+ * Claim the retry of a start whose recorded run failed, was
+ * cancelled, or vanished — as ONE conditional update (Codex on
+ * PR #53). The previous shape settled the row to 'failed'
+ * unconditionally and then claimed the retry as a second step: two
+ * concurrent begins could both settle, and the loser's settle could
+ * overwrite the winner's fresh reservation back to 'failed',
+ * letting both claim and execute. Keyed on the exact (state,
+ * run_id) the caller observed, exactly one caller wins.
+ */
+export async function claimFailedRunRetry(
+  db: NeonClient,
+  id: string,
+  runId: string,
+): Promise<boolean> {
+  const rows = await q(db)`
+    update public.project_workflow_starts
+    set run_id = null, state = 'reserved', updated_at = now()
+    where id = ${id} and state = 'reserved' and run_id = ${runId}
+    returning id`;
+  return rows.length > 0;
+}
+
+/**
+ * The delivery project a handoff package produced, if one exists.
+ * Intake persists the project before the trigger hook runs, so the
+ * trigger can reserve its start through the same row the manual
+ * begin claims. A lookup failure (e.g. the reservation migration
+ * has not run yet) resolves to null and the caller falls back to
+ * the pre-reservation direct execution — the intake path must never
+ * break on the reservation layer.
+ */
+export async function getProjectIdForPackage(
+  db: NeonClient,
+  packageId: string,
+): Promise<string | null> {
+  try {
+    const rows = await q(db)`
+      select id
+      from public.delivery_projects
+      where package_id = ${packageId}
+      limit 1`;
+    if (!rows.length) return null;
+    return String(rows[0].id);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Reclaim a start whose claimant crashed between claiming and
  * executing: still 'reserved', no run recorded, and the claim is
  * older than ten minutes (the staleness test runs in SQL so no
@@ -637,7 +686,7 @@ export async function reclaimStaleProjectWorkflowStart(
     update public.project_workflow_starts
     set created_at = now(), updated_at = now()
     where id = ${id} and state = 'reserved' and run_id is null
-      and created_at < now() - interval '10 minutes'
+      and updated_at < now() - interval '10 minutes'
     returning id`;
   return rows.length > 0;
 }
