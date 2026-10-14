@@ -159,7 +159,7 @@ export function templateProposal(input: {
     "",
     `Hello ${input.orgName} team,`,
     "",
-    "We reviewed how your practice handles bookings, intake, and patient follow-up day to day, and we see a few concrete places where automation would give your front desk real time back. We would like to propose the following, scoped from what we observed:",
+    "We reviewed how your business handles bookings, intake, and follow-up day to day, and we see a few concrete places where automation would give your team real time back. We would like to propose the following, scoped from what we observed:",
     "",
     ...input.useCases.map(
       (useCase) => `• ${useCase.title} — ${useCase.statement}`,

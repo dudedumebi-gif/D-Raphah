@@ -230,6 +230,70 @@ describe("use-case handoff wiring — source contracts", () => {
   });
 });
 
+describe("production-safety bundle — source contracts", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (rel: string) => readFileSync(join(here, rel), "utf8");
+  const router = read("../api/_lib/router.ts");
+  const useCases = read("../api/_lib/use-cases.ts");
+  const proposals = read("../api/_lib/proposals.ts");
+
+  it("proposal approval is draft-only and answers 409 otherwise", () => {
+    const approveAt = router.indexOf(
+      'if (opportunityProposalApprove && request.method === "POST")',
+    );
+    const slice = router.slice(approveAt, approveAt + 4200);
+    expect(slice).toContain("and status = 'draft'");
+    expect(slice).toContain("Only a draft proposal can be approved");
+    expect(slice).toContain("statusCode: 409");
+  });
+
+  it("feedback writes stamp the opportunity's data_mode", () => {
+    const feedbackAt = router.indexOf("insert into public.lead_feedback (");
+    const slice = router.slice(feedbackAt, feedbackAt + 700);
+    expect(slice).toContain("notes, data_mode)");
+    expect(slice).toContain("opportunityRows[0].data_mode");
+    const sentAt = router.indexOf("'contacted', 'PROPOSAL_SENT'");
+    const sentSlice = router.slice(sentAt - 1200, sentAt + 300);
+    expect(sentSlice).toContain("notes, data_mode)");
+    expect(sentSlice).toContain("sentOpportunity[0]?.data_mode");
+    const migration = read(
+      "../neon/migrations/202610120012_feedback_data_mode_repair.sql",
+    );
+    expect(migration).toContain("set data_mode = o.data_mode");
+    expect(migration).toContain("'lead-engine', '3.3.16'");
+  });
+
+  it("persisted use-case rows are migrated to the neutral catalog", () => {
+    // Stored rows keep their generation-time copy (the GET route
+    // only generates when no rows exist), so the copy fix needs a
+    // data migration for rows persisted before it (Codex on #52).
+    const migration = read(
+      "../neon/migrations/202610120013_use_case_copy_neutralization.sql",
+    );
+    expect(migration).toContain(
+      "set use_case_key = 'reactivation'",
+    );
+    expect(migration).toContain("patient_recall");
+    expect(migration).toContain("Digital intake forms");
+    expect(migration).toContain("'lead-engine', '3.3.17'");
+  });
+
+  it("the deterministic catalog never speaks clinic", () => {
+    // The rules floor and signal cases serve every vertical, so the
+    // copy is customer-neutral: a field-service lead never reads
+    // about patients. (LLM output is evidence-grounded per lead.)
+    expect(useCases.toLowerCase()).not.toContain("patient");
+    expect(useCases).not.toContain("patient_recall");
+    expect(useCases).toContain('key: "reactivation"');
+    expect(proposals.toLowerCase()).not.toContain("patient");
+  });
+
+  it("CI runs on pushes to main", () => {
+    const ci = read("../../../.github/workflows/ci.yml");
+    expect(ci).toContain("branches: [main,");
+  });
+});
+
 describe("LLM drafter — full evidence, citation-verified", () => {
   const evidence =
     "Welcome to Donddental. To book an appointment please call us at 416-555-0100 during office hours. " +
