@@ -1313,7 +1313,11 @@ async function authenticatedRoutes(
     return json({ data });
   }
   // --- Lead pipeline board: the per-lead proposal + latest-outcome
-  // state the board derives stages from (src/pipeline-stage.ts).
+  // + handoff state the board derives stages from
+  // (src/pipeline-stage.ts). The handoff status rides along here
+  // rather than coming from GET /handoffs: that list is capped at
+  // 200 rows newest-first, so an older landed handoff could fall
+  // outside the window and the board would misclassify the lead.
   // Read-only over the server connection; scoping is the
   // opportunity's workspace (proposals and feedback hang off the
   // opportunity, and their inserts enforce the same workspace), so
@@ -1327,7 +1331,10 @@ async function authenticatedRoutes(
           order by p.created_at desc limit 1) as proposal_status,
         (select f.decision from public.lead_feedback f
           where f.opportunity_id = o.id
-          order by f.created_at desc limit 1) as latest_decision
+          order by f.created_at desc limit 1) as latest_decision,
+        (select h.status from public.handoff_outbox h
+          where h.idempotency_key like '%:' || o.id::text
+          order by h.created_at desc limit 1) as handoff_status
       from public.opportunities o
       where o.workspace_id = ${workspaceId}::uuid and o.status = 'active'`;
     return json({
@@ -1338,6 +1345,9 @@ async function authenticatedRoutes(
           : null,
         latestDecision: row.latest_decision
           ? String(row.latest_decision)
+          : null,
+        handoffStatus: row.handoff_status
+          ? String(row.handoff_status)
           : null,
       })),
     });

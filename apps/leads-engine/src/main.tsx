@@ -29,8 +29,10 @@ import {
 } from "./api";
 import {
   derivePipelineStage,
+  pipelineCardStatus,
   PIPELINE_STAGES,
   type PipelineStageId,
+  type PipelineStageInputs,
 } from "./pipeline-stage";
 import { Settings } from "./CriteriaSettings";
 import { JobBankMarket } from "./JobBankMarket";
@@ -2269,6 +2271,7 @@ interface PipelineLeadState {
   opportunityId: string;
   proposalStatus: string | null;
   latestDecision: string | null;
+  handoffStatus: string | null;
 }
 
 export function Leads({
@@ -2309,6 +2312,12 @@ export function Leads({
     Record<string, PipelineLeadState>
   >({});
   const [leadView, setLeadView] = useState<"list" | "board">("list");
+  // Pipeline load health: a failed load must never masquerade as
+  // "every lead is Qualified" — the board discloses it and keeps
+  // the last successful state.
+  const [pipelineStatus, setPipelineStatus] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
   const loadPipelineStates = useCallback(async () => {
     try {
       const result = await apiRequest<{ data: PipelineLeadState[] }>(
@@ -2319,8 +2328,9 @@ export function Leads({
       const map: Record<string, PipelineLeadState> = {};
       for (const row of result.data ?? []) map[row.opportunityId] = row;
       setPipelineByLead(map);
+      setPipelineStatus("ready");
     } catch {
-      // The board degrades to handoff-derived stages only.
+      setPipelineStatus("error");
     }
   }, [session, workspaceId]);
   useEffect(() => {
@@ -2735,6 +2745,19 @@ export function Leads({
           )}
         />
         ) : (
+          <>
+          {pipelineStatus === "loading" ? (
+            <p className="pipeline-notice">Loading pipeline state…</p>
+          ) : null}
+          {pipelineStatus === "error" ? (
+            <p className="pipeline-notice pipeline-notice-error">
+              Pipeline state could not be loaded
+              {Object.keys(pipelineByLead).length > 0
+                ? " — showing the last known state"
+                : ""}
+              . Stages may be incomplete; retrying automatically.
+            </p>
+          ) : null}
           <PipelineBoard
             leads={data.leads}
             handoffByLead={handoffByLead}
@@ -2742,6 +2765,7 @@ export function Leads({
             onUseCases={(lead) => void toggleUseCases(lead)}
             onProposal={(lead) => void toggleProposal(lead)}
           />
+          </>
         )}
         {deliveryBanner ? (
           <div
@@ -3121,12 +3145,18 @@ function PipelineBoard({
   onUseCases: (lead: LeadRecord) => void;
   onProposal: (lead: LeadRecord) => void;
 }) {
+  const inputsOf = (lead: LeadRecord): PipelineStageInputs => ({
+    // The pipeline endpoint carries the complete per-lead handoff
+    // status; the /handoffs map (capped at 200 rows) is a fallback.
+    handoffStatus:
+      pipelineByLead[lead.id]?.handoffStatus ??
+      handoffByLead[lead.id]?.status ??
+      null,
+    proposalStatus: pipelineByLead[lead.id]?.proposalStatus ?? null,
+    latestDecision: pipelineByLead[lead.id]?.latestDecision ?? null,
+  });
   const stageOf = (lead: LeadRecord): PipelineStageId =>
-    derivePipelineStage({
-      handoffStatus: handoffByLead[lead.id]?.status ?? null,
-      proposalStatus: pipelineByLead[lead.id]?.proposalStatus ?? null,
-      latestDecision: pipelineByLead[lead.id]?.latestDecision ?? null,
-    });
+    derivePipelineStage(inputsOf(lead));
   return (
     <div className="pipeline-board">
       {PIPELINE_STAGES.map((stage) => {
@@ -3148,8 +3178,7 @@ function PipelineBoard({
               const org = Array.isArray(lead.organizations)
                 ? lead.organizations[0]
                 : lead.organizations;
-              const state = pipelineByLead[lead.id];
-              const atDf = handoffByLead[lead.id]?.status === "sent";
+              const cardStatus = pipelineCardStatus(inputsOf(lead));
               return (
                 <div className="pipeline-card" key={lead.id}>
                   <div className="op-name">
@@ -3166,12 +3195,14 @@ function PipelineBoard({
                     <b>{Math.round(lead.confidence * 100)}%</b>
                   </p>
                   <p className="pipeline-card-status">
-                    {atDf ? (
+                    {cardStatus.kind === "outcome" ? (
+                      <>Last outcome: {cardStatus.decision}</>
+                    ) : cardStatus.kind === "at_df" ? (
                       <span className="badge status-success">At DF ✓</span>
-                    ) : state?.proposalStatus ? (
-                      <>Proposal: {state.proposalStatus}</>
-                    ) : state?.latestDecision ? (
-                      <>Last outcome: {state.latestDecision}</>
+                    ) : cardStatus.kind === "proposal" ? (
+                      <>Proposal: {cardStatus.status}</>
+                    ) : cardStatus.kind === "decision" ? (
+                      <>Last outcome: {cardStatus.decision}</>
                     ) : (
                       "Awaiting review"
                     )}

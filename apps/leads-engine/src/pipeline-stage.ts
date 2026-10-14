@@ -41,6 +41,40 @@ export interface PipelineStageInputs {
   latestDecision: string | null;
 }
 
+/** Reviewer outcomes that close a lead's selling motion. */
+export const TERMINAL_DECISIONS = ["won", "lost", "rejected", "duplicate"];
+
+export function isTerminalDecision(decision: string | null): boolean {
+  return decision !== null && TERMINAL_DECISIONS.includes(decision);
+}
+
+/**
+ * What a board card says about a lead, in precedence order: a
+ * terminal outcome first (it decided the lead's stage, and a card
+ * in the Won column must not lead with its proposal status), then
+ * the At DF badge, then the proposal state, then any other
+ * recorded outcome.
+ */
+export type PipelineCardStatus =
+  | { kind: "outcome"; decision: string }
+  | { kind: "at_df" }
+  | { kind: "proposal"; status: string }
+  | { kind: "decision"; decision: string }
+  | { kind: "awaiting" };
+
+export function pipelineCardStatus(
+  input: PipelineStageInputs,
+): PipelineCardStatus {
+  if (isTerminalDecision(input.latestDecision))
+    return { kind: "outcome", decision: input.latestDecision as string };
+  if (input.handoffStatus === "sent") return { kind: "at_df" };
+  if (input.proposalStatus)
+    return { kind: "proposal", status: input.proposalStatus };
+  if (input.latestDecision)
+    return { kind: "decision", decision: input.latestDecision };
+  return { kind: "awaiting" };
+}
+
 export function derivePipelineStage(
   input: PipelineStageInputs,
 ): PipelineStageId {

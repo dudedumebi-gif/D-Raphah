@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   derivePipelineStage,
+  isTerminalDecision,
+  pipelineCardStatus,
   PIPELINE_STAGES,
 } from "../src/pipeline-stage";
 
@@ -100,6 +102,42 @@ describe("derivePipelineStage", () => {
   });
 });
 
+describe("pipelineCardStatus", () => {
+  it("shows a terminal outcome before proposal status and At DF", () => {
+    expect(
+      pipelineCardStatus({
+        handoffStatus: "sent",
+        proposalStatus: "sent",
+        latestDecision: "won",
+      }),
+    ).toEqual({ kind: "outcome", decision: "won" });
+    expect(
+      pipelineCardStatus({
+        handoffStatus: null,
+        proposalStatus: "approved",
+        latestDecision: "rejected",
+      }),
+    ).toEqual({ kind: "outcome", decision: "rejected" });
+    expect(isTerminalDecision("duplicate")).toBe(true);
+    expect(isTerminalDecision("contacted")).toBe(false);
+    expect(isTerminalDecision(null)).toBe(false);
+  });
+
+  it("then At DF, proposal state, other outcomes, awaiting", () => {
+    expect(pipelineCardStatus({ ...NONE, handoffStatus: "sent" })).toEqual({
+      kind: "at_df",
+    });
+    expect(pipelineCardStatus({ ...NONE, proposalStatus: "draft" })).toEqual({
+      kind: "proposal",
+      status: "draft",
+    });
+    expect(
+      pipelineCardStatus({ ...NONE, latestDecision: "accepted" }),
+    ).toEqual({ kind: "decision", decision: "accepted" });
+    expect(pipelineCardStatus(NONE)).toEqual({ kind: "awaiting" });
+  });
+});
+
 describe("pipeline wiring", () => {
   const router = readFileSync(
     new URL("../api/_lib/router.ts", import.meta.url),
@@ -114,6 +152,16 @@ describe("pipeline wiring", () => {
     expect(router).toContain('"/api/v1/leads/pipeline"');
     expect(router).toContain("from public.lead_proposals");
     expect(router).toContain("from public.lead_feedback");
+    // Handoff status rides in the same query: GET /handoffs is
+    // capped at 200 rows, too small a window to classify from.
+    expect(router).toContain("from public.handoff_outbox");
+    expect(router).toContain("handoffStatus");
+  });
+
+  it("the board discloses pipeline load failure instead of faking Qualified", () => {
+    expect(main).toContain("pipelineStatus");
+    expect(main).toContain("Pipeline state could not be loaded");
+    expect(main).toContain("Loading pipeline state");
   });
 
   it("the Leads surface has the List | Board toggle and the board", () => {
