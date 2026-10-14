@@ -28,6 +28,11 @@ export interface CandidateUseCase {
   statement: string;
   rationale: string;
   acceptanceCriteria: string[];
+  /** Proposed success measure (the OKR promised to the lead):
+   *  approved with the use case and shipped as a handoff
+   *  successMeasures entry for DF to verify against. */
+  successMetric: string;
+  successTarget: string;
   /** How this candidate was produced: the evidence-reading LLM
    *  drafter, or the deterministic rules catalog. */
   source: "llm" | "rules";
@@ -39,6 +44,8 @@ interface CatalogEntry {
   title: string;
   statement: string;
   acceptanceCriteria: string[];
+  successMetric: string;
+  successTarget: string;
   /** Signal codes whose presence (manual gap) motivates this case. */
   gapSignals: string[];
   rationaleFor: (excerpt: string) => string;
@@ -56,6 +63,8 @@ const CATALOG: CatalogEntry[] = [
       "Online bookings land directly in the practice schedule — no phone transcription by staff",
       "The patient receives an immediate confirmation with visit details",
     ],
+    successMetric: "Online booking share",
+    successTarget: "At least 50% of new appointments booked online within 90 days of launch",
     gapSignals: ["phone_only"],
     rationaleFor: (excerpt) =>
       `Booking appears to run through the phone on the public evidence: "${excerpt}"`,
@@ -71,6 +80,8 @@ const CATALOG: CatalogEntry[] = [
       "Submitted information reaches the patient record without manual re-keying",
       "Staff can see which patients have completed intake before the appointment",
     ],
+    successMetric: "Intake completed before arrival",
+    successTarget: "At least 80% of new patients complete intake online before their visit",
     gapSignals: ["paper_or_pdf", "email_to_apply"],
     rationaleFor: (excerpt) =>
       `Intake appears paper/PDF-based on the public evidence: "${excerpt}"`,
@@ -86,6 +97,8 @@ const CATALOG: CatalogEntry[] = [
       "Inbound documents attach to the patient record without printing or scanning",
       "Fax remains only as a fallback, not the primary channel",
     ],
+    successMetric: "Fax volume for referrals and records",
+    successTarget: "Fax use reduced by at least 80% within 90 days",
     gapSignals: ["fax"],
     rationaleFor: (excerpt) =>
       `The practice still advertises fax-based exchange: "${excerpt}"`,
@@ -101,6 +114,8 @@ const CATALOG: CatalogEntry[] = [
       "Spreadsheet trackers are replaced by a live view of the same data",
       "Reconciliation exceptions surface automatically instead of by manual comparison",
     ],
+    successMetric: "Staff hours on duplicate entry and manual tracking",
+    successTarget: "At least 5 hours per week returned to the front desk",
     gapSignals: ["spreadsheet_ops", "manual_reconciliation"],
     rationaleFor: (excerpt) =>
       `Manual back-office work is visible in the evidence: "${excerpt}"`,
@@ -116,6 +131,8 @@ const CATALOG: CatalogEntry[] = [
       "The legacy system is retired or reduced to read-only archive",
       "Staff are trained and the cutover has a rollback path",
     ],
+    successMetric: "Legacy system in daily front-desk use",
+    successTarget: "Retired or reduced to read-only archive within 6 months",
     gapSignals: ["legacy_system"],
     rationaleFor: (excerpt) =>
       `A legacy system anchors operations in the evidence: "${excerpt}"`,
@@ -137,6 +154,8 @@ const STANDARDS: Array<Omit<CatalogEntry, "gapSignals" | "rationaleFor"> & {
       "Confirmations and cancellations update the schedule without staff phone calls",
       "The no-show rate is visible week over week",
     ],
+    successMetric: "Appointment no-show rate",
+    successTarget: "Reduced by at least 25% within 90 days of launch",
     rationale:
       "Standard high-impact automation for appointment-based practices; offered for every qualified lead.",
   },
@@ -151,6 +170,8 @@ const STANDARDS: Array<Omit<CatalogEntry, "gapSignals" | "rationaleFor"> & {
       "Recall messages go out on a set cadence and stop when the patient books",
       "Reactivation results are reported per campaign",
     ],
+    successMetric: "Overdue patients reactivated per recall cycle",
+    successTarget: "At least 15% of overdue patients rebooked in the first cycle",
     rationale:
       "Standard high-impact automation for appointment-based practices; offered for every qualified lead.",
   },
@@ -165,6 +186,8 @@ const STANDARDS: Array<Omit<CatalogEntry, "gapSignals" | "rationaleFor"> & {
       "Unhappy responses route to the practice privately before anything is posted",
       "New reviews and referrals are counted weekly",
     ],
+    successMetric: "New public reviews per month",
+    successTarget: "At least 10 new Google reviews per month",
     rationale:
       "Standard high-impact automation for appointment-based practices; offered for every qualified lead.",
   },
@@ -172,6 +195,8 @@ const STANDARDS: Array<Omit<CatalogEntry, "gapSignals" | "rationaleFor"> & {
 
 const CAPACITY_CASE: CandidateUseCase = {
   source: "rules",
+  successMetric: "Booking lead time",
+  successTarget: "Kept under 2 business days while demand grows",
   key: "front_desk_capacity",
   code: "UC-CAPACITY",
   title: "Front-desk capacity relief for growth",
@@ -233,6 +258,8 @@ export function generateUseCases(signals: SignalLike[]): CandidateUseCase[] {
       statement: entry.statement,
       rationale: entry.rationaleFor(shortExcerpt(signal.excerpt)),
       acceptanceCriteria: entry.acceptanceCriteria,
+      successMetric: entry.successMetric,
+      successTarget: entry.successTarget,
       source: "rules",
     });
   }
@@ -248,6 +275,8 @@ export function generateUseCases(signals: SignalLike[]): CandidateUseCase[] {
       rationale:
         "No online booking was found in the collected public evidence — scheduling appears to require staff involvement.",
       acceptanceCriteria: entry.acceptanceCriteria,
+      successMetric: entry.successMetric,
+      successTarget: entry.successTarget,
       source: "rules",
     });
   }
@@ -272,6 +301,8 @@ export function generateUseCases(signals: SignalLike[]): CandidateUseCase[] {
       statement: standard.statement,
       rationale: standard.rationale,
       acceptanceCriteria: standard.acceptanceCriteria,
+      successMetric: standard.successMetric,
+      successTarget: standard.successTarget,
       source: "rules",
     });
   }
@@ -287,6 +318,8 @@ export interface ApprovedUseCaseRow {
   human_validator_id: string | null;
   created_at: string;
   updated_at: string;
+  success_metric?: string | null;
+  success_target?: string | null;
 }
 
 /**
@@ -345,6 +378,8 @@ const LlmOutputSchema = z.object({
         evidenceQuote: z.string().min(10).max(400),
         rationale: z.string().min(10).max(400),
         acceptanceCriteria: z.array(z.string().min(5).max(200)).min(2).max(5),
+        successMetric: z.string().min(3).max(120),
+        successTarget: z.string().min(5).max(200),
       }),
     )
     .min(1)
@@ -418,6 +453,7 @@ export async function draftUseCasesWithLlm(
     "statement: one sentence describing the automated end state (what the business gains), written as a requirement.",
     "rationale: why the evidence supports this case, in one or two sentences.",
     "acceptanceCriteria: 2-4 measurable criteria the delivered automation must meet.",
+    "successMetric + successTarget: one proposed OKR for the case — the metric DF will verify after delivery, and a concrete target (these are promises made to the business, so keep targets ambitious but credible).",
     `When a case matches one of these standard concepts, use its title verbatim: ${preferredTitles.join("; ")}.`,
     "Order by strength of evidence, strongest first.",
   ].join("\n");
@@ -485,6 +521,8 @@ export async function draftUseCasesWithLlm(
       statement: item.statement,
       rationale: `${item.rationale} Evidence: "${item.evidenceQuote.replace(/\s+/g, " ").trim()}"`,
       acceptanceCriteria: item.acceptanceCriteria,
+      successMetric: item.successMetric,
+      successTarget: item.successTarget,
       source: "llm",
     });
   }

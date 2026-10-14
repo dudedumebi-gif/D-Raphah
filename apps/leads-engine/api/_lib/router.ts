@@ -31,6 +31,11 @@ import {
   mergeUseCaseCandidates,
   type SignalLike,
 } from "./use-cases.js";
+import {
+  draftProposalWithLlm,
+  templateProposal,
+  type ApprovedUseCaseForProposal,
+} from "./proposals.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
 import {
   dedupeRows,
@@ -706,6 +711,18 @@ async function authenticatedRoutes(
   );
   const opportunityUseCasesApprove = pathname.match(
     /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/use-cases\/approve$/i,
+  );
+  const opportunityProposal = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal$/i,
+  );
+  const opportunityProposalDraft = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal\/draft$/i,
+  );
+  const opportunityProposalApprove = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal\/approve$/i,
+  );
+  const opportunityProposalSent = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/proposal\/sent$/i,
   );
   const sourceRetire = pathname.match(
     /^\/api\/v1\/sources\/([0-9a-f-]+)\/(retire|restore)$/i,
@@ -1474,6 +1491,8 @@ async function authenticatedRoutes(
             rationale: candidate.rationale,
             acceptance_criteria: candidate.acceptanceCriteria,
             generation_source: candidate.source,
+            success_metric: candidate.successMetric,
+            success_target: candidate.successTarget,
             status: "suggested",
           })),
           { onConflict: "opportunity_id,use_case_key", ignoreDuplicates: true },
@@ -1496,6 +1515,17 @@ async function authenticatedRoutes(
     const input = z
       .object({
         useCaseIds: z.array(z.string().uuid()).min(1).max(20),
+        // Reviewer-edited success measures (the OKRs), keyed by
+        // use-case id; approved together with the use case.
+        measures: z
+          .record(
+            z.string().uuid(),
+            z.object({
+              metric: z.string().min(3).max(120),
+              target: z.string().min(5).max(200),
+            }),
+          )
+          .optional(),
       })
       .parse(await bodyJson(request));
     const validator = context.user.email ?? context.user.id;
@@ -1515,6 +1545,21 @@ async function authenticatedRoutes(
       throw Object.assign(new Error("No matching use cases for this lead"), {
         statusCode: 404,
       });
+    // Persist any reviewer-edited success measures for the
+    // approved rows (they ship as the package's successMeasures).
+    for (const [useCaseId, measure] of Object.entries(input.measures ?? {})) {
+      if (!input.useCaseIds.includes(useCaseId)) continue;
+      const { error: measureError } = await client
+        .from("opportunity_use_cases")
+        .update({
+          success_metric: measure.metric,
+          success_target: measure.target,
+        })
+        .eq("workspace_id", workspaceId)
+        .eq("opportunity_id", opportunityId)
+        .eq("id", useCaseId);
+      if (measureError) throw new Error(measureError.message);
+    }
     // The approved set is exactly the submitted selection: rows
     // approved earlier but not re-selected revert to suggested.
     const { data: stillApproved } = await client
@@ -1543,6 +1588,258 @@ async function authenticatedRoutes(
       after: { approvedUseCaseIds: input.useCaseIds },
     });
     return json({ data: { approved: approvedNow.length } });
+  }
+
+  // Lead proposals (placement decision 2026-10-14): outreach is
+  // drafted in LE from the lead's evidence + approved use cases,
+  // approved by the reviewer, gated on a recorded CASL consent
+  // basis, and sent by a human. Outcomes land in lead_feedback.
+  if (opportunityProposal && request.method === "GET") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposal[1];
+    const { data: opportunity, error: opportunityError } = await client
+      .from("opportunities")
+      .select("id, organization_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", opportunityId)
+      .single();
+    if (opportunityError || !opportunity)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    const { data: proposals } = await client
+      .from("lead_proposals")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const { data: consent } = await client
+      .from("consent_records")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .or(
+        `opportunity_id.eq.${opportunityId},organization_id.eq.${opportunity.organization_id}`,
+      )
+      .limit(1);
+    const { data: approvedCases } = await client
+      .from("opportunity_use_cases")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .eq("status", "approved");
+    return json({
+      data: {
+        proposal: proposals?.[0] ?? null,
+        consentRecorded: (consent?.length ?? 0) > 0,
+        approvedUseCases: approvedCases?.length ?? 0,
+      },
+    });
+  }
+
+  if (opportunityProposalDraft && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposalDraft[1];
+    const { data: approvedCases, error: casesError } = await client
+      .from("opportunity_use_cases")
+      .select("title, statement, success_metric, success_target")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .eq("status", "approved")
+      .order("approved_at", { ascending: true });
+    if (casesError) throw new Error(casesError.message);
+    if (!approvedCases || approvedCases.length === 0)
+      throw Object.assign(
+        new Error(
+          "Approve at least one use case first — the proposal is drafted from the approved use cases and their success measures.",
+        ),
+        { statusCode: 409 },
+      );
+    const admin = createAdminClient();
+    const orgRows = (await admin`
+      select o.title, o.primary_evidence_id, o.latest_assessment_id,
+             org.name as org_name, org.normalized_domain as org_domain
+      from public.opportunities o
+      join public.organizations org on org.id = o.organization_id
+      where o.id = ${opportunityId}::uuid
+        and o.workspace_id = ${workspaceId}::uuid
+    `) as unknown as Array<{
+      title: string;
+      primary_evidence_id: string | null;
+      latest_assessment_id: string | null;
+      org_name: string;
+      org_domain: string | null;
+    }>;
+    const org = orgRows[0];
+    if (!org)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    let evidenceText = "";
+    if (org.primary_evidence_id) {
+      const evidenceRows = (await admin`
+        select raw_content from public.evidence_artifacts
+        where id = ${org.primary_evidence_id}::uuid
+          and workspace_id = ${workspaceId}::uuid
+      `) as unknown as Array<{ raw_content: string | null }>;
+      if (evidenceRows[0]?.raw_content)
+        evidenceText = cleanEvidenceText(evidenceRows[0].raw_content);
+    }
+    let assessmentSummary: string | null = null;
+    if (org.latest_assessment_id) {
+      const assessmentRows = (await admin`
+        select explanation from public.maturity_assessments
+        where id = ${org.latest_assessment_id}::uuid
+      `) as unknown as Array<{ explanation: unknown }>;
+      const explanation = assessmentRows[0]?.explanation;
+      if (typeof explanation === "string")
+        assessmentSummary = explanation.slice(0, 600);
+      else if (explanation && typeof explanation === "object") {
+        const summary = (explanation as Record<string, unknown>).summary;
+        if (typeof summary === "string")
+          assessmentSummary = summary.slice(0, 600);
+      }
+    }
+    const useCases: ApprovedUseCaseForProposal[] = approvedCases.map(
+      (row: Record<string, unknown>) => ({
+        title: row.title as string,
+        statement: row.statement as string,
+        successMetric: (row.success_metric as string | null) ?? null,
+        successTarget: (row.success_target as string | null) ?? null,
+      }),
+    );
+    const drafted =
+      (evidenceText
+        ? await draftProposalWithLlm({
+            orgName: org.org_name || org.title,
+            orgDomain: org.org_domain,
+            evidenceText,
+            useCases,
+            assessmentSummary,
+          })
+        : null) ??
+      templateProposal({ orgName: org.org_name || org.title, useCases });
+    await client
+      .from("lead_proposals")
+      .update({ status: "superseded" })
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .eq("status", "draft");
+    const { data: proposal, error: insertError } = await client
+      .from("lead_proposals")
+      .insert({
+        workspace_id: workspaceId,
+        opportunity_id: opportunityId,
+        draft_text: drafted.text,
+        evidence_quotes: drafted.evidenceQuotes,
+        status: "draft",
+        drafted_by: drafted.draftedBy,
+        model: drafted.model,
+      })
+      .select()
+      .single();
+    if (insertError) throw new Error(insertError.message);
+    return json({ data: proposal }, 201);
+  }
+
+  if (opportunityProposalApprove && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposalApprove[1];
+    const input = z
+      .object({
+        proposalId: z.string().uuid(),
+        text: z.string().min(40).max(6_000),
+      })
+      .parse(await bodyJson(request));
+    const { data: opportunity } = await client
+      .from("opportunities")
+      .select("id, organization_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", opportunityId)
+      .single();
+    if (!opportunity)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    const { data: consent } = await client
+      .from("consent_records")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .or(
+        `opportunity_id.eq.${opportunityId},organization_id.eq.${opportunity.organization_id}`,
+      )
+      .limit(1);
+    if (!consent || consent.length === 0)
+      throw Object.assign(
+        new Error(
+          "Record a CASL consent basis for this lead before approving the proposal — outreach without a recorded basis is not permitted. Use the consent form in the Proposal panel.",
+        ),
+        { statusCode: 409 },
+      );
+    const approver = context.user.email ?? context.user.id;
+    const { data: proposal, error: approveError } = await client
+      .from("lead_proposals")
+      .update({
+        draft_text: input.text,
+        status: "approved",
+        approved_by: approver,
+        approved_at: new Date().toISOString(),
+      })
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .eq("id", input.proposalId)
+      .select()
+      .single();
+    if (approveError || !proposal)
+      throw Object.assign(
+        new Error(approveError?.message ?? "Proposal not found"),
+        { statusCode: 404 },
+      );
+    await logWorkspaceEvent(client, workspaceId, {
+      action: "opportunity.proposal_approved",
+      resourceType: "opportunities",
+      resourceId: opportunityId,
+      reason: `Outreach proposal approved by ${approver}; a human sends it externally. Consent basis on record.`,
+      after: { proposalId: input.proposalId },
+    });
+    return json({ data: proposal });
+  }
+
+  if (opportunityProposalSent && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityProposalSent[1];
+    const input = z
+      .object({ proposalId: z.string().uuid() })
+      .parse(await bodyJson(request));
+    const { data: proposal, error: sendError } = await client
+      .from("lead_proposals")
+      .update({ status: "sent", sent_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .eq("id", input.proposalId)
+      .eq("status", "approved")
+      .select()
+      .single();
+    if (sendError || !proposal)
+      throw Object.assign(
+        new Error(
+          sendError?.message ??
+            "Proposal not found or not approved — only an approved proposal can be marked sent.",
+        ),
+        { statusCode: 409 },
+      );
+    const { error: feedbackError } = await client
+      .from("lead_feedback")
+      .insert({
+        workspace_id: workspaceId,
+        opportunity_id: opportunityId,
+        reviewer_id: context.user.id,
+        decision: "contacted",
+        reason_code: "PROPOSAL_SENT",
+        notes: "Approved proposal sent by the operator (human-sent from LE).",
+      });
+    if (feedbackError) throw new Error(feedbackError.message);
+    return json({ data: proposal });
   }
 
   // Delivery status for handoffs: the outbox row is the delivery

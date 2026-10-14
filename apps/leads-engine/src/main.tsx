@@ -2229,6 +2229,24 @@ interface UseCaseRow {
   acceptance_criteria: string[];
   status: string;
   generation_source?: string;
+  success_metric?: string | null;
+  success_target?: string | null;
+}
+
+interface ProposalRow {
+  id: string;
+  draft_text: string;
+  status: string;
+  drafted_by: string;
+  model: string | null;
+  approved_by: string | null;
+  evidence_quotes: string[];
+}
+
+interface ProposalData {
+  proposal: ProposalRow | null;
+  consentRecorded: boolean;
+  approvedUseCases: number;
 }
 
 interface HandoffStatusRow {
@@ -2257,6 +2275,9 @@ export function Leads({
   const [useCaseLead, setUseCaseLead] = useState<LeadRecord | null>(null);
   const [useCaseRows, setUseCaseRows] = useState<UseCaseRow[] | null>(null);
   const [useCaseSelected, setUseCaseSelected] = useState<string[]>([]);
+  const [useCaseMeasures, setUseCaseMeasures] = useState<
+    Record<string, { metric: string; target: string }>
+  >({});
   const [useCaseError, setUseCaseError] = useState<string | null>(null);
   const [approving, setApproving] = useState(false);
   // DF delivery truth from the handoff outbox, keyed by opportunity id.
@@ -2315,6 +2336,17 @@ export function Leads({
       setUseCaseSelected(
         rows.filter((row) => row.status === "approved").map((row) => row.id),
       );
+      setUseCaseMeasures(
+        Object.fromEntries(
+          rows.map((row) => [
+            row.id,
+            {
+              metric: row.success_metric ?? "",
+              target: row.success_target ?? "",
+            },
+          ]),
+        ),
+      );
     } catch (error) {
       setUseCaseError(
         error instanceof Error ? error.message : String(error),
@@ -2328,7 +2360,17 @@ export function Leads({
       `/api/v1/opportunities/${useCaseLead.id}/use-cases/approve`,
       {
         method: "POST",
-        body: JSON.stringify({ useCaseIds: useCaseSelected }),
+        body: JSON.stringify({
+          useCaseIds: useCaseSelected,
+          measures: Object.fromEntries(
+            useCaseSelected
+              .filter(
+                (id) =>
+                  useCaseMeasures[id]?.metric && useCaseMeasures[id]?.target,
+              )
+              .map((id) => [id, useCaseMeasures[id]]),
+          ),
+        }),
       },
       `${useCaseSelected.length} use case(s) approved for ${useCaseLead.title} — they ship to the Delivery Factory as validated Must requirements.`,
     );
@@ -2422,6 +2464,101 @@ export function Leads({
       detail:
         "Still delivering — the worker retries automatically with backoff; the delivery chip on this lead shows its live status.",
     });
+  }
+  // Lead proposal (outreach drafting lives in LE).
+  const [proposalLead, setProposalLead] = useState<LeadRecord | null>(null);
+  const [proposalData, setProposalData] = useState<ProposalData | null>(null);
+  const [proposalText, setProposalText] = useState("");
+  const [proposalError, setProposalError] = useState<string | null>(null);
+  const [proposalBusy, setProposalBusy] = useState(false);
+  const [consentBasis, setConsentBasis] = useState("existing_relationship");
+  const [consentReference, setConsentReference] = useState("");
+  async function loadProposal(lead: LeadRecord) {
+    try {
+      const result = await apiRequest<{ data: ProposalData }>(
+        session,
+        workspaceId,
+        `/api/v1/opportunities/${lead.id}/proposal`,
+      );
+      setProposalData(result.data);
+      setProposalText(result.data.proposal?.draft_text ?? "");
+      return result.data;
+    } catch (error) {
+      setProposalError(
+        error instanceof Error ? error.message : String(error),
+      );
+      return null;
+    }
+  }
+  async function toggleProposal(lead: LeadRecord) {
+    if (proposalLead?.id === lead.id) {
+      setProposalLead(null);
+      return;
+    }
+    setProposalLead(lead);
+    setProposalData(null);
+    setProposalError(null);
+    await loadProposal(lead);
+  }
+  async function draftProposal() {
+    if (!proposalLead) return;
+    setProposalBusy(true);
+    const result = await mutate(
+      `/api/v1/opportunities/${proposalLead.id}/proposal/draft`,
+      { method: "POST", body: JSON.stringify({}) },
+      `Proposal drafted for ${proposalLead.title} — review and approve it before sending.`,
+    );
+    setProposalBusy(false);
+    if (result) await loadProposal(proposalLead);
+  }
+  async function approveProposal() {
+    if (!proposalLead || !proposalData?.proposal) return;
+    setProposalBusy(true);
+    const result = await mutate(
+      `/api/v1/opportunities/${proposalLead.id}/proposal/approve`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          proposalId: proposalData.proposal.id,
+          text: proposalText,
+        }),
+      },
+      `Proposal for ${proposalLead.title} approved — ready for you to send.`,
+    );
+    setProposalBusy(false);
+    if (result) await loadProposal(proposalLead);
+  }
+  async function markProposalSent() {
+    if (!proposalLead || !proposalData?.proposal) return;
+    setProposalBusy(true);
+    const result = await mutate(
+      `/api/v1/opportunities/${proposalLead.id}/proposal/sent`,
+      {
+        method: "POST",
+        body: JSON.stringify({ proposalId: proposalData.proposal.id }),
+      },
+      `${proposalLead.title} marked as contacted — the sent proposal is recorded on the lead.`,
+    );
+    setProposalBusy(false);
+    if (result) await loadProposal(proposalLead);
+  }
+  async function recordConsent() {
+    if (!proposalLead) return;
+    setProposalBusy(true);
+    const result = await mutate(
+      "/api/v1/consent",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          opportunityId: proposalLead.id,
+          basisType: consentBasis,
+          evidenceReference: consentReference || undefined,
+        }),
+      },
+      `CASL consent basis recorded for ${proposalLead.title}.`,
+    );
+    setProposalBusy(false);
+    if (result) await loadProposal(proposalLead);
   }
   function handoffChip(lead: LeadRecord) {
     const row = handoffByLead[lead.id];
@@ -2524,6 +2661,13 @@ export function Leads({
               </button>
               <button
                 className="row-action"
+                title="Draft the outreach proposal for this lead from its evidence and approved use cases"
+                onClick={() => void toggleProposal(lead)}
+              >
+                Proposal
+              </button>
+              <button
+                className="row-action"
                 title="Build a signed handoff package and queue it for the Delivery Factory (requires at least one approved use case)"
                 onClick={() => void handoff(lead)}
               >
@@ -2623,6 +2767,47 @@ export function Leads({
                       {row.acceptance_criteria.length} acceptance criteria
                       ship with the requirement.
                     </small>
+                    {useCaseSelected.includes(row.id) ? (
+                      <span className="usecase-measure">
+                        <small>
+                          <b>Success measure (the OKR promised to the lead):</b>
+                        </small>
+                        <input
+                          type="text"
+                          placeholder="Metric — e.g. Appointment no-show rate"
+                          value={useCaseMeasures[row.id]?.metric ?? ""}
+                          onClick={(event) => event.preventDefault()}
+                          onChange={(event) =>
+                            setUseCaseMeasures((current) => ({
+                              ...current,
+                              [row.id]: {
+                                metric: event.target.value,
+                                target: current[row.id]?.target ?? "",
+                              },
+                            }))
+                          }
+                        />
+                        <input
+                          type="text"
+                          placeholder="Target — e.g. Reduced by at least 25% within 90 days"
+                          value={useCaseMeasures[row.id]?.target ?? ""}
+                          onClick={(event) => event.preventDefault()}
+                          onChange={(event) =>
+                            setUseCaseMeasures((current) => ({
+                              ...current,
+                              [row.id]: {
+                                metric: current[row.id]?.metric ?? "",
+                                target: event.target.value,
+                              },
+                            }))
+                          }
+                        />
+                        <small className="muted">
+                          Approved measures ship to DF as the success
+                          measures it verifies delivery against.
+                        </small>
+                      </span>
+                    ) : null}
                   </span>
                 </label>
               ))
@@ -2645,6 +2830,161 @@ export function Leads({
                 selected requirement.
               </small>
             </div>
+          </div>
+        ) : null}
+        {proposalLead ? (
+          <div className="usecases-panel">
+            <div className="usecases-head">
+              <h4>Proposal — {proposalLead.title}</h4>
+              <button
+                type="button"
+                className="row-action"
+                onClick={() => setProposalLead(null)}
+              >
+                Close
+              </button>
+            </div>
+            <p className="muted">
+              Outreach is drafted here in the Lead Engine, from this
+              lead&apos;s evidence and its approved use cases — the
+              success measures below are the OKRs you promise the
+              lead, and the same numbers ship to the Delivery Factory
+              to be measured after delivery. You review and approve
+              the final text, and you send it yourself; nothing
+              auto-sends.
+            </p>
+            {proposalError ? (
+              <p className="error-text">{proposalError}</p>
+            ) : null}
+            {!proposalData ? (
+              <p className="muted">Loading proposal…</p>
+            ) : (
+              <>
+                <p className="muted">
+                  Approved use cases: <b>{proposalData.approvedUseCases}</b>
+                  {" · "}CASL consent basis:{" "}
+                  <b>
+                    {proposalData.consentRecorded
+                      ? "recorded"
+                      : "not recorded"}
+                  </b>
+                  {proposalData.proposal ? (
+                    <>
+                      {" · "}Status: <b>{proposalData.proposal.status}</b>
+                      {proposalData.proposal.drafted_by === "llm"
+                        ? " · Drafted by AI from the full evidence (quotes verified)"
+                        : " · Template draft"}
+                    </>
+                  ) : null}
+                </p>
+                {!proposalData.consentRecorded ? (
+                  <div className="consent-box">
+                    <small>
+                      <b>Record the consent basis first</b> — approval
+                      stays blocked until a CASL basis exists for this
+                      lead.
+                    </small>
+                    <span className="consent-row">
+                      <select
+                        value={consentBasis}
+                        onChange={(event) => setConsentBasis(event.target.value)}
+                      >
+                        <option value="existing_relationship">
+                          Existing relationship
+                        </option>
+                        <option value="inquiry">Inquiry</option>
+                        <option value="consent">Consent</option>
+                      </select>
+                      <input
+                        type="text"
+                        placeholder="Evidence reference (e.g. public contact page, prior order)"
+                        value={consentReference}
+                        onChange={(event) =>
+                          setConsentReference(event.target.value)
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="row-action"
+                        disabled={proposalBusy}
+                        onClick={() => void recordConsent()}
+                      >
+                        Record basis
+                      </button>
+                    </span>
+                  </div>
+                ) : null}
+                {proposalData.proposal ? (
+                  <>
+                    <textarea
+                      className="proposal-text"
+                      rows={16}
+                      value={proposalText}
+                      disabled={proposalData.proposal.status !== "draft"}
+                      onChange={(event) => setProposalText(event.target.value)}
+                    />
+                    {proposalData.proposal.evidence_quotes.length ? (
+                      <small className="muted">
+                        Evidence backing the draft:{" "}
+                        {proposalData.proposal.evidence_quotes
+                          .map((quote) => `"${quote}"`)
+                          .join(" · ")}
+                      </small>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="muted">
+                    No proposal drafted yet.
+                  </p>
+                )}
+                <div className="usecases-actions">
+                  <button
+                    type="button"
+                    className="row-action"
+                    disabled={
+                      proposalBusy || proposalData.approvedUseCases === 0
+                    }
+                    onClick={() => void draftProposal()}
+                  >
+                    {proposalBusy
+                      ? "Working…"
+                      : proposalData.proposal
+                        ? "Redraft with AI"
+                        : "Draft proposal"}
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={
+                      proposalBusy ||
+                      !proposalData.proposal ||
+                      proposalData.proposal.status !== "draft" ||
+                      !proposalData.consentRecorded
+                    }
+                    onClick={() => void approveProposal()}
+                  >
+                    Approve proposal
+                  </button>
+                  <button
+                    type="button"
+                    className="row-action"
+                    disabled={
+                      proposalBusy ||
+                      !proposalData.proposal ||
+                      proposalData.proposal.status !== "approved"
+                    }
+                    onClick={() => void markProposalSent()}
+                  >
+                    Mark as sent
+                  </button>
+                  <small className="muted">
+                    Approve locks the text; send it from your own
+                    mailbox, then mark it sent — the lead records a
+                    “contacted” outcome.
+                  </small>
+                </div>
+              </>
+            )}
           </div>
         ) : null}
       </section>
@@ -3662,6 +4002,23 @@ function HelpGuide() {
             fails terminally — plus a confirmation banner when the
             outcome lands. Action messages (toasts) stay on screen for
             at least 5 seconds.
+          </p>
+          <p>
+            <b>Proposals &amp; outreach.</b> Outreach lives in the
+            Lead Engine — the Delivery Factory only ever receives
+            leads this workspace has endorsed. On a qualified lead,
+            open <b>Proposal</b>: the draft is written from the
+            lead&apos;s full evidence and its approved use cases, and
+            every factual claim is backed by a verified evidence
+            quote. Each approved use case carries a success measure
+            (an OKR you can edit before approving); those measures
+            are promised to the lead in the proposal and ship in the
+            handoff package as the success measures the Delivery
+            Factory verifies after delivery. Approving the proposal
+            requires a recorded CASL consent basis for the lead (the
+            panel includes the form). You send the approved text
+            yourself — nothing auto-sends — and <b>Mark as sent</b>{" "}
+            records the “contacted” outcome on the lead.
           </p>
           <p>
             <b>Re-queue scrape</b> (on each campaign card) queues a fresh
