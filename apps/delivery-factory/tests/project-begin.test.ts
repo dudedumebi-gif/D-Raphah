@@ -120,10 +120,27 @@ function fixtureWorkflow(
 
 /** Fake Neon tag client for the workflow engine queries, matched on the
  *  leading SQL fragment like handoff-triggers.test.ts. */
+interface FixtureStart {
+  id: string;
+  project_id: string;
+  workflow_id: string;
+  package_id: string;
+  environment: string;
+  run_id: string | null;
+  state: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
 function makeEngineDb(workflows: FixtureWorkflow[]) {
   const byId = new Map(workflows.map((w) => [w.id, w]));
   const runs = new Map<string, Record<string, unknown>>();
   const steps: Array<Record<string, unknown>> = [];
+  // project_workflow_starts, keyed like the table's unique
+  // (project_id, workflow_id) constraint.
+  const starts = new Map<string, FixtureStart>();
+  const startKey = (projectId: unknown, workflowId: unknown) =>
+    `${String(projectId)}|${String(workflowId)}`;
 
   const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const head = strings[0];
@@ -242,10 +259,93 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
     if (head.includes("from public.workflow_run_steps")) {
       return steps.filter((s) => s.run_id === String(values[0]));
     }
+    if (head.includes("insert into public.project_workflow_starts")) {
+      // claimProjectWorkflowStart: ON CONFLICT DO NOTHING semantics.
+      const key = startKey(values[0], values[1]);
+      if (starts.has(key)) return [];
+      const row: FixtureStart = {
+        id: randomUUID(),
+        project_id: String(values[0]),
+        workflow_id: String(values[1]),
+        package_id: String(values[2]),
+        environment: String(values[3]),
+        run_id: values[4] ? String(values[4]) : null,
+        state: String(values[5]),
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      starts.set(key, row);
+      return [{ id: row.id }];
+    }
+    if (head.includes("from public.project_workflow_starts")) {
+      const row = starts.get(startKey(values[0], values[1]));
+      return row ? [{ ...row }] : [];
+    }
+    if (
+      head.includes("update public.project_workflow_starts") &&
+      head.includes("set run_id =")
+    ) {
+      // settleProjectWorkflowStart: values are run id, state, row id.
+      const row = [...starts.values()].find((s) => s.id === values[2]);
+      if (row) {
+        row.run_id = values[0] ? String(values[0]) : null;
+        row.state = String(values[1]);
+        row.updated_at = new Date();
+      }
+      return [];
+    }
+    if (
+      head.includes("update public.project_workflow_starts") &&
+      head.includes("set state = 'reserved'")
+    ) {
+      // retryProjectWorkflowStart: only a 'failed' row can be claimed.
+      const row = [...starts.values()].find((s) => s.id === values[0]);
+      if (!row || row.state !== "failed") return [];
+      row.state = "reserved";
+      row.run_id = null;
+      row.updated_at = new Date();
+      return [{ id: row.id }];
+    }
+    if (
+      head.includes("update public.project_workflow_starts") &&
+      head.includes("set created_at = now()")
+    ) {
+      // reclaimStaleProjectWorkflowStart: reserved, runless, and the
+      // claim is older than ten minutes.
+      const row = [...starts.values()].find((s) => s.id === values[0]);
+      if (
+        !row ||
+        row.state !== "reserved" ||
+        row.run_id !== null ||
+        Date.now() - row.created_at.getTime() <= 10 * 60 * 1000
+      )
+        return [];
+      row.created_at = new Date();
+      row.updated_at = new Date();
+      return [{ id: row.id }];
+    }
     throw new Error(`Unexpected query: ${head.slice(0, 100)}`);
   }) as unknown as NeonClient;
 
-  return { db, runs, steps };
+  return { db, runs, steps, starts };
+}
+
+function seedStart(
+  engine: ReturnType<typeof makeEngineDb>,
+  overrides: Partial<FixtureStart> & { project_id: string; workflow_id: string },
+): FixtureStart {
+  const row: FixtureStart = {
+    id: randomUUID(),
+    package_id: randomUUID(),
+    environment: "production",
+    run_id: null,
+    state: "reserved",
+    created_at: new Date(),
+    updated_at: new Date(),
+    ...overrides,
+  };
+  engine.starts.set(`${row.project_id}|${row.workflow_id}`, row);
+  return row;
 }
 
 async function seedProject(db: FakeDeliveryDb) {
@@ -557,6 +657,261 @@ describe("beginProjectWorkflow", () => {
 
     expect(result.stage).toBe("blueprint_drafting");
     expect(db.stageHistory).toHaveLength(0);
+  });
+
+  it("conflicts while an adopted intake-trigger run is still running, then adopts it once it completes", async () => {
+    const db = new FakeDeliveryDb();
+    const { project, pkg } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    // The intake trigger already started this workflow for the
+    // package; its run is still in flight and no start row exists.
+    const runningId = randomUUID();
+    engine.runs.set(runningId, {
+      id: runningId,
+      workflow_id: wf.id,
+      trigger_type: "lead_handoff",
+      trigger_payload: {
+        organization_name: "Acme Corp",
+        package: { packageId: pkg.packageId },
+      },
+      environment: "production",
+      status: "running",
+      output: null,
+      error: null,
+      started_at: new Date().toISOString(),
+    });
+
+    await expectBeginError(
+      beginProjectWorkflow(db, engine.db, {
+        projectId: project.id,
+        environment: "production",
+      }),
+      409,
+      "already running",
+    );
+    // No duplicate execution, no stage advance on an unfinished run,
+    // and the adoption is recorded on the reservation.
+    expect(engine.runs.size).toBe(1);
+    expect(db.projects.get(project.id)?.current_stage).toBe("intake");
+    const recorded = [...engine.starts.values()];
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].state).toBe("reserved");
+    expect(recorded[0].run_id).toBe(runningId);
+
+    // The run finishes successfully: the next begin adopts it.
+    const run = engine.runs.get(runningId);
+    if (run) run.status = "completed";
+    const result = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+    expect(result.alreadyStarted).toBe(true);
+    expect(result.runId).toBe(runningId);
+    expect(result.stage).toBe("onboarding");
+    expect(engine.runs.size).toBe(1);
+    expect(recorded[0].state).toBe("completed");
+  });
+
+  it("conflicts when another begin holds a fresh claim with no run yet", async () => {
+    const db = new FakeDeliveryDb();
+    const { project } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    seedStart(engine, {
+      project_id: project.id,
+      workflow_id: wf.id,
+      state: "reserved",
+      run_id: null,
+    });
+
+    await expectBeginError(
+      beginProjectWorkflow(db, engine.db, {
+        projectId: project.id,
+        environment: "production",
+      }),
+      409,
+      "already in progress",
+    );
+    expect(engine.runs.size).toBe(0);
+    expect(db.projects.get(project.id)?.current_stage).toBe("intake");
+  });
+
+  it("reclaims a stale claim whose claimant never produced a run", async () => {
+    const db = new FakeDeliveryDb();
+    const { project } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    const stale = seedStart(engine, {
+      project_id: project.id,
+      workflow_id: wf.id,
+      state: "reserved",
+      run_id: null,
+      created_at: new Date(Date.now() - 15 * 60 * 1000),
+    });
+
+    const result = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+
+    expect(result.alreadyStarted).toBe(false);
+    expect(result.stage).toBe("onboarding");
+    expect(engine.runs.size).toBe(1);
+    expect(stale.state).toBe("completed");
+    expect(stale.run_id).toBe(result.runId);
+  });
+
+  it("claims the retry of a failed start and executes again", async () => {
+    const db = new FakeDeliveryDb();
+    const { project } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    const failed = seedStart(engine, {
+      project_id: project.id,
+      workflow_id: wf.id,
+      state: "failed",
+      run_id: randomUUID(),
+    });
+
+    const result = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+
+    expect(result.alreadyStarted).toBe(false);
+    expect(result.stage).toBe("onboarding");
+    expect(engine.runs.size).toBe(1);
+    expect(failed.state).toBe("completed");
+    expect(failed.run_id).toBe(result.runId);
+  });
+
+  it("settles and adopts when the reserved run completed meanwhile", async () => {
+    const db = new FakeDeliveryDb();
+    const { project, pkg } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    const runId = randomUUID();
+    engine.runs.set(runId, {
+      id: runId,
+      workflow_id: wf.id,
+      trigger_type: "lead_handoff",
+      trigger_payload: {
+        organization_name: "Acme Corp",
+        package: { packageId: pkg.packageId },
+      },
+      environment: "production",
+      status: "completed",
+      output: null,
+      error: null,
+      started_at: new Date().toISOString(),
+    });
+    const start = seedStart(engine, {
+      project_id: project.id,
+      workflow_id: wf.id,
+      state: "reserved",
+      run_id: runId,
+    });
+
+    const result = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+
+    expect(result.alreadyStarted).toBe(true);
+    expect(result.runId).toBe(runId);
+    expect(result.stage).toBe("onboarding");
+    expect(engine.runs.size).toBe(1);
+    expect(start.state).toBe("completed");
+  });
+
+  it("retries when the reserved run failed meanwhile", async () => {
+    const db = new FakeDeliveryDb();
+    const { project, pkg } = await seedProject(db);
+    const wf = fixtureWorkflow();
+    const engine = makeEngineDb([wf]);
+    const failedRunId = randomUUID();
+    engine.runs.set(failedRunId, {
+      id: failedRunId,
+      workflow_id: wf.id,
+      trigger_type: "lead_handoff",
+      trigger_payload: {
+        organization_name: "Acme Corp",
+        package: { packageId: pkg.packageId },
+      },
+      environment: "production",
+      status: "failed",
+      output: null,
+      error: "earlier failure",
+      started_at: new Date().toISOString(),
+    });
+    const start = seedStart(engine, {
+      project_id: project.id,
+      workflow_id: wf.id,
+      state: "reserved",
+      run_id: failedRunId,
+    });
+
+    const result = await beginProjectWorkflow(db, engine.db, {
+      projectId: project.id,
+      environment: "production",
+    });
+
+    expect(result.alreadyStarted).toBe(false);
+    expect(result.runId).not.toBe(failedRunId);
+    expect(result.stage).toBe("onboarding");
+    expect(engine.runs.size).toBe(2);
+    expect(start.state).toBe("completed");
+    expect(start.run_id).toBe(result.runId);
+  });
+
+  it("a failed execution frees the start, so the next begin retries instead of conflicting", async () => {
+    const db = new FakeDeliveryDb();
+    const { project } = await seedProject(db);
+    const failing = fixtureWorkflow({
+      nodes: [
+        {
+          node_key: "trigger-1", type: "trigger", kind: "lead_handoff",
+          label: "Lead Handoff", position_x: 0, position_y: 0,
+          config: {}, enabled: true,
+        },
+        {
+          node_key: "action-1", type: "action", kind: "send_sms",
+          label: "Queue SMS draft", position_x: 0, position_y: 0,
+          config: {
+            to: "{{trigger.lead.phone}}",
+            message: "Following up on your project.",
+          },
+          enabled: true,
+        },
+      ],
+    });
+    const engine = makeEngineDb([failing]);
+
+    await expectBeginError(
+      beginProjectWorkflow(db, engine.db, {
+        projectId: project.id,
+        environment: "production",
+      }),
+      502,
+      "stays at intake",
+    );
+    const recorded = [...engine.starts.values()];
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].state).toBe("failed");
+
+    // Second begin: claims the retry and executes (failing again),
+    // rather than adopting or conflicting forever.
+    await expectBeginError(
+      beginProjectWorkflow(db, engine.db, {
+        projectId: project.id,
+        environment: "production",
+      }),
+      502,
+      "stays at intake",
+    );
+    expect(engine.runs.size).toBe(2);
+    expect(db.projects.get(project.id)?.current_stage).toBe("intake");
   });
 });
 
