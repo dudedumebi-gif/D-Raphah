@@ -9,6 +9,7 @@ import eventsHandler from "./_projects/[id]/events.js";
 import milestonesHandler from "./_projects/[id]/milestones.js";
 import completeMilestoneHandler from "./_projects/[id]/milestones/[mid]/complete.js";
 import stageHandler from "./_projects/[id]/stage.js";
+import beginHandler from "./_projects/[id]/begin.js";
 
 type Handler = (req: ApiRequest, res: ServerResponse) => Promise<void>;
 
@@ -74,6 +75,9 @@ export default async function pjDispatch(
   } else if (segments.length === 2 && segments[1] === "stage") {
     query.id = segments[0];
     handler = stageHandler as Handler;
+  } else if (segments.length === 2 && segments[1] === "begin") {
+    query.id = segments[0];
+    handler = beginHandler as Handler;
   }
 
   if (!handler) {

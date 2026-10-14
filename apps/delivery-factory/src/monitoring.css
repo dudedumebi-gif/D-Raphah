@@ -186,6 +186,13 @@
   color: #e8eaf2;
 }
 
+.mon-explainer {
+  margin: -4px 0 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #9aa0b8;
+}
+
 .mon-empty {
   color: #9aa0b8;
   font-size: 13px;

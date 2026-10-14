@@ -424,13 +424,18 @@ export function MonitoringSection() {
       {/* Recent handoffs */}
       <div className="mon-panel">
         <div className="mon-panel-head">
-          <h3>Recent handoff packages received</h3>
+          <h3>Intake — handoff packages received</h3>
           {snapshot ? (
             <span className="mon-poll">
               as of {formatTime(snapshot.checkedAt)}
             </span>
           ) : null}
         </div>
+        <p className="mon-explainer">
+          Packages the Lead Engine sent and this Delivery Factory accepted.
+          Open a project's <b>Charter</b> to review its baseline and begin
+          its delivery workflow.
+        </p>
         {snapshotError && !snapshot ? (
           <div className="mon-empty">
             Could not load handoff activity: {snapshotError}
