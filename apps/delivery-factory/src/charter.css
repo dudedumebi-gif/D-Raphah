@@ -132,6 +132,29 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+.begin-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.begin-select {
+  background: #0a0f1f;
+  border: 1px solid #2c3760;
+  border-radius: 7px;
+  color: #e6ebfa;
+  padding: 8px 10px;
+  font: 500 13px Manrope, sans-serif;
+}
+.begin-done {
+  background: #101a30;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.begin-done code {
+  font-family: "DM Mono", monospace;
+}
 .mon-charter-btn {
   margin-left: 10px;
   background: #1a2340;

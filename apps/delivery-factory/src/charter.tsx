@@ -232,6 +232,157 @@ function KpiCard(props: {
   );
 }
 
+interface BeginState {
+  stage: string;
+  environment: string;
+  publishedWorkflows: Array<{ id: string; name: string }>;
+}
+
+interface BeginResult {
+  workflowId: string;
+  workflowName: string;
+  runId: string;
+  stage: string;
+}
+
+/* ── Delivery workflow (manual begin) ────────────────────────────────
+ * Packages are offered to published lead-handoff workflows at intake;
+ * when none was published in this environment then, nothing started
+ * and the project waits at 'intake'. This section is the manual
+ * start: pick the published lead-handoff workflow and run it against
+ * the project's package. Runs stay draft-first — viewing a run lives
+ * under Workflows, where each workflow's Runs tab lists its runs.
+ */
+function BeginWorkflowSection(props: {
+  projectId: string;
+  onBegan: () => void;
+}) {
+  const [state, setState] = useState<BeginState | null>(null);
+  const [selected, setSelected] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<BeginResult | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api<BeginState>(`/api/projects/${props.projectId}/begin`)
+      .then((d) => {
+        if (cancelled) return;
+        setState(d);
+        setSelected(d.publishedWorkflows[0]?.id ?? "");
+      })
+      .catch((e: unknown) => {
+        if (!cancelled)
+          setError(
+            e instanceof Error ? e.message : "Failed to load workflow state",
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.projectId]);
+
+  const begin = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api<BeginResult>(
+        `/api/projects/${props.projectId}/begin`,
+        {
+          method: "POST",
+          body: JSON.stringify(selected ? { workflowId: selected } : {}),
+        },
+      );
+      setDone(result);
+      setState((current) =>
+        current ? { ...current, stage: result.stage } : current,
+      );
+      props.onBegan();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to begin workflow");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const workflows = state?.publishedWorkflows ?? [];
+  const stage = state?.stage ?? "…";
+
+  return (
+    <div className="charter-section charter-wide">
+      <h4>Delivery workflow</h4>
+      {error ? <p className="wf-error">{error}</p> : null}
+      {!state && !error ? <p className="muted">Loading…</p> : null}
+      {state ? (
+        <>
+          <p>
+            Project stage: <b>{stage}</b> · {state.environment} environment
+          </p>
+          {done ? (
+            <p className="begin-done">
+              ✓ Workflow “{done.workflowName}” started — run{" "}
+              <code>{done.runId.slice(0, 8)}…</code>. View the run under
+              Workflows → {done.workflowName} → Runs. The project advanced
+              to stage <b>{done.stage}</b>.
+            </p>
+          ) : workflows.length === 0 ? (
+            <p className="muted">
+              No lead-handoff workflow is published in this environment
+              yet, so nothing started when this package arrived. Publish
+              one under Workflows / Automations — new packages will then
+              be offered to it automatically at intake, and it can be
+              started here manually.
+            </p>
+          ) : (
+            <>
+              <div className="begin-row">
+                {workflows.length > 1 ? (
+                  <select
+                    className="begin-select"
+                    value={selected}
+                    onChange={(e) => setSelected(e.target.value)}
+                    disabled={busy || stage !== "intake"}
+                  >
+                    {workflows.map((wf) => (
+                      <option key={wf.id} value={wf.id}>
+                        {wf.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span>
+                    Workflow: <b>{workflows[0].name}</b>
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={busy || stage !== "intake"}
+                  onClick={() => void begin()}
+                >
+                  {busy ? "Starting…" : "Begin workflow"}
+                </button>
+              </div>
+              {stage !== "intake" ? (
+                <p className="muted">
+                  Beginning is available while the project is at the
+                  intake stage; this project has already moved on.
+                </p>
+              ) : (
+                <p className="muted">
+                  Runs the workflow against this project's handoff
+                  package, draft-first — sends are recorded as drafts
+                  for human approval. The project advances to onboarding.
+                </p>
+              )}
+            </>
+          )}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export function CharterPanel(props: {
   projectId: string;
   onClose: () => void;
@@ -300,6 +451,10 @@ export function CharterPanel(props: {
       {error ? <p className="wf-error">{error}</p> : null}
       {charter ? (
         <div className="charter-grid">
+          <BeginWorkflowSection
+            projectId={props.projectId}
+            onBegan={() => void load()}
+          />
           <Section title="Problem / opportunity">
             {charter.problemStatement ? (
               <p>{charter.problemStatement}</p>

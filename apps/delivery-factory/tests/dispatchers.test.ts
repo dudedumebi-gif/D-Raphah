@@ -70,6 +70,11 @@ vi.mock("../api/_projects/[id]/stage.js", () => ({
     seen.push({ handler: "stage", query: req.query });
   },
 }));
+vi.mock("../api/_projects/[id]/begin.js", () => ({
+  default: async (req: ApiRequest) => {
+    seen.push({ handler: "begin", query: req.query });
+  },
+}));
 
 const { default: wfDispatch } = await import("../api/wf-dispatch.js");
 const { default: pjDispatch } = await import("../api/pj-dispatch.js");
@@ -140,6 +145,7 @@ describe("pj-dispatch", () => {
     ["p-1/milestones", "milestones", { id: "p-1" }],
     ["p-1/milestones/m-3/complete", "completeMilestone", { id: "p-1", mid: "m-3" }],
     ["p-1/stage", "stage", { id: "p-1" }],
+    ["p-1/begin", "begin", { id: "p-1" }],
   ])("routes ?path=%s to %s", async (path, expected, params) => {
     seen.length = 0;
     const t = makeReq(path);
