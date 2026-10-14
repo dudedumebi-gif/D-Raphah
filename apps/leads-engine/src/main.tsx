@@ -214,6 +214,32 @@ function Workspace({ session }: { session: Session }) {
   const [notice, setNotice] = useState(
     "Connecting to the production data plane…",
   );
+  // Action-result toasts live separately from the status bar: the
+  // status bar is overwritten by the 15s sync refresh within a
+  // second or two, which made success/failure messages a "bleep"
+  // (operator feedback, 2026-10-14). A toast stays at least 5
+  // seconds (8 for errors) and can be dismissed manually.
+  const [toast, setToast] = useState<{
+    message: string;
+    kind: "success" | "error";
+    id: number;
+  } | null>(null);
+  const showToast = useCallback(
+    (message: string, kind: "success" | "error") => {
+      setToast({ message, kind, id: Date.now() });
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!toast) return;
+    const ms = toast.kind === "error" ? 8000 : 5000;
+    const timer = window.setTimeout(() => {
+      setToast((current) =>
+        current && current.id === toast.id ? null : current,
+      );
+    }, ms);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const signOut = useCallback(async () => {
     localStorage.removeItem("raphah.lead.workspace");
@@ -313,10 +339,13 @@ function Workspace({ session }: { session: Session }) {
     try {
       const result = await apiRequest<T>(session, workspaceId, path, init);
       setNotice(success);
+      showToast(success, "success");
       await refresh(true);
       return result;
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setNotice(message);
+      showToast(message, "error");
       return null;
     } finally {
       setBusy(false);
@@ -457,6 +486,18 @@ function Workspace({ session }: { session: Session }) {
             <span className="status-dot" />
             <strong>{dataMode.toUpperCase()}</strong> · {notice}
           </div>
+          {toast ? (
+            <div className={`toast toast-${toast.kind}`} role="status">
+              <span>{toast.message}</span>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => setToast(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
         </div>
         {!visibleData ? (
           <Centered
@@ -2180,6 +2221,24 @@ async function jobAction(
   );
 }
 
+interface UseCaseRow {
+  id: string;
+  title: string;
+  statement: string;
+  rationale: string;
+  acceptance_criteria: string[];
+  status: string;
+}
+
+interface HandoffStatusRow {
+  id: string;
+  idempotency_key: string;
+  status: string;
+  attempts: number;
+  last_error: string | null;
+  dispatched_at: string | null;
+}
+
 export function Leads({
   data,
   mutate,
@@ -2193,6 +2252,95 @@ export function Leads({
 }) {
   const [exporting, setExporting] = useState<"csv" | "json" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  // Reviewer-validated use cases (the DF baseline flow).
+  const [useCaseLead, setUseCaseLead] = useState<LeadRecord | null>(null);
+  const [useCaseRows, setUseCaseRows] = useState<UseCaseRow[] | null>(null);
+  const [useCaseSelected, setUseCaseSelected] = useState<string[]>([]);
+  const [useCaseError, setUseCaseError] = useState<string | null>(null);
+  const [approving, setApproving] = useState(false);
+  // DF delivery truth from the handoff outbox, keyed by opportunity id.
+  const [handoffByLead, setHandoffByLead] = useState<
+    Record<string, HandoffStatusRow>
+  >({});
+  const [deliveryBanner, setDeliveryBanner] = useState<{
+    leadId: string;
+    title: string;
+    outcome: "sending" | "landed" | "failed";
+    detail: string;
+  } | null>(null);
+  const loadHandoffStatuses = useCallback(async () => {
+    try {
+      const result = await apiRequest<{ data: HandoffStatusRow[] }>(
+        session,
+        workspaceId,
+        "/api/v1/handoffs",
+      );
+      const map: Record<string, HandoffStatusRow> = {};
+      for (const row of result.data ?? []) {
+        const opportunityId = row.idempotency_key.split(":").pop() ?? "";
+        // Rows arrive newest-first; the first per opportunity wins.
+        if (opportunityId && !map[opportunityId]) map[opportunityId] = row;
+      }
+      setHandoffByLead(map);
+      return map;
+    } catch {
+      return null;
+    }
+  }, [session, workspaceId]);
+  useEffect(() => {
+    void loadHandoffStatuses();
+    const interval = window.setInterval(
+      () => void loadHandoffStatuses(),
+      15_000,
+    );
+    return () => window.clearInterval(interval);
+  }, [loadHandoffStatuses]);
+  async function toggleUseCases(lead: LeadRecord) {
+    if (useCaseLead?.id === lead.id) {
+      setUseCaseLead(null);
+      return;
+    }
+    setUseCaseLead(lead);
+    setUseCaseRows(null);
+    setUseCaseError(null);
+    try {
+      const result = await apiRequest<{ data: UseCaseRow[] }>(
+        session,
+        workspaceId,
+        `/api/v1/opportunities/${lead.id}/use-cases`,
+      );
+      const rows = result.data ?? [];
+      setUseCaseRows(rows);
+      setUseCaseSelected(
+        rows.filter((row) => row.status === "approved").map((row) => row.id),
+      );
+    } catch (error) {
+      setUseCaseError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+  async function approveUseCases() {
+    if (!useCaseLead) return;
+    setApproving(true);
+    const result = await mutate(
+      `/api/v1/opportunities/${useCaseLead.id}/use-cases/approve`,
+      {
+        method: "POST",
+        body: JSON.stringify({ useCaseIds: useCaseSelected }),
+      },
+      `${useCaseSelected.length} use case(s) approved for ${useCaseLead.title} — they ship to the Delivery Factory as validated Must requirements.`,
+    );
+    setApproving(false);
+    if (result) {
+      const refreshed = await apiRequest<{ data: UseCaseRow[] }>(
+        session,
+        workspaceId,
+        `/api/v1/opportunities/${useCaseLead.id}/use-cases`,
+      ).catch(() => null);
+      if (refreshed?.data) setUseCaseRows(refreshed.data);
+    }
+  }
   async function feedback(lead: LeadRecord, decision: "accepted" | "rejected") {
     await mutate(
       `/api/v1/leads/${lead.id}/feedback`,
@@ -2211,13 +2359,84 @@ export function Leads({
     );
   }
   async function handoff(lead: LeadRecord) {
-    await mutate(
+    setDeliveryBanner({
+      leadId: lead.id,
+      title: lead.title,
+      outcome: "sending",
+      detail: "Package queued — confirming delivery at the Delivery Factory…",
+    });
+    const result = await mutate(
       "/api/v1/handoffs",
       {
         method: "POST",
         body: JSON.stringify({ opportunityId: lead.id }),
       },
-      `Handoff package for ${lead.title} queued for the Delivery Factory.`,
+      `Sending ${lead.title} to the Delivery Factory — confirming delivery…`,
+    );
+    if (!result) {
+      setDeliveryBanner({
+        leadId: lead.id,
+        title: lead.title,
+        outcome: "failed",
+        detail:
+          "The send request itself failed — the message above says why (a common cause: no approved use cases yet).",
+      });
+      return;
+    }
+    // TCP-style confirmation: poll the outbox until the Delivery
+    // Factory accepts (status "sent") or the row terminally fails.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const map = await loadHandoffStatuses();
+      const row = map?.[lead.id];
+      if (row?.status === "sent") {
+        setDeliveryBanner({
+          leadId: lead.id,
+          title: lead.title,
+          outcome: "landed",
+          detail: `Landed — the Delivery Factory accepted the package${
+            row.dispatched_at
+              ? ` at ${new Date(row.dispatched_at).toLocaleTimeString()}`
+              : ""
+          }. It now appears in DF intake.`,
+        });
+        return;
+      }
+      if (row?.status === "failed") {
+        setDeliveryBanner({
+          leadId: lead.id,
+          title: lead.title,
+          outcome: "failed",
+          detail: `Delivery to the Delivery Factory failed: ${
+            row.last_error ?? "unknown error"
+          }`,
+        });
+        return;
+      }
+    }
+    setDeliveryBanner({
+      leadId: lead.id,
+      title: lead.title,
+      outcome: "sending",
+      detail:
+        "Still delivering — the worker retries automatically with backoff; the delivery chip on this lead shows its live status.",
+    });
+  }
+  function handoffChip(lead: LeadRecord) {
+    const row = handoffByLead[lead.id];
+    if (!row) return null;
+    if (row.status === "sent")
+      return <span className="badge status-success">At DF ✓</span>;
+    if (row.status === "failed")
+      return (
+        <span className="badge danger" title={row.last_error ?? undefined}>
+          DF delivery failed
+        </span>
+      );
+    return (
+      <span className="badge status-queued">
+        Sending to DF… (attempt {row.attempts + 1})
+      </span>
     );
   }
   async function exportLeads(format: "csv" | "json") {
@@ -2297,14 +2516,123 @@ export function Leads({
               </button>
               <button
                 className="row-action"
-                title="Build a signed handoff package and queue it for the Delivery Factory"
+                title="Review the automation use cases the engine identified for this lead and approve the ones to ship"
+                onClick={() => void toggleUseCases(lead)}
+              >
+                Use cases
+              </button>
+              <button
+                className="row-action"
+                title="Build a signed handoff package and queue it for the Delivery Factory (requires at least one approved use case)"
                 onClick={() => void handoff(lead)}
               >
                 Send to DF
               </button>
+              {handoffChip(lead)}
             </>
           )}
         />
+        {deliveryBanner ? (
+          <div
+            className={`delivery-banner delivery-${deliveryBanner.outcome}`}
+          >
+            <span>
+              {deliveryBanner.outcome === "landed"
+                ? "✓ "
+                : deliveryBanner.outcome === "failed"
+                  ? "✗ "
+                  : "… "}
+              <b>{deliveryBanner.title}</b> — {deliveryBanner.detail}
+            </span>
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => setDeliveryBanner(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+        {useCaseLead ? (
+          <div className="usecases-panel">
+            <div className="usecases-head">
+              <h4>Automation use cases — {useCaseLead.title}</h4>
+              <button
+                type="button"
+                className="row-action"
+                onClick={() => setUseCaseLead(null)}
+              >
+                Close
+              </button>
+            </div>
+            <p className="muted">
+              The engine identified these use cases from this lead&apos;s
+              stored evidence — at least three for every qualified lead.
+              Select the ones that fit and approve them: approved use
+              cases ship to the Delivery Factory as human-validated Must
+              requirements, with you recorded as the validator. Send to
+              DF stays blocked until at least one is approved.
+            </p>
+            {useCaseError ? (
+              <p className="error-text">{useCaseError}</p>
+            ) : null}
+            {!useCaseRows ? (
+              <p className="muted">Loading use cases…</p>
+            ) : (
+              useCaseRows.map((row) => (
+                <label key={row.id} className="usecase-row">
+                  <input
+                    type="checkbox"
+                    checked={useCaseSelected.includes(row.id)}
+                    onChange={() =>
+                      setUseCaseSelected((current) =>
+                        current.includes(row.id)
+                          ? current.filter((id) => id !== row.id)
+                          : [...current, row.id],
+                      )
+                    }
+                  />
+                  <span className="usecase-body">
+                    <span className="usecase-title">
+                      <b>{row.title}</b>
+                      {row.status === "approved" ? (
+                        <span className="badge status-success">
+                          Approved — ships to DF
+                        </span>
+                      ) : null}
+                    </span>
+                    <small>{row.statement}</small>
+                    <small className="usecase-rationale">
+                      {row.rationale}
+                    </small>
+                    <small className="muted">
+                      {row.acceptance_criteria.length} acceptance criteria
+                      ship with the requirement.
+                    </small>
+                  </span>
+                </label>
+              ))
+            )}
+            <div className="usecases-actions">
+              <button
+                type="button"
+                className="primary"
+                disabled={
+                  approving || !useCaseRows || useCaseSelected.length === 0
+                }
+                onClick={() => void approveUseCases()}
+              >
+                {approving
+                  ? "Approving…"
+                  : `Approve selection (${useCaseSelected.length})`}
+              </button>
+              <small className="muted">
+                Approving stamps you as the human validator on each
+                selected requirement.
+              </small>
+            </div>
+          </div>
+        ) : null}
       </section>
     </div>
   );
@@ -3299,6 +3627,27 @@ function HelpGuide() {
             duplicates. Opportunities are never deleted by a rescore;
             one that stops qualifying is marked unqualified and leaves
             the review queue, and its history is kept.
+          </p>
+          <p>
+            <b>Use cases &amp; sending a lead to the Delivery Factory.</b>{" "}
+            For every qualified lead, the engine identifies at least
+            three automation use cases from the lead&apos;s stored
+            evidence (for example, phone-only booking → online booking;
+            paper intake → digital intake). Open <b>Use cases</b> on
+            the lead&apos;s row, select the ones that fit, and{" "}
+            <b>Approve</b> — approved use cases become the handoff
+            package&apos;s requirement baseline as human-validated Must
+            requirements, with you recorded as the validator. The
+            Delivery Factory refuses packages without a validated
+            baseline, so <b>Send to DF</b> stays blocked until at least
+            one use case is approved. Delivery is confirmed, not
+            assumed: after sending, the lead shows a live delivery
+            chip — <i>Sending to DF…</i> while the factory has not yet
+            accepted, <i>At DF ✓</i> once it has, and{" "}
+            <i>DF delivery failed</i> (with the reason) if the push
+            fails terminally — plus a confirmation banner when the
+            outcome lands. Action messages (toasts) stay on screen for
+            at least 5 seconds.
           </p>
           <p>
             <b>Re-queue scrape</b> (on each campaign card) queues a fresh

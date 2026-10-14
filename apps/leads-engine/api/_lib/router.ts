@@ -24,6 +24,7 @@ import {
   tryImmediateDispatch,
   type SqlClient,
 } from "./handoff.js";
+import { generateUseCases, type SignalLike } from "./use-cases.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
 import {
   dedupeRows,
@@ -694,6 +695,12 @@ async function authenticatedRoutes(
   // source_definitions at all, and the RPC makes the in-flight
   // guard atomic with the write. EXECUTE is revoked from the API
   // roles, so the owner/administrator check is the only way in.
+  const opportunityUseCases = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/use-cases$/i,
+  );
+  const opportunityUseCasesApprove = pathname.match(
+    /^\/api\/v1\/opportunities\/([0-9a-f-]+)\/use-cases\/approve$/i,
+  );
   const sourceRetire = pathname.match(
     /^\/api\/v1\/sources\/([0-9a-f-]+)\/(retire|restore)$/i,
   );
@@ -1353,6 +1360,143 @@ async function authenticatedRoutes(
     return json({ data }, 201);
   }
 
+  // Reviewer-validated use cases (migration 202610120009): the
+  // engine identifies the lead's automation use cases from its
+  // stored evidence; the reviewer selects and approves; approved
+  // rows ship in the handoff baseline as Must requirements.
+  if (opportunityUseCases && request.method === "GET") {
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
+    const opportunityId = opportunityUseCases[1];
+    const { data: opportunity, error: opportunityError } = await client
+      .from("opportunities")
+      .select("id, primary_evidence_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", opportunityId)
+      .single();
+    if (opportunityError || !opportunity)
+      throw Object.assign(new Error("Opportunity not found"), {
+        statusCode: 404,
+      });
+    let { data: existing } = await client
+      .from("opportunity_use_cases")
+      .select("*")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .order("created_at", { ascending: true });
+    if (!existing || existing.length === 0) {
+      const admin = createAdminClient();
+      let signals: SignalLike[] = [];
+      if (opportunity.primary_evidence_id) {
+        signals = (await admin`
+          select code, category, polarity, strength, excerpt
+          from public.signal_observations
+          where workspace_id = ${workspaceId}::uuid
+            and evidence_artifact_id = ${opportunity.primary_evidence_id}::uuid
+          order by strength desc
+          limit 12
+        `) as unknown as SignalLike[];
+      }
+      const candidates = generateUseCases(signals);
+      const { error: insertError } = await client
+        .from("opportunity_use_cases")
+        .upsert(
+          candidates.map((candidate) => ({
+            workspace_id: workspaceId,
+            opportunity_id: opportunityId,
+            use_case_key: candidate.key,
+            code: candidate.code,
+            title: candidate.title,
+            statement: candidate.statement,
+            rationale: candidate.rationale,
+            acceptance_criteria: candidate.acceptanceCriteria,
+            status: "suggested",
+          })),
+          { onConflict: "opportunity_id,use_case_key", ignoreDuplicates: true },
+        );
+      if (insertError) throw new Error(insertError.message);
+      const refreshed = await client
+        .from("opportunity_use_cases")
+        .select("*")
+        .eq("workspace_id", workspaceId)
+        .eq("opportunity_id", opportunityId)
+        .order("created_at", { ascending: true });
+      existing = refreshed.data ?? [];
+    }
+    return json({ data: existing ?? [] });
+  }
+
+  if (opportunityUseCasesApprove && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const opportunityId = opportunityUseCasesApprove[1];
+    const input = z
+      .object({
+        useCaseIds: z.array(z.string().uuid()).min(1).max(20),
+      })
+      .parse(await bodyJson(request));
+    const validator = context.user.email ?? context.user.id;
+    const { data: approvedNow, error: approveError } = await client
+      .from("opportunity_use_cases")
+      .update({
+        status: "approved",
+        human_validator_id: validator,
+        approved_at: new Date().toISOString(),
+      })
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .in("id", input.useCaseIds)
+      .select("id");
+    if (approveError) throw new Error(approveError.message);
+    if (!approvedNow || approvedNow.length === 0)
+      throw Object.assign(new Error("No matching use cases for this lead"), {
+        statusCode: 404,
+      });
+    // The approved set is exactly the submitted selection: rows
+    // approved earlier but not re-selected revert to suggested.
+    const { data: stillApproved } = await client
+      .from("opportunity_use_cases")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", opportunityId)
+      .eq("status", "approved");
+    const toRevert = ((stillApproved ?? []) as Array<{ id: string }>)
+      .map((row) => row.id)
+      .filter((id) => !input.useCaseIds.includes(id));
+    if (toRevert.length > 0) {
+      const { error: revertError } = await client
+        .from("opportunity_use_cases")
+        .update({ status: "suggested", human_validator_id: null, approved_at: null })
+        .eq("workspace_id", workspaceId)
+        .eq("opportunity_id", opportunityId)
+        .in("id", toRevert);
+      if (revertError) throw new Error(revertError.message);
+    }
+    await logWorkspaceEvent(client, workspaceId, {
+      action: "opportunity.use_cases_approved",
+      resourceType: "opportunities",
+      resourceId: opportunityId,
+      reason: `${approvedNow.length} use case(s) approved for handoff by ${validator}; they ship to the Delivery Factory as validated Must requirements.`,
+      after: { approvedUseCaseIds: input.useCaseIds },
+    });
+    return json({ data: { approved: approvedNow.length } });
+  }
+
+  // Delivery status for handoffs: the outbox row is the delivery
+  // truth (pending/retrying, sent = DF accepted, failed = terminal).
+  // The leads UI maps rows to opportunities via the idempotency key
+  // suffix and shows a per-lead delivery chip + confirmation.
+  if (pathname === "/api/v1/handoffs" && request.method === "GET") {
+    const { data, error } = await client
+      .from("handoff_outbox")
+      .select(
+        "id, idempotency_key, status, attempts, last_error, dispatched_at, created_at, updated_at",
+      )
+      .eq("workspace_id", workspaceId)
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (error) throw new Error(error.message);
+    return json({ data: data ?? [] });
+  }
+
   if (pathname === "/api/v1/handoffs" && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
     const input = z
@@ -1371,6 +1515,20 @@ async function authenticatedRoutes(
       throw Object.assign(new Error("Opportunity not found"), {
         statusCode: 404,
       });
+    const { data: approvedUseCases } = await client
+      .from("opportunity_use_cases")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("opportunity_id", input.opportunityId)
+      .eq("status", "approved")
+      .limit(1);
+    if (!approvedUseCases || approvedUseCases.length === 0)
+      throw Object.assign(
+        new Error(
+          "Approve at least one use case for this lead before sending it to the Delivery Factory — DF requires a human-validated requirement baseline. Open the lead's Use cases panel, select the opportunities that fit, and approve them.",
+        ),
+        { statusCode: 409 },
+      );
     const {
       package: handoffPackage,
       manifestChecksum,

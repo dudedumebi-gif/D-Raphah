@@ -736,3 +736,106 @@
 .history-panel {
   margin-top: 16px;
 }
+
+/* Action-result toasts: fixed, unmissable, and on screen for at
+   least 5 seconds (the timer lives in App) — the status bar alone
+   was overwritten by the 15s sync refresh almost immediately. */
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: 520px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 10px 32px rgba(16, 42, 38, 0.22);
+  border-left: 5px solid #39703c;
+  font-size: 0.92em;
+}
+.toast-error {
+  border-left-color: #9a3f3f;
+}
+.toast .text-button {
+  white-space: nowrap;
+}
+
+/* DF delivery confirmation banner (Leads): the TCP-style receipt
+   for a handoff — landed at DF, still sending, or failed. */
+.delivery-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 14px 20px 0;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: #e6eff7;
+  color: #20486e;
+}
+.delivery-banner.delivery-landed {
+  background: #e4f3df;
+  color: #2c5a30;
+}
+.delivery-banner.delivery-failed {
+  background: #fbeeee;
+  color: #7c3232;
+}
+
+/* Use-case review panel (Leads): engine-identified candidates with
+   checkbox selection and an explicit approve action. */
+.usecases-panel {
+  margin: 16px 20px 20px;
+  padding: 16px 18px;
+  border: 1px solid #dde5e0;
+  border-radius: 10px;
+  background: #fbfdfc;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.usecases-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.usecases-head h4 {
+  margin: 0;
+}
+.usecase-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid #e6ece8;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+}
+.usecase-row input {
+  margin-top: 3px;
+}
+.usecase-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.usecase-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usecase-rationale {
+  color: #5a6a62;
+  font-style: italic;
+}
+.usecases-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
