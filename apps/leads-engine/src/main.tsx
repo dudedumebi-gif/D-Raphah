@@ -3256,6 +3256,67 @@ function HelpGuide() {
             changes, and handoffs — for compliance review.
           </p>
 
+          <h4>7. Job Bank market, rescore &amp; History</h4>
+          <p>
+            <b>Job Bank market.</b> The engine reads Canada Job Bank open
+            data for clinic front-desk roles (dental/medical receptionist
+            and related postings). When a clinic&apos;s city shows active
+            demand — at least 10 postings in the last 60 days — that
+            market hiring is added to the clinic&apos;s intent/trigger
+            evidence at scoring time. It is market-level and inferential:
+            Job Bank does not disclose which employer is hiring. The{" "}
+            <b>Job Bank market</b> view shows the current snapshot —
+            postings by city, the top roles, and month-over-month change.
+            The bridge only runs while an approved Job Bank discovery
+            source exists and the Canada Job Bank terms are accepted.
+          </p>
+          <p>
+            <b>Job Bank market signal strength</b> (Criteria &amp;
+            schedule) is the saved weight of that market evidence, from
+            0 to 40; 0 turns the bridge off for the campaign. On-site
+            hiring signals weigh 14–22 by comparison, so 20 is a
+            meaningful but not decisive contribution.
+          </p>
+          <p>
+            <b>Rescore assessments.</b> Scoring normally happens once,
+            when evidence is collected. A rescore recomputes a
+            campaign&apos;s stored assessments from their stored
+            evidence and signals — no site is re-scraped — under the
+            criteria you choose. Use <b>Dry-run</b> first: it projects
+            how many leads would qualify and shows the top 20 with
+            before/after scores, and writes nothing. The{" "}
+            <b>Threshold (this run)</b> and <b>Job Bank strength (this
+            run)</b> fields override the saved criteria for that run
+            only. A real rescore writes a <b>new</b> assessment for each
+            lead — originals are preserved for audit — and is
+            idempotent: re-running with unchanged criteria and market
+            data reports the rows as already current instead of writing
+            duplicates. Opportunities are never deleted by a rescore;
+            one that stops qualifying is marked unqualified and leaves
+            the review queue, and its history is kept.
+          </p>
+          <p>
+            <b>Re-queue scrape</b> (on each campaign card) queues a fresh
+            scrape of the campaign source&apos;s base URL under the
+            currently saved criteria — save first if you changed
+            anything.
+          </p>
+          <p>
+            <b>History — retiring sources and campaigns.</b> Retiring is
+            the auditable alternative to deleting. A retired source
+            stops collecting everywhere; a retired campaign stops its
+            schedule, criteria automation, and discovery collection.
+            Records, jobs, assessments, and audit history are
+            preserved, and retired entries appear under <b>History</b>{" "}
+            on the Sources and Criteria pages, where <b>Restore</b>{" "}
+            returns each one to the exact status it held before
+            retiring — restoring never approves anything that was not
+            already approved. A source cannot retire while its jobs are
+            still in flight (queued, leased, running, or retrying); let
+            them finish or dead-letter first. Only owners and
+            administrators can retire or restore.
+          </p>
+
           <h4>Troubleshooting</h4>
           <ul>
             <li>

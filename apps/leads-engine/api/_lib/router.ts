@@ -704,7 +704,7 @@ async function authenticatedRoutes(
     const admin = createAdminClient();
     const rpcRows = (await admin`
       select public.set_source_retired(
-        ${workspaceId}::uuid, ${sourceId}::uuid, ${action === "retire"}
+        ${workspaceId}::uuid, ${sourceId}::uuid, ${action === "retire" ? "true" : "false"}::boolean
       ) as result
     `) as unknown as Array<{ result: RetireOutcome }>;
     const outcome = rpcRows[0]?.result;
@@ -902,7 +902,7 @@ async function authenticatedRoutes(
     const admin = createAdminClient();
     const rpcRows = (await admin`
       select public.set_campaign_retired(
-        ${workspaceId}::uuid, ${campaignId}::uuid, ${action === "retire"}
+        ${workspaceId}::uuid, ${campaignId}::uuid, ${action === "retire" ? "true" : "false"}::boolean
       ) as result
     `) as unknown as Array<{ result: RetireOutcome }>;
     const outcome = rpcRows[0]?.result;

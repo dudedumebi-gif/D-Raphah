@@ -548,7 +548,7 @@ function CampaignSettings({
           ) : null}
         </p>
         <label>
-          Threshold
+          Threshold (this run)
           <input
             type="number"
             min={0}
@@ -560,7 +560,7 @@ function CampaignSettings({
           />
         </label>
         <label>
-          Job Bank strength
+          Job Bank strength (this run)
           <input
             type="number"
             min={0}
