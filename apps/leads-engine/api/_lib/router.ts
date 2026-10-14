@@ -1426,7 +1426,7 @@ async function authenticatedRoutes(
   }
 
   if (opportunityUseCasesApprove && request.method === "POST") {
-    requireRole(context, ["owner", "administrator", "analyst"]);
+    requireRole(context, ["owner", "administrator", "analyst", "reviewer"]);
     const opportunityId = opportunityUseCasesApprove[1];
     const input = z
       .object({

@@ -132,8 +132,37 @@ describe("use-case handoff wiring — source contracts", () => {
 
   it("the enqueue RPC refreshes an unsent package instead of pinning the first", () => {
     expect(migration).toContain("on conflict(idempotency_key) do update");
-    expect(migration).toContain("dispatched_at is null");
+    // Only settled rows refresh: a 'dispatching' row has a request
+    // in flight to DF and must never be rewritten under it.
+    expect(migration).toContain("status in ('pending', 'failed')");
     expect(migration).toContain("attempts = 0");
+  });
+
+  it("the use-case table carries explicit Data API privileges (Codex P1)", () => {
+    expect(migration).toContain(
+      "grant select, insert, update on public.opportunity_use_cases to authenticated",
+    );
+    // The production correction migration carries the same fixes
+    // for databases that already ran the original 0009.
+    const correction = readFileSync(
+      join(here, "../neon/migrations/202610120010_use_cases_fixes.sql"),
+      "utf8",
+    );
+    expect(correction).toContain(
+      "grant select, insert, update on public.opportunity_use_cases to authenticated",
+    );
+    expect(correction).toContain(
+      "grant select, insert, update on public.consent_records to authenticated",
+    );
+    expect(correction).toContain("status in ('pending', 'failed')");
+    expect(correction).toContain("'analyst', 'reviewer'");
+  });
+
+  it("the reviewer who selects use cases can also approve them (Codex P2)", () => {
+    const at = router.indexOf("opportunityUseCasesApprove &&");
+    expect(at).toBeGreaterThan(-1);
+    expect(router.slice(at, at + 400)).toContain('"reviewer"');
+    expect(migration).toContain("'analyst', 'reviewer'");
   });
 
   it("delivery confirmation is wired: status feed, landed banner, 5s toasts", () => {
