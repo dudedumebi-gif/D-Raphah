@@ -232,10 +232,24 @@ function KpiCard(props: {
   );
 }
 
+interface UseCaseSkeletonRef {
+  id: string;
+  name: string;
+  status: string;
+  requirementCode: string;
+  complete?: boolean;
+  covered?: boolean;
+  pending?: boolean;
+}
+
 interface BeginState {
   stage: string;
   environment: string;
   publishedWorkflows: Array<{ id: string; name: string }>;
+  requirementCount: number;
+  useCaseWorkflows: UseCaseSkeletonRef[];
+  useCaseWorkflowCoveredCount: number;
+  useCaseWorkflowPendingCount: number;
 }
 
 interface BeginResult {
@@ -263,6 +277,9 @@ function BeginWorkflowSection(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<BeginResult | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createdNote, setCreatedNote] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -282,6 +299,26 @@ function BeginWorkflowSection(props: {
       cancelled = true;
     };
   }, [props.projectId]);
+
+  // A fresh incomplete skeleton counts as covered only while it
+  // may still be in flight (the 60s orphan grace). When the grace
+  // lapses it becomes repairable and the create action should
+  // appear — re-check once shortly after the grace so a mounted
+  // Charter does not hide the repair path until a reload (Codex
+  // on PR #60, round 12).
+  const pendingCount = state?.useCaseWorkflowPendingCount ?? 0;
+  useEffect(() => {
+    if (pendingCount <= 0) return;
+    const timer = setTimeout(() => {
+      api<BeginState>(`/api/projects/${props.projectId}/begin`)
+        .then((d) => setState(d))
+        .catch(() => {
+          // A failed re-check is silent; the section keeps the
+          // last good state and any manual action still works.
+        });
+    }, 65_000);
+    return () => clearTimeout(timer);
+  }, [pendingCount, props.projectId]);
 
   const begin = async () => {
     setBusy(true);
@@ -306,7 +343,37 @@ function BeginWorkflowSection(props: {
     }
   };
 
+  const createSkeletons = async () => {
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const result = await api<{
+        created: UseCaseSkeletonRef[];
+        existing: UseCaseSkeletonRef[];
+      }>(`/api/projects/${props.projectId}/workflow-skeletons`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setCreatedNote(
+        result.created.length
+          ? `Created ${result.created.length} use-case workflow draft${result.created.length === 1 ? "" : "s"} — open them under Workflows / Automations to review, publish, and run.`
+          : "Use-case workflows already exist for this project.",
+      );
+      const d = await api<BeginState>(
+        `/api/projects/${props.projectId}/begin`,
+      );
+      setState(d);
+    } catch (e: unknown) {
+      setCreateError(
+        e instanceof Error ? e.message : "Failed to create use-case workflows",
+      );
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const workflows = state?.publishedWorkflows ?? [];
+  const skeletons = state?.useCaseWorkflows ?? [];
   const stage = state?.stage ?? "…";
 
   return (
@@ -381,6 +448,57 @@ function BeginWorkflowSection(props: {
               )}
             </>
           )}
+          <div className="skeleton-block">
+            <h5>Use-case workflows</h5>
+            {createError ? <p className="wf-error">{createError}</p> : null}
+            {createdNote ? <p className="begin-done">{createdNote}</p> : null}
+            {skeletons.length > 0 ? (
+              <ul className="skeleton-list">
+                {skeletons.map((s) => (
+                  <li key={s.id}>
+                    <b>{s.name}</b>{" "}
+                    <span className="skeleton-status">{s.status}</span>{" "}
+                    <span className="muted">· {s.requirementCode}</span>
+                    {s.complete === false ? (
+                      <span className="muted"> · incomplete</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {/* The create action stays available until every
+                generatable requirement is COVERED — by a complete
+                skeleton, or by an operator's own edited draft (which
+                generation will never touch, so re-offering it would
+                no-op forever). A machine-repairable incomplete row
+                keeps the action available as its repair path. */}
+            {state.useCaseWorkflowCoveredCount < state.requirementCount ? (
+              <>
+                <p className="muted">
+                  This project's package carries {state.requirementCount}{" "}
+                  approved use case{state.requirementCount === 1 ? "" : "s"}.
+                  Generate one draft workflow per use case — seeded from
+                  its requirement and acceptance criteria — to review,
+                  publish, and live-test under Workflows / Automations.
+                  (Packages accepted from now on get these automatically
+                  at intake.)
+                </p>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={creating}
+                  onClick={() => void createSkeletons()}
+                >
+                  {creating ? "Creating…" : "Create use-case workflows"}
+                </button>
+              </>
+            ) : skeletons.length === 0 ? (
+              <p className="muted">
+                This project has no handoff package requirements, so
+                there are no use-case workflows to generate.
+              </p>
+            ) : null}
+          </div>
         </>
       ) : null}
     </div>

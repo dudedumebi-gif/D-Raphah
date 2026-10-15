@@ -30,6 +30,11 @@ import {
   settleProjectWorkflowStart,
   type TriggerableWorkflow,
 } from "./workflows.js";
+import {
+  isGeneratableRequirement,
+  listProjectUseCaseWorkflows,
+  type ListedUseCaseSkeleton,
+} from "./use-case-workflows.js";
 
 /**
  * Whether a lead_handoff workflow's minScore gate allows auto-execution for
@@ -70,6 +75,12 @@ export async function triggerLeadHandoffWorkflows(
   db: NeonClient,
   pkg: LeadEngineHandoffPackage,
   environment: DeliveryEnvironment,
+  /**
+   * The project the intake accept just created, when the caller
+   * knows it. Preferred over re-resolving by packageId, which is
+   * ambiguous across package versions (Codex on PR #60).
+   */
+  knownProjectId?: string,
 ): Promise<LeadHandoffTriggerResult> {
   const workflows = await listPublishedWorkflowsByTrigger(
     db,
@@ -95,7 +106,8 @@ export async function triggerLeadHandoffWorkflows(
     // breaking package acceptance.
     let claimId: string | null = null;
     let reservedElsewhere = false;
-    const projectId = await getProjectIdForPackage(db, pkg.packageId);
+    const projectId =
+      knownProjectId ?? (await getProjectIdForPackage(db, pkg.packageId));
     if (projectId) {
       try {
         claimId = await claimProjectWorkflowStart(db, {
@@ -206,10 +218,34 @@ export interface ProjectBeginState {
   stage: string;
   environment: DeliveryEnvironment;
   publishedWorkflows: Array<{ id: string; name: string }>;
+  /** Requirements in the project's stored package (0 when it has none). */
+  requirementCount: number;
+  /** Use-case skeletons already generated for this project. */
+  useCaseWorkflows: ListedUseCaseSkeleton[];
+  /**
+   * How many requirements are COVERED by a skeleton: complete
+   * graphs, plus incomplete ones an operator has taken over
+   * (edited or run — protected from generator repair). The Charter
+   * keeps skeleton generation available until this reaches
+   * requirementCount: a machine-repairable row must not hide the
+   * repair path (round 8), and an operator's draft must not keep
+   * an ineffective action alive forever (round 11).
+   */
+  useCaseWorkflowCoveredCount: number;
+  /**
+   * Skeletons that are incomplete and non-repairable ONLY because
+   * they are younger than the orphan grace (possibly in flight).
+   * The Charter re-checks the begin state after the grace: the
+   * classification is time-dependent (Codex on PR #60, round 12).
+   */
+  useCaseWorkflowPendingCount: number;
 }
 
 /** What the project's begin surface needs: stage + the workflows an
- *  operator could start for this project (its own environment scope). */
+ *  operator could start for this project (its own environment scope),
+ *  plus the project's use-case skeletons and how many requirements
+ *  its package carries (the Charter offers skeleton generation when
+ *  requirements exist but no skeletons do yet). */
 export async function getProjectBeginState(
   db: DeliveryDb,
   sql: NeonClient,
@@ -223,10 +259,24 @@ export async function getProjectBeginState(
     "lead_handoff",
     project.environment,
   );
+  const pkgData = await db.getProjectPackage(projectId);
+  const useCaseWorkflows = await listProjectUseCaseWorkflows(
+    sql,
+    projectId,
+    project.environment,
+  );
   return {
     stage: project.current_stage,
     environment: project.environment,
     publishedWorkflows: published.map((wf) => ({ id: wf.id, name: wf.name })),
+    requirementCount: (
+      pkgData?.package.requirementBaseline?.requirements ?? []
+    ).filter(isGeneratableRequirement).length,
+    useCaseWorkflows,
+    useCaseWorkflowCoveredCount: useCaseWorkflows.filter((s) => s.covered)
+      .length,
+    useCaseWorkflowPendingCount: useCaseWorkflows.filter((s) => s.pending)
+      .length,
   };
 }
 

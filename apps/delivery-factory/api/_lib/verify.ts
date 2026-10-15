@@ -66,6 +66,13 @@ export interface IntakeHooks {
   onHandoffAccepted?: (
     pkg: LeadEngineHandoffPackage,
     environment: DeliveryEnvironment,
+    /**
+     * The project THIS accept just created. Consumers must use it
+     * rather than re-resolving by packageId: packageIds repeat
+     * across versions, and a package-only lookup can select an
+     * earlier project (Codex on PR #60).
+     */
+    projectId: string,
   ) => Promise<unknown>;
 }
 
@@ -457,7 +464,7 @@ export async function handleIntake(
   // earlier, so they never re-execute workflows.
   if (hooks.onHandoffAccepted) {
     try {
-      await hooks.onHandoffAccepted(pkg, scope);
+      await hooks.onHandoffAccepted(pkg, scope, project.id);
     } catch (error) {
       await db.enqueueFeedbackEvent({
         projectId: project.id,

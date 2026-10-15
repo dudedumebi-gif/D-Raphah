@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
 import { describe, expect, it } from "vitest";
 import type { DeliveryEnvironment } from "../api/_lib/db.js";
@@ -326,5 +327,61 @@ describe("demo environment reset", () => {
     expect(summary.inbox).toBe(1);
     expect(await db.getProject(prod.project.id)).not.toBeNull();
     expect(db.inboxCount()).toBe(1);
+  });
+
+  it("counts demo runs before deleting generated workflows in the real reset (Codex round 8)", () => {
+    // workflow_runs rows of a generated skeleton cascade away with
+    // its workflow row; the real reset must delete (and count) the
+    // runs first or the summary underreports what was cleared.
+    const source = readFileSync(
+      new URL("../api/_lib/db.ts", import.meta.url),
+      "utf8",
+    );
+    const resetAt = source.indexOf("resetDemoEnvironment");
+    const runsDeleteAt = source.indexOf(
+      "delete from public.workflow_runs",
+      resetAt,
+    );
+    const workflowsDeleteAt = source.indexOf(
+      "delete from public.workflows",
+      resetAt,
+    );
+    expect(runsDeleteAt).toBeGreaterThan(resetAt);
+    expect(workflowsDeleteAt).toBeGreaterThan(runsDeleteAt);
+  });
+
+  it("removes generated demo skeletons but keeps fixtures and production (Codex on PR #60)", async () => {
+    const db = new FakeDeliveryDb();
+    const fixtureId = randomUUID();
+    const demoSkeletonId = randomUUID();
+    const prodSkeletonId = randomUUID();
+    db.workflows.set(fixtureId, {
+      environment: "demo",
+      trigger_config: {},
+    });
+    db.workflows.set(demoSkeletonId, {
+      environment: "demo",
+      trigger_config: {
+        projectId: randomUUID(),
+        packageId: "pkg-demo",
+        requirementId: randomUUID(),
+        requirementCode: "UC-DEMO",
+      },
+    });
+    db.workflows.set(prodSkeletonId, {
+      environment: "production",
+      trigger_config: {
+        projectId: randomUUID(),
+        packageId: "pkg-prod",
+        requirementId: randomUUID(),
+        requirementCode: "UC-PROD",
+      },
+    });
+    const summary = await db.resetDemoEnvironment();
+    expect(summary.workflows).toBe(1);
+    expect(db.workflows.has(demoSkeletonId)).toBe(false);
+    // Hand-built demo fixtures and anything in production survive.
+    expect(db.workflows.has(fixtureId)).toBe(true);
+    expect(db.workflows.has(prodSkeletonId)).toBe(true);
   });
 });

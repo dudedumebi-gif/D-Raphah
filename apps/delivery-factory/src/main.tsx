@@ -583,7 +583,7 @@ function App() {
         );
       }
       setNotice(
-        `Demo environment reset on the server: cleared ${String(data.workflowRuns ?? 0)} workflow runs, ${String(data.projects ?? 0)} projects, ${String(data.inbox ?? 0)} handoff records.`,
+        `Demo environment reset on the server: cleared ${String(data.workflowRuns ?? 0)} workflow runs, ${String(data.projects ?? 0)} projects, ${String(data.inbox ?? 0)} handoff records, ${String(data.workflows ?? 0)} generated use-case workflows.`,
       );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Demo reset failed");
