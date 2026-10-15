@@ -217,16 +217,19 @@ function makeEngine() {
     }
     if (head.includes("delete from public.workflows")) {
       // deleteUntouchedSkeleton: drafts/archived only, and the
-      // untouched marker (updated_at = created_at, zero runs) is
-      // revalidated by the statement itself.
+      // untouched marker (updated_at = created_at, zero runs, older
+      // than the in-flight grace) is revalidated by the statement.
       const wf = workflows.get(String(values[0]));
       if (!wf) return [];
       const statusOk = wf.status === "draft" || wf.status === "archived";
       const untouched =
         (wf.updated_at ?? wf.created_at) === (wf.created_at ?? wf.updated_at) ||
         (wf.created_at === undefined && wf.updated_at === undefined);
+      const aged = wf.created_at
+        ? Date.now() - Date.parse(wf.created_at) >= 60_000
+        : false;
       const runCount = runs.filter((r) => r.workflow_id === wf.id).length;
-      if (statusOk && untouched && runCount === 0) {
+      if (statusOk && untouched && aged && runCount === 0) {
         workflows.delete(wf.id);
         return [{ id: wf.id }];
       }
@@ -564,6 +567,7 @@ describe("ensureUseCaseWorkflows", () => {
       successMeasure: pkg.successMeasures[0],
     });
     const partialId = randomUUID();
+    const orphanStamp = new Date(Date.now() - 5 * 60_000).toISOString();
     engine.workflows.set(partialId, {
       id: partialId,
       name: draft.name,
@@ -573,6 +577,10 @@ describe("ensureUseCaseWorkflows", () => {
       trigger_type: "manual",
       trigger_config: draft.trigger_config,
       created_by: "intake-skeleton",
+      // Old and never updated: an abandoned orphan, not an
+      // in-flight create.
+      created_at: orphanStamp,
+      updated_at: orphanStamp,
       // Only the trigger node landed before the failure; no edges.
       nodes: [{ ...draft.nodes[0] }],
       edges: [],
@@ -852,6 +860,7 @@ describe("ensureUseCaseWorkflows", () => {
       successMeasure: pkg.successMeasures[0],
     });
     const partialId = randomUUID();
+    const orphanStamp = new Date(Date.now() - 5 * 60_000).toISOString();
     engine.workflows.set(partialId, {
       id: partialId,
       name: draft.name,
@@ -861,6 +870,8 @@ describe("ensureUseCaseWorkflows", () => {
       trigger_type: "manual",
       trigger_config: draft.trigger_config,
       created_by: "intake-skeleton",
+      created_at: orphanStamp,
+      updated_at: orphanStamp,
       nodes: [{ ...draft.nodes[0] }],
       edges: [],
     });
@@ -889,6 +900,61 @@ describe("ensureUseCaseWorkflows", () => {
     expect(result.existing.map((s) => s.id)).toContain(partialId);
     expect(engine.workflows.get(partialId)?.nodes).toHaveLength(1);
     expect(result.created).toHaveLength(2);
+  });
+
+  it("never deletes a skeleton another generator may still be building (Codex round 6)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const requirement = pkg.requirementBaseline.requirements[0];
+    const draft = buildUseCaseWorkflowDraft({
+      project,
+      packageId: pkg.packageId,
+      requirement,
+      successMeasure: pkg.successMeasures[0],
+    });
+    const inFlightId = randomUUID();
+    const young = new Date(Date.now() - 5_000).toISOString();
+    engine.workflows.set(inFlightId, {
+      id: inFlightId,
+      name: draft.name,
+      description: draft.description,
+      status: "draft",
+      environment: project.environment,
+      trigger_type: "manual",
+      trigger_config: draft.trigger_config,
+      created_by: "intake-skeleton",
+      // Row inserted five seconds ago; its graph writes may still
+      // be landing. Never updated, zero runs — but NOT abandoned.
+      created_at: young,
+      updated_at: young,
+      nodes: [{ ...draft.nodes[0] }],
+      edges: [],
+    });
+
+    const first = await ensureUseCaseWorkflows(engine.db, project);
+    // Adopted as existing, not deleted, not duplicated.
+    expect(first.existing.map((s) => s.id)).toContain(inFlightId);
+    expect(engine.workflows.get(inFlightId)?.nodes).toHaveLength(1);
+    expect(first.created).toHaveLength(2);
+
+    // Once the row is old, the same state reads as an abandoned
+    // orphan and IS repaired.
+    const stored = engine.workflows.get(inFlightId);
+    if (stored) {
+      const old = new Date(Date.now() - 5 * 60_000).toISOString();
+      stored.created_at = old;
+      stored.updated_at = old;
+    }
+    const second = await ensureUseCaseWorkflows(engine.db, project);
+    expect(second.created.map((s) => s.requirementCode)).toContain(
+      requirement.code,
+    );
+    expect(engine.workflows.has(inFlightId)).toBe(false);
+    const repaired = [...engine.workflows.values()].find(
+      (w) => w.trigger_config.requirementId === requirement.id,
+    );
+    expect(repaired?.nodes).toHaveLength(4);
   });
 
   it("creates nothing for an empty baseline, a rejected-only baseline, or no package", async () => {

@@ -360,19 +360,33 @@ export async function listProjectUseCaseWorkflows(
 /** The node keys every complete skeleton graph carries. */
 const SKELETON_NODE_KEYS = ["trigger-1", "action-1", "action-2", "action-3"];
 
+/**
+ * How old an incomplete, untouched skeleton must be before it
+ * counts as abandoned rather than IN FLIGHT: createWorkflow writes
+ * the row and then its graph in separate statements over a
+ * sub-second burst, and a row caught mid-burst is indistinguishable
+ * from an orphan by every other marker (never updated, zero runs).
+ * Deleting it would break the live create (foreign-key failures,
+ * a vanished result). A create still incomplete after this grace
+ * is not being built by anyone (Codex on PR #60, round 6).
+ */
+const ORPHAN_MIN_AGE_MS = 60_000;
+
 interface SkeletonAssessment {
   complete: boolean;
   /**
    * True only for provably untouched machine state: incomplete
-   * graph, zero runs, and the workflow row never updated since
-   * creation. The check is EXACT equality of the parsed timestamps:
-   * both columns are stamped by the same insert's now() — one
-   * transaction timestamp, microsecond-identical in Postgres — and
-   * the trg_workflows_touch trigger bumps updated_at on ANY update,
+   * graph, zero runs, the workflow row never updated since
+   * creation, and older than ORPHAN_MIN_AGE_MS. The never-updated
+   * check is EXACT equality of the parsed timestamps: both columns
+   * are stamped by the same insert's now() — one transaction
+   * timestamp, microsecond-identical in Postgres — and the
+   * trg_workflows_touch trigger bumps updated_at on ANY update,
    * so any positive delta, however small, is an operator's edit
-   * and protects the draft. Freshness is deliberately NOT evidence:
-   * an operator can edit a draft seconds after creating it (Codex
-   * on PR #60, rounds 2–4).
+   * and protects the draft. Freshness alone is NOT evidence
+   * either way: an operator can edit a draft seconds after
+   * creating it, and a concurrent generator can still be building
+   * one (Codex on PR #60, rounds 2–6).
    */
   repairable: boolean;
 }
@@ -408,7 +422,13 @@ async function assessSkeleton(
     Number.isFinite(createdAt) &&
     Number.isFinite(updatedAt) &&
     updatedAt === createdAt;
-  return { complete: false, repairable: neverUpdated };
+  if (!neverUpdated) return { complete: false, repairable: false };
+  // In-flight protection: a row younger than the grace period may
+  // still be receiving its graph from a concurrent create. A clock
+  // skew that makes the age read negative also fails safe (not
+  // repairable).
+  const aged = Date.now() - createdAt >= ORPHAN_MIN_AGE_MS;
+  return { complete: false, repairable: aged };
 }
 
 function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleton {
@@ -438,6 +458,7 @@ async function deleteUntouchedSkeleton(
     where w.id = ${workflowId}
       and w.status in ('draft', 'archived')
       and w.updated_at = w.created_at
+      and w.created_at <= now() - interval '60 seconds'
       and not exists (
         select 1 from public.workflow_runs r where r.workflow_id = w.id
       )
