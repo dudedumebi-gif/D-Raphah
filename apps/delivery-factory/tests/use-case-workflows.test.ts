@@ -52,6 +52,9 @@ interface StoredWorkflow {
   created_by: string | null;
   nodes: StoredNode[];
   edges: Array<Record<string, unknown>>;
+  /** Optional fixed timestamps (tests of the never-updated marker). */
+  created_at?: string;
+  updated_at?: string;
 }
 
 function donddentalPackage(): LeadEngineHandoffPackage {
@@ -308,8 +311,8 @@ function makeEngine() {
           trigger_type: w.trigger_type,
           trigger_config: w.trigger_config,
           created_by: w.created_by,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          created_at: w.created_at ?? new Date().toISOString(),
+          updated_at: w.updated_at ?? w.created_at ?? new Date().toISOString(),
           published_at: null,
         },
       ];
@@ -700,6 +703,45 @@ describe("ensureUseCaseWorkflows", () => {
     expect(engine.workflows.get(editedId)?.nodes).toHaveLength(2);
   });
 
+  it("never treats a just-edited manual-route draft as repairable, however fresh (Codex round 3)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const requirement = pkg.requirementBaseline.requirements[0];
+    const draft = buildUseCaseWorkflowDraft({
+      project,
+      packageId: pkg.packageId,
+      requirement,
+      successMeasure: pkg.successMeasures[0],
+    });
+    const now = Date.now();
+    const editedId = randomUUID();
+    engine.workflows.set(editedId, {
+      id: editedId,
+      name: draft.name,
+      description: draft.description,
+      status: "draft",
+      environment: project.environment,
+      trigger_type: "manual",
+      trigger_config: draft.trigger_config,
+      // Created through the Charter route a minute ago, then edited
+      // thirty seconds later: freshness is not abandonment — the
+      // trg_workflows_touch marker (updated_at) is what decides.
+      created_by: "operator@example.com",
+      created_at: new Date(now - 60_000).toISOString(),
+      updated_at: new Date(now - 30_000).toISOString(),
+      nodes: [{ ...draft.nodes[0] }, { ...draft.nodes[1] }],
+      edges: [{ ...draft.edges[0] }],
+    });
+
+    const result = await ensureUseCaseWorkflows(engine.db, project, {
+      createdBy: "operator@example.com",
+    });
+    expect(result.existing.map((s) => s.id)).toContain(editedId);
+    expect(engine.workflows.get(editedId)?.nodes).toHaveLength(2);
+    expect(result.created).toHaveLength(2);
+  });
+
   it("creates nothing for an empty baseline, a rejected-only baseline, or no package", async () => {
     const engine = makeEngine();
 
@@ -847,6 +889,8 @@ describe("skeleton wiring", () => {
     expect(charter).toContain("/workflow-skeletons");
     expect(charter).toContain("Use-case workflows");
     expect(charter).toContain("useCaseWorkflows");
+    // Partial success keeps the action available (Codex round 3).
+    expect(charter).toContain("skeletons.length < state.requirementCount");
   });
 
   it("the route is registered in the project dispatcher", () => {

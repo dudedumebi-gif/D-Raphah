@@ -437,7 +437,12 @@ function BeginWorkflowSection(props: {
                   </li>
                 ))}
               </ul>
-            ) : state.requirementCount > 0 ? (
+            ) : null}
+            {/* The create action stays available until every
+                generatable requirement has a skeleton: generation is
+                idempotent, and a partial result (an intake that
+                stopped midway) must stay retryable from here. */}
+            {skeletons.length < state.requirementCount ? (
               <>
                 <p className="muted">
                   This project's package carries {state.requirementCount}{" "}
@@ -457,12 +462,12 @@ function BeginWorkflowSection(props: {
                   {creating ? "Creating…" : "Create use-case workflows"}
                 </button>
               </>
-            ) : (
+            ) : skeletons.length === 0 ? (
               <p className="muted">
                 This project has no handoff package requirements, so
                 there are no use-case workflows to generate.
               </p>
-            )}
+            ) : null}
           </div>
         </>
       ) : null}

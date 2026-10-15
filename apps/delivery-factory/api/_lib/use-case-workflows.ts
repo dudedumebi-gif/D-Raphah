@@ -38,11 +38,13 @@
  *   winner's row.
  * - A matched skeleton whose graph is incomplete (a create that
  *   died mid-graph) is regenerated ONLY when it is provably
- *   untouched machine state: never run, still carrying the
- *   generator's description, and either created by the intake
- *   generator or created moments ago. Anything else — above all an
- *   operator's edited, live-tested draft — is reported as existing
- *   and left exactly as it is.
+ *   untouched machine state: never run, and its row never updated
+ *   since creation — the database's own trg_workflows_touch
+ *   trigger bumps updated_at on every UPDATE, and the generator's
+ *   create path never updates the row, so updated_at = created_at
+ *   is a creation-state marker no edit can hide behind. Anything
+ *   else — above all an operator's edited, live-tested draft, at
+ *   any age — is reported as existing and left exactly as it is.
  */
 
 import type {
@@ -359,21 +361,24 @@ export async function listProjectUseCaseWorkflows(
 /** The node keys every complete skeleton graph carries. */
 const SKELETON_NODE_KEYS = ["trigger-1", "action-1", "action-2", "action-3"];
 
-/** Description prefix stamped on every generator-created skeleton. */
-const SKELETON_DESCRIPTION_PREFIX = "Use-case skeleton generated from";
-
-/** How long after creation an incomplete skeleton still counts as
- *  a just-failed create rather than an operator's draft. */
-const ORPHAN_REPAIR_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * Tolerance for the never-updated check: created_at and updated_at
+ * are stamped by the same insert, and timestamp rendering can wobble
+ * by a second across drivers.
+ */
+const NEVER_UPDATED_TOLERANCE_MS = 2000;
 
 interface SkeletonAssessment {
   complete: boolean;
   /**
    * True only for provably untouched machine state: incomplete
-   * graph, zero runs, the generator's description still in place,
-   * and either intake-created or created within the repair window.
-   * An operator's edited or live-tested draft never qualifies — its
-   * edits and run history are preserved (Codex on PR #60).
+   * graph, zero runs, and the workflow row never updated since
+   * creation (updated_at = created_at; the trg_workflows_touch
+   * trigger bumps updated_at on ANY update, and the create path
+   * never updates the row). Freshness is deliberately NOT evidence:
+   * an operator can edit a draft seconds after creating it, and
+   * that edit moves updated_at and protects the draft (Codex on
+   * PR #60, rounds 2–3).
    */
   repairable: boolean;
 }
@@ -403,19 +408,13 @@ async function assessSkeleton(
     where workflow_id = ${workflowId}`;
   const runs = Number(runRows[0]?.runs ?? 0);
   if (runs > 0) return { complete: false, repairable: false };
-  if (
-    !(workflow.description ?? "").startsWith(SKELETON_DESCRIPTION_PREFIX)
-  ) {
-    return { complete: false, repairable: false };
-  }
   const createdAt = Date.parse(workflow.created_at);
-  const fresh =
+  const updatedAt = Date.parse(workflow.updated_at);
+  const neverUpdated =
     Number.isFinite(createdAt) &&
-    Date.now() - createdAt < ORPHAN_REPAIR_WINDOW_MS;
-  return {
-    complete: false,
-    repairable: fresh || workflow.created_by === "intake-skeleton",
-  };
+    Number.isFinite(updatedAt) &&
+    Math.abs(updatedAt - createdAt) <= NEVER_UPDATED_TOLERANCE_MS;
+  return { complete: false, repairable: neverUpdated };
 }
 
 function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleton {
