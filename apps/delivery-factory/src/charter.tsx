@@ -232,10 +232,19 @@ function KpiCard(props: {
   );
 }
 
+interface UseCaseSkeletonRef {
+  id: string;
+  name: string;
+  status: string;
+  requirementCode: string;
+}
+
 interface BeginState {
   stage: string;
   environment: string;
   publishedWorkflows: Array<{ id: string; name: string }>;
+  requirementCount: number;
+  useCaseWorkflows: UseCaseSkeletonRef[];
 }
 
 interface BeginResult {
@@ -263,6 +272,9 @@ function BeginWorkflowSection(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<BeginResult | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createdNote, setCreatedNote] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -306,7 +318,37 @@ function BeginWorkflowSection(props: {
     }
   };
 
+  const createSkeletons = async () => {
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const result = await api<{
+        created: UseCaseSkeletonRef[];
+        existing: UseCaseSkeletonRef[];
+      }>(`/api/projects/${props.projectId}/workflow-skeletons`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setCreatedNote(
+        result.created.length
+          ? `Created ${result.created.length} use-case workflow draft${result.created.length === 1 ? "" : "s"} — open them under Workflows / Automations to review, publish, and run.`
+          : "Use-case workflows already exist for this project.",
+      );
+      const d = await api<BeginState>(
+        `/api/projects/${props.projectId}/begin`,
+      );
+      setState(d);
+    } catch (e: unknown) {
+      setCreateError(
+        e instanceof Error ? e.message : "Failed to create use-case workflows",
+      );
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const workflows = state?.publishedWorkflows ?? [];
+  const skeletons = state?.useCaseWorkflows ?? [];
   const stage = state?.stage ?? "…";
 
   return (
@@ -381,6 +423,47 @@ function BeginWorkflowSection(props: {
               )}
             </>
           )}
+          <div className="skeleton-block">
+            <h5>Use-case workflows</h5>
+            {createError ? <p className="wf-error">{createError}</p> : null}
+            {createdNote ? <p className="begin-done">{createdNote}</p> : null}
+            {skeletons.length > 0 ? (
+              <ul className="skeleton-list">
+                {skeletons.map((s) => (
+                  <li key={s.id}>
+                    <b>{s.name}</b>{" "}
+                    <span className="skeleton-status">{s.status}</span>{" "}
+                    <span className="muted">· {s.requirementCode}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : state.requirementCount > 0 ? (
+              <>
+                <p className="muted">
+                  This project's package carries {state.requirementCount}{" "}
+                  approved use case{state.requirementCount === 1 ? "" : "s"}.
+                  Generate one draft workflow per use case — seeded from
+                  its requirement and acceptance criteria — to review,
+                  publish, and live-test under Workflows / Automations.
+                  (Packages accepted from now on get these automatically
+                  at intake.)
+                </p>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={creating}
+                  onClick={() => void createSkeletons()}
+                >
+                  {creating ? "Creating…" : "Create use-case workflows"}
+                </button>
+              </>
+            ) : (
+              <p className="muted">
+                This project has no handoff package requirements, so
+                there are no use-case workflows to generate.
+              </p>
+            )}
+          </div>
         </>
       ) : null}
     </div>

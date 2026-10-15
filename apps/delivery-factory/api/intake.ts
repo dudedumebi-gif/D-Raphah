@@ -1,6 +1,7 @@
 import type { ServerResponse } from "node:http";
 import { createDeliveryDb, getDb } from "./_lib/db.js";
 import { triggerLeadHandoffWorkflows } from "./_lib/handoff-triggers.js";
+import { generateUseCaseWorkflowsForAcceptedPackage } from "./_lib/use-case-workflows.js";
 import {
   corsHeadersFor,
   handleIntake,
@@ -59,8 +60,19 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
       createDeliveryDb(),
       env,
       {
-        onHandoffAccepted: (pkg, environment) =>
-          triggerLeadHandoffWorkflows(getDb(), pkg, environment),
+        onHandoffAccepted: async (pkg, environment) => {
+          // Use-case skeletons first: one draft workflow per approved
+          // requirement in the package, ready to live-test. The
+          // generator is fail-open (it logs and returns null on any
+          // failure), so it can never disturb package acceptance or
+          // the published-workflow trigger below.
+          await generateUseCaseWorkflowsForAcceptedPackage(
+            getDb(),
+            pkg,
+            environment,
+          );
+          await triggerLeadHandoffWorkflows(getDb(), pkg, environment);
+        },
       },
     );
     log("info", "handoff_intake_completed", {

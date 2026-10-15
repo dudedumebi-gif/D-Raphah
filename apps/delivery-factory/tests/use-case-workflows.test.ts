@@ -1,0 +1,607 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
+import type { NeonClient } from "../api/_lib/db.js";
+import {
+  buildUseCaseWorkflowDraft,
+  ensureUseCaseWorkflows,
+  generateUseCaseWorkflowsForAcceptedPackage,
+  humanizeRequirementTitle,
+  listProjectUseCaseWorkflows,
+  type UseCaseWorkflowProjectRef,
+} from "../api/_lib/use-case-workflows.js";
+import { NODE_CATALOG } from "../api/_lib/workflows.js";
+import { packageBase, signTestPackage } from "./helpers.js";
+
+/**
+ * Use-case workflow skeletons (user request, 2026-10-14): a landed
+ * handoff package's approved use cases should become draft workflows
+ * automatically — the Charter for Donddental showed requirements with
+ * nothing to begin or test because no generic lead_handoff workflow
+ * was published in the production scope. The generator reads only
+ * DF's stored package, is idempotent per (project, requirement),
+ * never publishes or executes, and the intake wrapper is fail-open.
+ */
+
+/* ── Fake engine ─────────────────────────────────────────────────────── */
+
+interface StoredNode {
+  node_key: unknown;
+  type: unknown;
+  kind: string;
+  label: unknown;
+  position_x: unknown;
+  position_y: unknown;
+  config: Record<string, unknown>;
+  enabled: unknown;
+}
+
+interface StoredWorkflow {
+  id: string;
+  name: string;
+  description: string | null;
+  status: string;
+  environment: string;
+  trigger_type: string;
+  trigger_config: Record<string, unknown>;
+  created_by: string | null;
+  nodes: StoredNode[];
+  edges: Array<Record<string, unknown>>;
+}
+
+function donddentalPackage(): LeadEngineHandoffPackage {
+  const signed = signTestPackage(
+    packageBase({
+      organization: { name: "Donddental", domain: "donddental.ca" },
+      requirementBaseline: {
+        version: 1,
+        requirements: [
+          {
+            id: randomUUID(),
+            opportunityId: randomUUID(),
+            code: "UC-ONLINE-APPOINTMENT-BOOKING",
+            statement:
+              "The business will enable patients to book appointments online seamlessly.",
+            priority: "must",
+            status: "validated",
+            humanValidatorId: "reviewer-1",
+            acceptanceCriteria: [
+              "Patients can book appointments 24/7 through the website",
+              "Confirmation emails are sent to patients immediately after booking",
+            ],
+            blockingQuestions: [],
+          },
+          {
+            id: randomUUID(),
+            opportunityId: randomUUID(),
+            code: "UC-AUTOMATED-REMINDERS-NO-SHOW-REDUCTION",
+            statement:
+              "The business will automatically send appointment reminders to reduce no-show rates.",
+            priority: "must",
+            status: "validated",
+            humanValidatorId: "reviewer-1",
+            acceptanceCriteria: [
+              "Patients receive reminders 24 hours before their appointments",
+              "No-show rates decrease by at least 15% within three months",
+            ],
+            blockingQuestions: [],
+          },
+          {
+            id: randomUUID(),
+            opportunityId: randomUUID(),
+            code: "UC-AUTOMATED-REVIEW-REFERRAL-REQUESTS",
+            statement:
+              "The business will automate the process of requesting reviews and referrals from satisfied patients.",
+            priority: "must",
+            status: "validated",
+            humanValidatorId: "reviewer-1",
+            acceptanceCriteria: [
+              "Automated emails are sent to patients after their appointments asking for reviews",
+            ],
+            blockingQuestions: [],
+          },
+        ],
+        features: [],
+      },
+      successMeasures: [
+        {
+          metric: "Increase in online bookings",
+          target:
+            "Achieve a 30% increase in online appointment bookings within the next quarter",
+        },
+        {
+          metric: "Reduction in no-show appointments",
+          target:
+            "Achieve a 15% reduction in no-show rates within the next quarter",
+        },
+        {
+          metric: "Increase in patient reviews and referrals",
+          target:
+            "Achieve a 25% increase in online reviews and referrals within the next quarter",
+        },
+      ],
+    }),
+  );
+  return signed.pkg;
+}
+
+function makeEngine() {
+  const workflows = new Map<string, StoredWorkflow>();
+  /** projectId -> stored package (the handoff_inbox join). */
+  const packages = new Map<string, LeadEngineHandoffPackage>();
+  /** packageId -> projectId (delivery_projects lookup). */
+  const projectsByPackage = new Map<string, string>();
+  /** projectId -> project row facts. */
+  const projectRows = new Map<string, UseCaseWorkflowProjectRef>();
+
+  const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const head = strings[0];
+    if (head.includes("join public.handoff_inbox")) {
+      const pkg = packages.get(String(values[0]));
+      return pkg ? [{ package: pkg }] : [];
+    }
+    if (
+      head.includes("from public.delivery_projects") &&
+      head.includes("organization_name")
+    ) {
+      const row = projectRows.get(String(values[0]));
+      return row
+        ? [
+            {
+              id: row.id,
+              environment: row.environment,
+              package_id: row.package_id,
+              organization_name: row.organization_name,
+            },
+          ]
+        : [];
+    }
+    if (
+      head.includes("from public.delivery_projects") &&
+      head.includes("select id")
+    ) {
+      const pid = projectsByPackage.get(String(values[0]));
+      return pid ? [{ id: pid }] : [];
+    }
+    if (
+      head.includes("from public.workflows") &&
+      head.includes("status, trigger_config")
+    ) {
+      // listProjectUseCaseWorkflows: values are environment, projectId.
+      return [...workflows.values()]
+        .filter(
+          (w) =>
+            w.environment === String(values[0]) &&
+            w.trigger_config.projectId === String(values[1]),
+        )
+        .map((w) => ({
+          id: w.id,
+          name: w.name,
+          status: w.status,
+          trigger_config: w.trigger_config,
+        }));
+    }
+    if (
+      head.includes("from public.workflows") &&
+      head.includes("select id, name, status")
+    ) {
+      // findUseCaseWorkflow: values are environment, projectId, code.
+      const match = [...workflows.values()].find(
+        (w) =>
+          w.environment === String(values[0]) &&
+          w.trigger_config.projectId === String(values[1]) &&
+          w.trigger_config.requirementCode === String(values[2]),
+      );
+      return match
+        ? [{ id: match.id, name: match.name, status: match.status }]
+        : [];
+    }
+    if (head.includes("insert into public.workflows")) {
+      const id = randomUUID();
+      workflows.set(id, {
+        id,
+        name: String(values[0]),
+        description: values[1] ? String(values[1]) : null,
+        status: "draft",
+        trigger_type: String(values[2]),
+        trigger_config: JSON.parse(String(values[3])) as Record<
+          string,
+          unknown
+        >,
+        created_by: values[4] ? String(values[4]) : null,
+        environment: String(values[5]),
+        nodes: [],
+        edges: [],
+      });
+      return [{ id }];
+    }
+    if (head.includes("delete from public.workflow_edges")) {
+      const wf = workflows.get(String(values[0]));
+      if (wf) wf.edges = [];
+      return [];
+    }
+    if (head.includes("delete from public.workflow_nodes")) {
+      const wf = workflows.get(String(values[0]));
+      if (wf) wf.nodes = [];
+      return [];
+    }
+    if (head.includes("insert into public.workflow_nodes")) {
+      const wf = workflows.get(String(values[0]));
+      wf?.nodes.push({
+        node_key: values[1],
+        type: values[2],
+        kind: String(values[3]),
+        label: values[4],
+        position_x: values[5],
+        position_y: values[6],
+        config: JSON.parse(String(values[7])),
+        enabled: values[8],
+      });
+      return [];
+    }
+    if (head.includes("insert into public.workflow_edges")) {
+      const wf = workflows.get(String(values[0]));
+      wf?.edges.push({
+        edge_key: values[1],
+        from_node_key: values[2],
+        to_node_key: values[3],
+        from_port: values[4],
+        label: values[5],
+      });
+      return [];
+    }
+    if (head.includes("from public.workflows where id =")) {
+      const w = workflows.get(String(values[0]));
+      if (!w) return [];
+      return [
+        {
+          id: w.id,
+          name: w.name,
+          description: w.description,
+          status: w.status,
+          environment: w.environment,
+          trigger_type: w.trigger_type,
+          trigger_config: w.trigger_config,
+          created_by: w.created_by,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          published_at: null,
+        },
+      ];
+    }
+    if (head.includes("from public.workflow_nodes")) {
+      return workflows.get(String(values[0]))?.nodes ?? [];
+    }
+    if (head.includes("from public.workflow_edges")) {
+      return workflows.get(String(values[0]))?.edges ?? [];
+    }
+    throw new Error(`Unexpected query: ${head.slice(0, 100)}`);
+  }) as unknown as NeonClient;
+
+  return { db, workflows, packages, projectsByPackage, projectRows };
+}
+
+function seedProject(
+  engine: ReturnType<typeof makeEngine>,
+  pkg: LeadEngineHandoffPackage,
+): UseCaseWorkflowProjectRef {
+  const project: UseCaseWorkflowProjectRef = {
+    id: randomUUID(),
+    environment: "production",
+    package_id: pkg.packageId,
+    organization_name: pkg.organization.name,
+  };
+  engine.packages.set(project.id, pkg);
+  engine.projectsByPackage.set(pkg.packageId, project.id);
+  engine.projectRows.set(project.id, project);
+  return project;
+}
+
+/* ── humanize ────────────────────────────────────────────────────────── */
+
+describe("humanizeRequirementTitle", () => {
+  it("title-cases LE's UC- slug codes", () => {
+    expect(
+      humanizeRequirementTitle({
+        code: "UC-ONLINE-APPOINTMENT-BOOKING",
+        statement: "ignored",
+      }),
+    ).toBe("Online Appointment Booking");
+    expect(
+      humanizeRequirementTitle({
+        code: "UC-AUTOMATED-REMINDERS-NO-SHOW-REDUCTION",
+        statement: "ignored",
+      }),
+    ).toBe("Automated Reminders No Show Reduction");
+  });
+
+  it("falls back to the statement for wordless codes", () => {
+    expect(
+      humanizeRequirementTitle({
+        code: "REQ-001",
+        statement: "The system must automate invoice reconciliation.",
+      }),
+    ).toBe("The system must automate invoice reconciliation.");
+  });
+});
+
+/* ── generator ───────────────────────────────────────────────────────── */
+
+describe("ensureUseCaseWorkflows", () => {
+  it("creates one draft skeleton per requirement in a 3-requirement package", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+
+    const result = await ensureUseCaseWorkflows(engine.db, project);
+
+    expect(result.existing).toEqual([]);
+    expect(result.created).toHaveLength(3);
+    expect(result.created.map((s) => s.name)).toEqual([
+      "Donddental — Online Appointment Booking",
+      "Donddental — Automated Reminders No Show Reduction",
+      "Donddental — Automated Review Referral Requests",
+    ]);
+    expect(result.created.every((s) => s.status === "draft")).toBe(true);
+    expect([...engine.workflows.values()].map((w) => w.created_by)).toEqual([
+      "intake-skeleton",
+      "intake-skeleton",
+      "intake-skeleton",
+    ]);
+    for (const wf of engine.workflows.values()) {
+      expect(wf.status).toBe("draft");
+      expect(wf.environment).toBe("production");
+      expect(wf.trigger_type).toBe("manual");
+      expect(wf.trigger_config.projectId).toBe(project.id);
+      expect(wf.trigger_config.packageId).toBe(pkg.packageId);
+      expect(typeof wf.trigger_config.requirementCode).toBe("string");
+    }
+  });
+
+  it("seeds a catalog-shaped graph whose prompts carry the requirement", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    await ensureUseCaseWorkflows(engine.db, project);
+
+    const catalogKinds = new Set<string>(NODE_CATALOG.map((s) => s.kind));
+    const first = [...engine.workflows.values()].find(
+      (w) =>
+        w.trigger_config.requirementCode === "UC-ONLINE-APPOINTMENT-BOOKING",
+    );
+    expect(first).toBeDefined();
+    expect(first!.nodes.map((n) => n.kind)).toEqual([
+      "manual",
+      "ai_assist",
+      "send_email",
+      "log_database",
+    ]);
+    for (const wf of engine.workflows.values()) {
+      for (const node of wf.nodes) {
+        expect(catalogKinds.has(node.kind)).toBe(true);
+      }
+      // Linear chain: trigger -> ai -> email -> log.
+      expect(wf.edges.map((e) => [e.from_node_key, e.to_node_key])).toEqual([
+        ["trigger-1", "action-1"],
+        ["action-1", "action-2"],
+        ["action-2", "action-3"],
+      ]);
+      // Positions march down the canvas.
+      const ys = wf.nodes.map((n) => n.position_y as number);
+      expect([...ys].sort((a, b) => a - b)).toEqual(ys);
+    }
+
+    const ai = first!.nodes.find((n) => n.kind === "ai_assist");
+    const prompt = String(ai?.config.userPrompt ?? "");
+    expect(prompt).toContain("UC-ONLINE-APPOINTMENT-BOOKING");
+    expect(prompt).toContain(
+      "Patients can book appointments 24/7 through the website",
+    );
+    expect(prompt).toContain(
+      "Confirmation emails are sent to patients immediately after booking",
+    );
+    // The paired success measure rides along (3 requirements, 3 measures).
+    expect(prompt).toContain("Increase in online bookings");
+    expect(prompt).toContain("30% increase");
+
+    const email = first!.nodes.find((n) => n.kind === "send_email");
+    expect(email?.config.subject).toBe(
+      "Donddental — Online Appointment Booking",
+    );
+    expect(String(email?.config.body ?? "")).toContain(
+      "Patients can book appointments 24/7 through the website",
+    );
+    // Draft posture: no recipient is pre-filled; nothing can send itself.
+    expect(email?.config.to).toBe("");
+
+    const log = first!.nodes.find((n) => n.kind === "log_database");
+    expect(String(log?.config.message ?? "")).toContain(
+      "UC-ONLINE-APPOINTMENT-BOOKING",
+    );
+    expect(String(log?.config.message ?? "")).toContain(project.id);
+  });
+
+  it("is idempotent: a second call creates nothing and reports existing", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+
+    const first = await ensureUseCaseWorkflows(engine.db, project);
+    const second = await ensureUseCaseWorkflows(engine.db, project);
+
+    expect(first.created).toHaveLength(3);
+    expect(second.created).toEqual([]);
+    expect(second.existing).toHaveLength(3);
+    expect(second.existing.map((s) => s.id)).toEqual(
+      first.created.map((s) => s.id),
+    );
+    expect(engine.workflows.size).toBe(3);
+
+    const listed = await listProjectUseCaseWorkflows(
+      engine.db,
+      project.id,
+      "production",
+    );
+    expect(listed).toHaveLength(3);
+    expect(listed[0].requirementCode).toBe("UC-ONLINE-APPOINTMENT-BOOKING");
+  });
+
+  it("creates nothing for an empty baseline, a rejected-only baseline, or no package", async () => {
+    const engine = makeEngine();
+
+    const emptyPkg = signTestPackage(
+      packageBase({
+        requirementBaseline: { version: 1, requirements: [], features: [] },
+      }),
+    ).pkg;
+    const emptyProject = seedProject(engine, emptyPkg);
+    expect(await ensureUseCaseWorkflows(engine.db, emptyProject)).toEqual({
+      created: [],
+      existing: [],
+    });
+
+    const rejectedPkg = signTestPackage(
+      packageBase({
+        requirementBaseline: {
+          version: 1,
+          requirements: [
+            {
+              id: randomUUID(),
+              opportunityId: randomUUID(),
+              code: "UC-REJECTED-THING",
+              statement: "This requirement was rejected by the reviewer.",
+              priority: "could",
+              status: "rejected",
+              acceptanceCriteria: [],
+              blockingQuestions: [],
+            },
+          ],
+          features: [],
+        },
+      }),
+    ).pkg;
+    const rejectedProject = seedProject(engine, rejectedPkg);
+    expect(await ensureUseCaseWorkflows(engine.db, rejectedProject)).toEqual({
+      created: [],
+      existing: [],
+    });
+
+    const orphan: UseCaseWorkflowProjectRef = {
+      id: randomUUID(),
+      environment: "production",
+      package_id: randomUUID(),
+      organization_name: "No Package Co",
+    };
+    expect(await ensureUseCaseWorkflows(engine.db, orphan)).toEqual({
+      created: [],
+      existing: [],
+    });
+    expect(engine.workflows.size).toBe(0);
+  });
+
+  it("claims no success-measure pairing when the counts do not align", async () => {
+    const draft = buildUseCaseWorkflowDraft({
+      project: {
+        id: randomUUID(),
+        environment: "production",
+        package_id: randomUUID(),
+        organization_name: "Acme Corp",
+      },
+      packageId: randomUUID(),
+      requirement: {
+        id: randomUUID(),
+        opportunityId: randomUUID(),
+        code: "UC-INVOICE-RECONCILIATION",
+        statement: "The system must automate invoice reconciliation.",
+        priority: "must",
+        status: "validated",
+        acceptanceCriteria: ["Reconciliation completes without manual steps"],
+        blockingQuestions: [],
+      },
+    });
+    const ai = draft.nodes.find((n) => n.kind === "ai_assist");
+    expect(String(ai?.config.userPrompt ?? "")).not.toContain(
+      "Success measure:",
+    );
+  });
+});
+
+/* ── intake wrapper (fail-open) ──────────────────────────────────────── */
+
+describe("generateUseCaseWorkflowsForAcceptedPackage", () => {
+  it("generates skeletons for the project a package produced", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    seedProject(engine, pkg);
+
+    const result = await generateUseCaseWorkflowsForAcceptedPackage(
+      engine.db,
+      pkg,
+      "production",
+    );
+    expect(result?.created).toHaveLength(3);
+    expect(engine.workflows.size).toBe(3);
+  });
+
+  it("returns null (never throws) when the database fails", async () => {
+    const throwingDb = (async () => {
+      throw new Error("connection reset");
+    }) as unknown as NeonClient;
+    await expect(
+      generateUseCaseWorkflowsForAcceptedPackage(
+        throwingDb,
+        donddentalPackage(),
+        "production",
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it("returns null when no project exists for the package", async () => {
+    const engine = makeEngine();
+    await expect(
+      generateUseCaseWorkflowsForAcceptedPackage(
+        engine.db,
+        donddentalPackage(),
+        "production",
+      ),
+    ).resolves.toBeNull();
+    expect(engine.workflows.size).toBe(0);
+  });
+});
+
+/* ── wiring contracts ────────────────────────────────────────────────── */
+
+describe("skeleton wiring", () => {
+  it("the intake hook generates skeletons before the trigger fires", () => {
+    const intake = readFileSync(
+      new URL("../api/intake.ts", import.meta.url),
+      "utf8",
+    );
+    expect(intake).toContain("generateUseCaseWorkflowsForAcceptedPackage");
+    expect(intake).toContain("triggerLeadHandoffWorkflows");
+    expect(
+      intake.indexOf("generateUseCaseWorkflowsForAcceptedPackage"),
+    ).toBeLessThan(intake.indexOf("await triggerLeadHandoffWorkflows"));
+  });
+
+  it("the Charter offers skeleton generation and lists skeletons", () => {
+    const charter = readFileSync(
+      new URL("../src/charter.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(charter).toContain("Create use-case workflows");
+    expect(charter).toContain("/workflow-skeletons");
+    expect(charter).toContain("Use-case workflows");
+    expect(charter).toContain("useCaseWorkflows");
+  });
+
+  it("the route is registered in the project dispatcher", () => {
+    const dispatch = readFileSync(
+      new URL("../api/pj-dispatch.ts", import.meta.url),
+      "utf8",
+    );
+    expect(dispatch).toContain("workflow-skeletons");
+    expect(dispatch).toContain("workflowSkeletonsHandler");
+  });
+});

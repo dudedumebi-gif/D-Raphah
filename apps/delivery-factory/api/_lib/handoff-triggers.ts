@@ -30,6 +30,10 @@ import {
   settleProjectWorkflowStart,
   type TriggerableWorkflow,
 } from "./workflows.js";
+import {
+  listProjectUseCaseWorkflows,
+  type UseCaseSkeleton,
+} from "./use-case-workflows.js";
 
 /**
  * Whether a lead_handoff workflow's minScore gate allows auto-execution for
@@ -206,10 +210,17 @@ export interface ProjectBeginState {
   stage: string;
   environment: DeliveryEnvironment;
   publishedWorkflows: Array<{ id: string; name: string }>;
+  /** Requirements in the project's stored package (0 when it has none). */
+  requirementCount: number;
+  /** Use-case skeletons already generated for this project. */
+  useCaseWorkflows: UseCaseSkeleton[];
 }
 
 /** What the project's begin surface needs: stage + the workflows an
- *  operator could start for this project (its own environment scope). */
+ *  operator could start for this project (its own environment scope),
+ *  plus the project's use-case skeletons and how many requirements
+ *  its package carries (the Charter offers skeleton generation when
+ *  requirements exist but no skeletons do yet). */
 export async function getProjectBeginState(
   db: DeliveryDb,
   sql: NeonClient,
@@ -223,10 +234,19 @@ export async function getProjectBeginState(
     "lead_handoff",
     project.environment,
   );
+  const pkgData = await db.getProjectPackage(projectId);
+  const useCaseWorkflows = await listProjectUseCaseWorkflows(
+    sql,
+    projectId,
+    project.environment,
+  );
   return {
     stage: project.current_stage,
     environment: project.environment,
     publishedWorkflows: published.map((wf) => ({ id: wf.id, name: wf.name })),
+    requirementCount:
+      pkgData?.package.requirementBaseline?.requirements?.length ?? 0,
+    useCaseWorkflows,
   };
 }
 

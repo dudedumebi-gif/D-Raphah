@@ -175,6 +175,24 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
         published_at: new Date().toISOString(),
       }];
     }
+    if (
+      head.includes("from public.workflows") &&
+      head.includes("status, trigger_config")
+    ) {
+      // listProjectUseCaseWorkflows: values are environment, projectId.
+      return [...byId.values()]
+        .filter(
+          (w) =>
+            w.environment === String(values[0]) &&
+            w.trigger_config?.projectId === String(values[1]),
+        )
+        .map((w) => ({
+          id: w.id,
+          name: w.name,
+          status: w.status,
+          trigger_config: w.trigger_config,
+        }));
+    }
     if (head.includes("from public.workflow_nodes")) {
       return byId.get(String(values[0]))?.nodes ?? [];
     }
@@ -953,6 +971,35 @@ describe("getProjectBeginState", () => {
     expect(state.stage).toBe("intake");
     expect(state.environment).toBe("production");
     expect(state.publishedWorkflows).toEqual([{ id: wf.id, name: "Only one" }]);
+  });
+
+  it("surfaces the package's requirement count and the project's skeletons", async () => {
+    const db = new FakeDeliveryDb();
+    const { project } = await seedProject(db);
+    const skeleton = fixtureWorkflow({
+      name: "Acme Corp — Invoice Reconciliation",
+      status: "draft",
+      trigger_type: "manual",
+      trigger_config: { projectId: project.id, requirementCode: "REQ-001" },
+    });
+    const otherProject = fixtureWorkflow({
+      name: "Someone else's skeleton",
+      status: "draft",
+      trigger_type: "manual",
+      trigger_config: { projectId: randomUUID(), requirementCode: "REQ-9" },
+    });
+    const engine = makeEngineDb([skeleton, otherProject]);
+    const state = await getProjectBeginState(db, engine.db, project.id);
+    // packageBase carries exactly one requirement.
+    expect(state.requirementCount).toBe(1);
+    expect(state.useCaseWorkflows).toEqual([
+      {
+        id: skeleton.id,
+        name: "Acme Corp — Invoice Reconciliation",
+        status: "draft",
+        requirementCode: "REQ-001",
+      },
+    ]);
   });
 
   it("404s for an unknown project", async () => {
