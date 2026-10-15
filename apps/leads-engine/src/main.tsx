@@ -2293,6 +2293,13 @@ export function Leads({
   const [exportError, setExportError] = useState<string | null>(null);
   // Reviewer-validated use cases (the DF baseline flow).
   const [useCaseLead, setUseCaseLead] = useState<LeadRecord | null>(null);
+  // Per-lead actions (Use cases / Proposal / Send to DF) open in a
+  // pop-up over the list instead of panels at the page bottom
+  // (user request, 2026-10-14): the active action stays on screen.
+  const [leadModal, setLeadModal] = useState<{
+    lead: LeadRecord;
+    tab: "usecases" | "proposal" | "send";
+  } | null>(null);
   const [useCaseRows, setUseCaseRows] = useState<UseCaseRow[] | null>(null);
   const [useCaseSelected, setUseCaseSelected] = useState<string[]>([]);
   const [useCaseMeasures, setUseCaseMeasures] = useState<
@@ -2377,6 +2384,23 @@ export function Leads({
     );
     return () => window.clearInterval(interval);
   }, [loadHandoffStatuses]);
+  function openLeadAction(
+    lead: LeadRecord,
+    tab: "usecases" | "proposal" | "send",
+  ) {
+    setLeadModal({ lead, tab });
+    if (tab === "usecases" && useCaseLead?.id !== lead.id)
+      void toggleUseCases(lead);
+    if (tab === "proposal") {
+      if (proposalLead?.id !== lead.id) void toggleProposal(lead);
+      else void loadProposal(lead);
+    }
+  }
+  function closeLeadModal() {
+    setLeadModal(null);
+    setUseCaseLead(null);
+    setProposalLead(null);
+  }
   async function toggleUseCases(lead: LeadRecord) {
     if (useCaseLead?.id === lead.id) {
       setUseCaseLead(null);
@@ -2730,21 +2754,21 @@ export function Leads({
               <button
                 className="row-action"
                 title="Review the automation use cases the engine identified for this lead and approve the ones to ship"
-                onClick={() => void toggleUseCases(lead)}
+                onClick={() => openLeadAction(lead, "usecases")}
               >
                 Use cases
               </button>
               <button
                 className="row-action"
                 title="Draft the outreach proposal for this lead from its evidence and approved use cases"
-                onClick={() => void toggleProposal(lead)}
+                onClick={() => openLeadAction(lead, "proposal")}
               >
                 Proposal
               </button>
               <button
                 className="row-action"
                 title="Build a signed handoff package and queue it for the Delivery Factory (requires at least one approved use case)"
-                onClick={() => void handoff(lead)}
+                onClick={() => openLeadAction(lead, "send")}
               >
                 Send to DF
               </button>
@@ -2770,8 +2794,8 @@ export function Leads({
             leads={data.leads}
             handoffByLead={handoffByLead}
             pipelineByLead={pipelineByLead}
-            onUseCases={(lead) => void toggleUseCases(lead)}
-            onProposal={(lead) => void toggleProposal(lead)}
+            onUseCases={(lead) => openLeadAction(lead, "usecases")}
+            onProposal={(lead) => openLeadAction(lead, "proposal")}
           />
           </>
         )}
@@ -2796,14 +2820,66 @@ export function Leads({
             </button>
           </div>
         ) : null}
-        {useCaseLead ? (
+        {leadModal ? (
+          <div
+            className="lead-modal-overlay"
+            onClick={() => closeLeadModal()}
+          >
+            <div
+              className="lead-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label={`Lead actions — ${leadModal.lead.title}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="lead-modal-head">
+                <h3>{leadModal.lead.title}</h3>
+                <button
+                  type="button"
+                  className="row-action"
+                  onClick={() => closeLeadModal()}
+                >
+                  Close ✕
+                </button>
+              </div>
+              <div className="lead-modal-tabs">
+                <button
+                  type="button"
+                  aria-pressed={leadModal.tab === "usecases"}
+                  onClick={() =>
+                    openLeadAction(leadModal.lead, "usecases")
+                  }
+                >
+                  Use cases
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={leadModal.tab === "proposal"}
+                  onClick={() =>
+                    openLeadAction(leadModal.lead, "proposal")
+                  }
+                >
+                  Proposal
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={leadModal.tab === "send"}
+                  onClick={() => openLeadAction(leadModal.lead, "send")}
+                >
+                  Send to DF
+                  {handoffByLead[leadModal.lead.id]?.status === "sent"
+                    ? " ✓"
+                    : ""}
+                </button>
+              </div>
+        {leadModal.tab === "usecases" && useCaseLead ? (
           <div className="usecases-panel">
             <div className="usecases-head">
               <h4>Automation use cases — {useCaseLead.title}</h4>
               <button
                 type="button"
                 className="row-action"
-                onClick={() => setUseCaseLead(null)}
+                onClick={() => closeLeadModal()}
               >
                 Close
               </button>
@@ -2930,14 +3006,14 @@ export function Leads({
             </div>
           </div>
         ) : null}
-        {proposalLead ? (
+        {leadModal.tab === "proposal" && proposalLead ? (
           <div className="usecases-panel">
             <div className="usecases-head">
               <h4>Proposal — {proposalLead.title}</h4>
               <button
                 type="button"
                 className="row-action"
-                onClick={() => setProposalLead(null)}
+                onClick={() => closeLeadModal()}
               >
                 Close
               </button>
@@ -2953,6 +3029,33 @@ export function Leads({
             </p>
             {proposalError ? (
               <p className="error-text">{proposalError}</p>
+            ) : null}
+            {proposalData ? (
+              proposalData.approvedUseCases === 0 ? (
+                <div className="lead-checker lead-checker-locked">
+                  <span>
+                    ✗ <b>Drafting is locked.</b> No use case has been
+                    approved for this lead yet — a proposal is drafted
+                    from the approved use cases and their success
+                    measures, so the checker requires at least one
+                    approval first.
+                  </span>
+                  <button
+                    type="button"
+                    className="row-action"
+                    onClick={() =>
+                      openLeadAction(proposalLead, "usecases")
+                    }
+                  >
+                    Review use cases
+                  </button>
+                </div>
+              ) : (
+                <p className="lead-checker lead-checker-ok">
+                  ✓ {proposalData.approvedUseCases} approved use
+                  case(s) — drafting is unlocked.
+                </p>
+              )
             ) : null}
             {!proposalData ? (
               <p className="muted">Loading proposal…</p>
@@ -3083,6 +3186,57 @@ export function Leads({
                 </div>
               </>
             )}
+          </div>
+        ) : null}
+        {leadModal.tab === "send" ? (
+          <div className="usecases-panel">
+            <div className="usecases-head">
+              <h4>Send to Delivery Factory — {leadModal.lead.title}</h4>
+              <button
+                type="button"
+                className="row-action"
+                onClick={() => closeLeadModal()}
+              >
+                Close
+              </button>
+            </div>
+            <p className="muted">
+              Builds the signed handoff package from this lead&apos;s
+              approved use cases — they ship as the validated Must
+              requirements the Delivery Factory builds against, with
+              their success measures as the KPIs it verifies after
+              delivery. At least one approved use case is required;
+              the send is refused without one.
+            </p>
+            <p>
+              Delivery status:{" "}
+              {handoffChip(leadModal.lead) ?? (
+                <span className="badge">Not sent yet</span>
+              )}
+            </p>
+            {deliveryBanner?.leadId === leadModal.lead.id ? (
+              <p
+                className={`delivery-inline delivery-${deliveryBanner.outcome}`}
+              >
+                {deliveryBanner.detail}
+              </p>
+            ) : null}
+            <div className="usecases-actions">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void handoff(leadModal.lead)}
+              >
+                Send to DF
+              </button>
+              <small className="muted">
+                You&apos;ll get a confirmed landed / failed result
+                here — the Delivery Factory answers every package.
+              </small>
+            </div>
+          </div>
+        ) : null}
+            </div>
           </div>
         ) : null}
       </section>
