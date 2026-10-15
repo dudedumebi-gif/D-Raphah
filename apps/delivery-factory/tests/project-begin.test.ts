@@ -191,6 +191,8 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
           name: w.name,
           status: w.status,
           trigger_config: w.trigger_config,
+          created_at: w.created_at,
+          updated_at: w.updated_at,
           skeleton_node_kinds: new Set(
             (w.nodes ?? [])
               .map((n) => String(n.node_key))
@@ -199,6 +201,7 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
               ),
           ).size,
           skeleton_edges: (w.edges ?? []).length,
+          skeleton_runs: 0,
         }));
     }
     if (head.includes("from public.workflow_nodes")) {
@@ -1007,11 +1010,14 @@ describe("getProjectBeginState", () => {
         status: "draft",
         requirementCode: "REQ-001",
         // The fixture carries no graph rows, so it lists as
-        // incomplete and does not count toward coverage.
+        // incomplete; being fresh and untouched it reads as
+        // possibly-in-flight, hence covered for Charter purposes
+        // (a machine-repairable aged row would not be).
         complete: false,
+        covered: true,
       },
     ]);
-    expect(state.useCaseWorkflowCompleteCount).toBe(0);
+    expect(state.useCaseWorkflowCoveredCount).toBe(1);
   });
 
   it("404s for an unknown project", async () => {

@@ -175,7 +175,8 @@ function makeEngine() {
     }
     if (
       head.includes("from public.workflows") &&
-      head.includes("skeleton_runs")
+      head.includes("skeleton_runs") &&
+      !head.includes("trigger_config")
     ) {
       // findAndAssessSkeleton: values are environment, projectId,
       // requirementId — one row with computed completeness, run
@@ -219,20 +220,26 @@ function makeEngine() {
             w.environment === String(values[0]) &&
             w.trigger_config.projectId === String(values[1]),
         )
-        .map((w) => ({
-          id: w.id,
-          name: w.name,
-          status: w.status,
-          trigger_config: w.trigger_config,
-          skeleton_node_kinds: new Set(
-            w.nodes
-              .map((n) => String(n.node_key))
-              .filter((k) =>
-                ["trigger-1", "action-1", "action-2", "action-3"].includes(k),
-              ),
-          ).size,
-          skeleton_edges: w.edges.length,
-        }));
+        .map((w) => {
+          const stamp = new Date().toISOString();
+          return {
+            id: w.id,
+            name: w.name,
+            status: w.status,
+            trigger_config: w.trigger_config,
+            created_at: w.created_at ?? stamp,
+            updated_at: w.updated_at ?? w.created_at ?? stamp,
+            skeleton_node_kinds: new Set(
+              w.nodes
+                .map((n) => String(n.node_key))
+                .filter((k) =>
+                  ["trigger-1", "action-1", "action-2", "action-3"].includes(k),
+                ),
+            ).size,
+            skeleton_edges: w.edges.length,
+            skeleton_runs: runs.filter((r) => r.workflow_id === w.id).length,
+          };
+        });
     }
     if (
       head.includes("from public.workflows") &&
@@ -556,6 +563,39 @@ describe("ensureUseCaseWorkflows", () => {
     expect(listed[0].requirementCode).toBe("UC-ONLINE-APPOINTMENT-BOOKING");
     // Generator-produced skeletons list as complete (round 8).
     expect(listed.every((s) => s.complete)).toBe(true);
+    expect(listed.every((s) => s.covered)).toBe(true);
+  });
+
+  it("settles every concurrent creation before returning or throwing (Codex round 11)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const doomedCode = pkg.requirementBaseline.requirements[1].code;
+
+    // Every node write for the SECOND requirement's workflow fails
+    // permanently; its siblings must still finish completely
+    // before ensureUseCaseWorkflows returns (by throwing).
+    const failingDb = (async (
+      strings: TemplateStringsArray,
+      ...values: unknown[]
+    ) => {
+      if (strings[0].includes("insert into public.workflow_nodes")) {
+        const owner = engine.workflows.get(String(values[0]));
+        if (owner?.trigger_config.requirementCode === doomedCode) {
+          throw new Error("permanent node-write failure");
+        }
+      }
+      return engine.db(strings, ...values);
+    }) as unknown as NeonClient;
+
+    await expect(
+      ensureUseCaseWorkflows(failingDb, project),
+    ).rejects.toThrow("permanent node-write failure");
+    const complete = [...engine.workflows.values()].filter(
+      (w) => w.trigger_config.requirementCode !== doomedCode,
+    );
+    expect(complete).toHaveLength(2);
+    expect(complete.every((w) => w.nodes.length === 4)).toBe(true);
   });
 
   it("adopts the winner when a concurrent create wins the race (Codex on PR #60)", async () => {
@@ -1223,10 +1263,11 @@ describe("skeleton wiring", () => {
     expect(charter).toContain("Use-case workflows");
     expect(charter).toContain("useCaseWorkflows");
     // Partial success keeps the action available (Codex round 3),
-    // counted in COMPLETE skeletons so an incomplete row cannot
-    // hide the repair path (round 8).
+    // counted in COVERED skeletons so a machine-repairable row
+    // cannot hide the repair path (round 8) while an operator's
+    // protected draft settles its requirement (round 11).
     expect(charter).toContain(
-      "useCaseWorkflowCompleteCount < state.requirementCount",
+      "useCaseWorkflowCoveredCount < state.requirementCount",
     );
   });
 

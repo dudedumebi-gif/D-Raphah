@@ -223,12 +223,15 @@ export interface ProjectBeginState {
   /** Use-case skeletons already generated for this project. */
   useCaseWorkflows: ListedUseCaseSkeleton[];
   /**
-   * How many of those skeletons have COMPLETE graphs. The Charter
+   * How many requirements are COVERED by a skeleton: complete
+   * graphs, plus incomplete ones an operator has taken over
+   * (edited or run — protected from generator repair). The Charter
    * keeps skeleton generation available until this reaches
-   * requirementCount — an incomplete row must not hide the repair
-   * path (Codex on PR #60, round 8).
+   * requirementCount: a machine-repairable row must not hide the
+   * repair path (round 8), and an operator's draft must not keep
+   * an ineffective action alive forever (round 11).
    */
-  useCaseWorkflowCompleteCount: number;
+  useCaseWorkflowCoveredCount: number;
 }
 
 /** What the project's begin surface needs: stage + the workflows an
@@ -263,7 +266,7 @@ export async function getProjectBeginState(
       pkgData?.package.requirementBaseline?.requirements ?? []
     ).filter(isGeneratableRequirement).length,
     useCaseWorkflows,
-    useCaseWorkflowCompleteCount: useCaseWorkflows.filter((s) => s.complete)
+    useCaseWorkflowCoveredCount: useCaseWorkflows.filter((s) => s.covered)
       .length,
   };
 }

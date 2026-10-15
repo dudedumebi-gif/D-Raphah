@@ -238,6 +238,7 @@ interface UseCaseSkeletonRef {
   status: string;
   requirementCode: string;
   complete?: boolean;
+  covered?: boolean;
 }
 
 interface BeginState {
@@ -246,7 +247,7 @@ interface BeginState {
   publishedWorkflows: Array<{ id: string; name: string }>;
   requirementCount: number;
   useCaseWorkflows: UseCaseSkeletonRef[];
-  useCaseWorkflowCompleteCount: number;
+  useCaseWorkflowCoveredCount: number;
 }
 
 interface BeginResult {
@@ -444,11 +445,12 @@ function BeginWorkflowSection(props: {
               </ul>
             ) : null}
             {/* The create action stays available until every
-                generatable requirement has a COMPLETE skeleton:
-                generation is idempotent, and a partial result (an
-                intake that stopped midway, an incomplete row) must
-                stay retryable/repairable from here. */}
-            {state.useCaseWorkflowCompleteCount < state.requirementCount ? (
+                generatable requirement is COVERED — by a complete
+                skeleton, or by an operator's own edited draft (which
+                generation will never touch, so re-offering it would
+                no-op forever). A machine-repairable incomplete row
+                keeps the action available as its repair path. */}
+            {state.useCaseWorkflowCoveredCount < state.requirementCount ? (
               <>
                 <p className="muted">
                   This project's package carries {state.requirementCount}{" "}

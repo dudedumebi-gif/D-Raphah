@@ -43,7 +43,8 @@ function engineDb() {
     }
     if (
       head.includes("from public.workflows") &&
-      head.includes("skeleton_runs")
+      head.includes("skeleton_runs") &&
+      !head.includes("trigger_config")
     ) {
       // findAndAssessSkeleton: one computed row per match.
       const match = [...workflows.values()].find(

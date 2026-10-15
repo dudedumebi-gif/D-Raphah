@@ -420,6 +420,18 @@ export interface ListedUseCaseSkeleton extends UseCaseSkeleton {
    * reaches the requirement count (Codex on PR #60, round 8).
    */
   complete: boolean;
+  /**
+   * Whether this skeleton settles its requirement for Charter
+   * purposes: complete, OR incomplete-but-protected (an operator
+   * has edited or run it — the generator will never touch it, so
+   * the requirement HAS its workflow: theirs). Only a
+   * machine-repairable row (incomplete, untouched, aged) is
+   * uncovered — for that row the create action is a real repair.
+   * Without this distinction the action would stay offered
+   * forever over an operator's customized draft while every click
+   * no-ops (Codex on PR #60, round 11).
+   */
+  covered: boolean;
 }
 
 export async function listProjectUseCaseWorkflows(
@@ -429,6 +441,7 @@ export async function listProjectUseCaseWorkflows(
 ): Promise<ListedUseCaseSkeleton[]> {
   const rows = await q(db)`
     select w.id, w.name, w.status, w.trigger_config,
+      w.created_at, w.updated_at,
       (select count(distinct n.node_key)
          from public.workflow_nodes n
         where n.workflow_id = w.id
@@ -437,23 +450,29 @@ export async function listProjectUseCaseWorkflows(
       (select count(*)
          from public.workflow_edges e
         where e.workflow_id = w.id
-      ) as skeleton_edges
+      ) as skeleton_edges,
+      (select count(*)
+         from public.workflow_runs r
+        where r.workflow_id = w.id
+      ) as skeleton_runs
     from public.workflows w
     where w.environment = ${environment}
       and w.trigger_config->>'projectId' = ${projectId}
     order by w.created_at asc`;
-  return rows.map((r) => ({
-    id: String(r.id),
-    name: String(r.name),
-    status: String(r.status),
-    requirementCode: String(
-      (r.trigger_config as Record<string, unknown> | null)
-        ?.requirementCode ?? "",
-    ),
-    complete:
-      Number(r.skeleton_node_kinds) >= SKELETON_NODE_KEYS.length &&
-      Number(r.skeleton_edges) >= SKELETON_NODE_KEYS.length - 1,
-  }));
+  return rows.map((r) => {
+    const assessment = assessSkeletonRow(r);
+    return {
+      id: String(r.id),
+      name: String(r.name),
+      status: String(r.status),
+      requirementCode: String(
+        (r.trigger_config as Record<string, unknown> | null)
+          ?.requirementCode ?? "",
+      ),
+      complete: assessment.complete,
+      covered: assessment.complete || !assessment.repairable,
+    };
+  });
 }
 
 /** The node keys every complete skeleton graph carries. */
@@ -648,8 +667,12 @@ export async function ensureUseCaseWorkflows(
   // path, and a sequential loop would multiply the per-requirement
   // round trips by the baseline size against the Lead Engine's
   // dispatch timeout (Codex on PR #60, round 10). Result order
-  // still follows the baseline.
-  const outcomes = await Promise.all(
+  // still follows the baseline. allSettled, not all: every started
+  // creation must finish before this function returns — an early
+  // rejection must not leave sibling writes running behind a
+  // returned response (round 11). The first failure is re-thrown
+  // after all settle, preserving the callers' error contract.
+  const settled = await Promise.allSettled(
     requirements.map(async (requirement) => {
       const found = await findAndAssessSkeleton(
         db,
@@ -692,9 +715,17 @@ export async function ensureUseCaseWorkflows(
       };
     }),
   );
-  for (const outcome of outcomes) {
-    (outcome.kind === "created" ? created : existing).push(outcome.skeleton);
+  let firstError: unknown = null;
+  for (const outcome of settled) {
+    if (outcome.status === "rejected") {
+      firstError ??= outcome.reason;
+      continue;
+    }
+    (outcome.value.kind === "created" ? created : existing).push(
+      outcome.value.skeleton,
+    );
   }
+  if (firstError) throw firstError;
   return { created, existing };
 }
 
