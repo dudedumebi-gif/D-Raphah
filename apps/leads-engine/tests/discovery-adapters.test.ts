@@ -283,7 +283,8 @@ describe("overpass category preset (clinic sprint C2)", () => {
     expect(query).toContain('["craft"~"^(plumber|electrician|hvac|');
     expect(query).toContain("garage_door|electronics_repair");
     expect(query).toContain('["shop"~"^(appliance_repair|electronics_repair)$"]');
-    expect(query).toContain('["shop"]["repair"~"^(electronics|appliance|yes)$"]');
+    expect(query).toContain('["shop"]["repair"~"^(electronics|appliance)$"]');
+    expect(query).toContain('["shop"~"^(electronics|appliance_repair|electronics_repair)$"]["repair"="yes"]');
     expect(query).not.toContain('["amenity"="dentist"]');
     expect(query).toContain('["website"]');
 

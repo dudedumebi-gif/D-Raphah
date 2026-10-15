@@ -2393,7 +2393,11 @@ export function Leads({
       void toggleUseCases(lead);
     if (tab === "proposal") {
       if (proposalLead?.id !== lead.id) void toggleProposal(lead);
-      else void loadProposal(lead);
+      // Same lead: refresh the counts only while no draft exists —
+      // loadProposal overwrites proposalText, and reloading over an
+      // existing draft would silently discard unsaved edits when
+      // the operator returns from another tab (Codex P2 on #61).
+      else if (!proposalData?.proposal) void loadProposal(lead);
     }
   }
   function closeLeadModal() {

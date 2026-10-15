@@ -39,11 +39,14 @@ export type OverpassAdapterConfig = z.infer<
 const FIELD_SERVICE_TAG_FILTERS = [
   '["craft"~"^(plumber|electrician|hvac|locksmith|heating_engineer|appliance_repair|garage_door|electronics_repair)$"]',
   '["shop"~"^(appliance_repair|electronics_repair)$"]',
-  // OSM documents repair=* as the service tag on shops: a shop of
-  // any kind explicitly offering electronics/appliance repair is a
-  // field-service business even without a repair shop value
-  // (Codex P2 on PR #59).
-  '["shop"]["repair"~"^(electronics|appliance|yes)$"]',
+  // OSM documents repair=* as the service tag on shops: explicit
+  // electronics/appliance repair values qualify on any shop, and
+  // a generic repair=yes qualifies only on relevant shop
+  // categories — repair=yes alone would also match bicycle, shoe
+  // and jewelry repair and starve the bounded candidate slice
+  // (Codex P2 on PR #59, P1 on PR #61).
+  '["shop"]["repair"~"^(electronics|appliance)$"]',
+  '["shop"~"^(electronics|appliance_repair|electronics_repair)$"]["repair"="yes"]',
 ];
 
 const CLINIC_TAG_FILTERS = [
