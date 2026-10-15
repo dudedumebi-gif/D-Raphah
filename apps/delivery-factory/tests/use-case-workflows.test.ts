@@ -216,9 +216,17 @@ function makeEngine() {
       ];
     }
     if (head.includes("delete from public.workflows")) {
-      // deleteWorkflow: drafts and archived only.
+      // deleteUntouchedSkeleton: drafts/archived only, and the
+      // untouched marker (updated_at = created_at, zero runs) is
+      // revalidated by the statement itself.
       const wf = workflows.get(String(values[0]));
-      if (wf && (wf.status === "draft" || wf.status === "archived")) {
+      if (!wf) return [];
+      const statusOk = wf.status === "draft" || wf.status === "archived";
+      const untouched =
+        (wf.updated_at ?? wf.created_at) === (wf.created_at ?? wf.updated_at) ||
+        (wf.created_at === undefined && wf.updated_at === undefined);
+      const runCount = runs.filter((r) => r.workflow_id === wf.id).length;
+      if (statusOk && untouched && runCount === 0) {
         workflows.delete(wf.id);
         return [{ id: wf.id }];
       }
@@ -779,6 +787,108 @@ describe("ensureUseCaseWorkflows", () => {
     const result = await ensureUseCaseWorkflows(engine.db, project);
     expect(result.existing.map((s) => s.id)).toContain(editedId);
     expect(engine.workflows.get(editedId)?.nodes).toHaveLength(1);
+  });
+
+  it("never pairs a measure across the generatable filter (Codex round 5)", async () => {
+    const engine = makeEngine();
+    const mkReq = (overrides: Partial<HandoffRequirement>) =>
+      ({
+        id: randomUUID(),
+        opportunityId: randomUUID(),
+        code: "UC-PLACEHOLDER",
+        statement: "The business will automate a recurring manual process.",
+        priority: "must",
+        status: "validated",
+        humanValidatorId: "reviewer-1",
+        acceptanceCriteria: ["The process completes without manual steps"],
+        blockingQuestions: [],
+        ...overrides,
+      }) as HandoffRequirement;
+    const pkg = signTestPackage(
+      packageBase({
+        requirementBaseline: {
+          version: 1,
+          requirements: [
+            // Ungeneratable, FIRST in the baseline…
+            mkReq({ code: "UC-FIRST-DRAFT", status: "draft" }),
+            // …followed by the generatable one.
+            mkReq({ code: "UC-SECOND-VALIDATED" }),
+          ],
+          features: [],
+        },
+        // One measure — positionally the FIRST requirement's.
+        successMeasures: [
+          {
+            metric: "First requirement metric",
+            target: "FIRST-REQUIREMENT-TARGET-TEXT",
+          },
+        ],
+      }),
+    ).pkg;
+    const project = seedProject(engine, pkg);
+
+    const result = await ensureUseCaseWorkflows(engine.db, project);
+    expect(result.created).toHaveLength(1);
+    expect(result.created[0].requirementCode).toBe("UC-SECOND-VALIDATED");
+    // measures (1) do not cover the full baseline (2), so NO pairing
+    // may be claimed — the validated requirement's skeleton must not
+    // inherit the first requirement's target.
+    const stored = [...engine.workflows.values()][0];
+    const aiNode = stored.nodes.find((n) => n.kind === "ai_assist");
+    expect(JSON.stringify(aiNode?.config)).not.toContain(
+      "FIRST-REQUIREMENT-TARGET-TEXT",
+    );
+  });
+
+  it("revalidates the untouched marker inside the delete (TOCTOU, Codex round 5)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const requirement = pkg.requirementBaseline.requirements[0];
+    const draft = buildUseCaseWorkflowDraft({
+      project,
+      packageId: pkg.packageId,
+      requirement,
+      successMeasure: pkg.successMeasures[0],
+    });
+    const partialId = randomUUID();
+    engine.workflows.set(partialId, {
+      id: partialId,
+      name: draft.name,
+      description: draft.description,
+      status: "draft",
+      environment: project.environment,
+      trigger_type: "manual",
+      trigger_config: draft.trigger_config,
+      created_by: "intake-skeleton",
+      nodes: [{ ...draft.nodes[0] }],
+      edges: [],
+    });
+
+    // The operator's save lands between the assessment and the
+    // delete: bump updated_at just as the guarded delete arrives.
+    let saved = false;
+    const racingDb = (async (
+      strings: TemplateStringsArray,
+      ...values: unknown[]
+    ) => {
+      if (!saved && strings[0].includes("delete from public.workflows")) {
+        saved = true;
+        const row = engine.workflows.get(partialId);
+        if (row) {
+          row.created_at = new Date(Date.now() - 60_000).toISOString();
+          row.updated_at = new Date().toISOString();
+        }
+      }
+      return engine.db(strings, ...values);
+    }) as unknown as NeonClient;
+
+    const result = await ensureUseCaseWorkflows(racingDb, project);
+    // The guarded delete refused: the draft survives and is
+    // reported as existing; the other requirements still generate.
+    expect(result.existing.map((s) => s.id)).toContain(partialId);
+    expect(engine.workflows.get(partialId)?.nodes).toHaveLength(1);
+    expect(result.created).toHaveLength(2);
   });
 
   it("creates nothing for an empty baseline, a rejected-only baseline, or no package", async () => {

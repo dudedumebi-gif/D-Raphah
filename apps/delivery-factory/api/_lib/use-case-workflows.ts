@@ -55,7 +55,6 @@ import type { DeliveryEnvironment, NeonClient } from "./db.js";
 import { log } from "./telemetry.js";
 import {
   createWorkflow,
-  deleteWorkflow,
   getProjectIdForPackage,
   getWorkflow,
   specFor,
@@ -422,6 +421,31 @@ function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleto
 }
 
 /**
+ * Delete a skeleton ONLY if it is still provably untouched — the
+ * untouched conditions are revalidated inside the delete statement
+ * itself, so an operator save (or a first run) landing between the
+ * assessment and the delete makes the delete a no-op instead of
+ * erasing their work (the TOCTOU window Codex flagged on PR #60).
+ * Draft/archived only, as with the lib's deleteWorkflow; the graph
+ * and any child rows cascade.
+ */
+async function deleteUntouchedSkeleton(
+  db: NeonClient,
+  workflowId: string,
+): Promise<boolean> {
+  const rows = await q(db)`
+    delete from public.workflows w
+    where w.id = ${workflowId}
+      and w.status in ('draft', 'archived')
+      and w.updated_at = w.created_at
+      and not exists (
+        select 1 from public.workflow_runs r where r.workflow_id = w.id
+      )
+    returning w.id`;
+  return rows.length > 0;
+}
+
+/**
  * Create one skeleton, recovering from the two ways a create can go
  * wrong concurrently or partially (Codex on PR #60):
  * - a concurrent generator won the race — the unique index rejects
@@ -468,7 +492,9 @@ async function createSkeletonWithRecovery(
     if (assessment.complete || !assessment.repairable) {
       return { skeleton: rival, adopted: true };
     }
-    const removed = await deleteWorkflow(db, rival.id).catch(() => false);
+    const removed = await deleteUntouchedSkeleton(db, rival.id).catch(
+      () => false,
+    );
     if (!removed) return { skeleton: rival, adopted: true };
     const workflow = await createWorkflow(db, input);
     return {
@@ -485,11 +511,12 @@ async function createSkeletonWithRecovery(
  * under `existing` and never duplicated. A project with no package —
  * or a package whose baseline is empty — creates nothing.
  *
- * Success measures pair with requirements by position: LE builds
- * both arrays from the same approved use-case rows in the same
- * order, keeping only rows that carry a measure — so the pairing is
- * exact when the counts are equal (the shipped shape), and no
- * pairing is claimed when they are not.
+ * Success measures pair with requirements positionally over the
+ * FULL baseline (see the pairing note in the body): LE builds both
+ * arrays from the same approved use-case rows in the same order,
+ * keeping only rows that carry a measure — so the pairing is exact
+ * when the counts cover the whole baseline (the shipped shape),
+ * and no pairing is claimed when they do not.
  */
 export async function ensureUseCaseWorkflows(
   db: NeonClient,
@@ -500,14 +527,20 @@ export async function ensureUseCaseWorkflows(
   const existing: UseCaseSkeleton[] = [];
   const pkg = await getStoredProjectPackage(db, project.id);
   if (!pkg) return { created, existing };
-  const requirements = (pkg.requirementBaseline?.requirements ?? []).filter(
-    isGeneratableRequirement,
-  );
+  const allRequirements = pkg.requirementBaseline?.requirements ?? [];
   const measures = pkg.successMeasures ?? [];
-  const pairMeasures = measures.length === requirements.length;
+  // Measures pair with requirements POSITIONALLY over the FULL
+  // baseline: the contract's two arrays carry no linkage ids, so a
+  // pairing is only sound when the measures array covers every
+  // baseline requirement, and each requirement keeps its ORIGINAL
+  // index. Pairing after filtering would silently hand one
+  // requirement's metric to another whenever an ungeneratable
+  // requirement precedes a generatable one (Codex on PR #60).
+  const pairMeasures = measures.length === allRequirements.length;
   const createdBy = options.createdBy ?? "intake-skeleton";
 
-  for (const [index, requirement] of requirements.entries()) {
+  for (const [index, requirement] of allRequirements.entries()) {
+    if (!isGeneratableRequirement(requirement)) continue;
     const found = await findUseCaseWorkflow(
       db,
       project.environment,
@@ -525,7 +558,9 @@ export async function ensureUseCaseWorkflows(
       // untouched: remove it and fall through to regeneration. If it
       // can no longer be deleted (an operator published it), it has
       // been taken over — report it as-is.
-      const removed = await deleteWorkflow(db, found.id).catch(() => false);
+      const removed = await deleteUntouchedSkeleton(db, found.id).catch(
+        () => false,
+      );
       if (!removed) {
         existing.push(found);
         continue;
