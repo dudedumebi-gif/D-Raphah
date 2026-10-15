@@ -232,6 +232,13 @@ export interface ProjectBeginState {
    * an ineffective action alive forever (round 11).
    */
   useCaseWorkflowCoveredCount: number;
+  /**
+   * Skeletons that are incomplete and non-repairable ONLY because
+   * they are younger than the orphan grace (possibly in flight).
+   * The Charter re-checks the begin state after the grace: the
+   * classification is time-dependent (Codex on PR #60, round 12).
+   */
+  useCaseWorkflowPendingCount: number;
 }
 
 /** What the project's begin surface needs: stage + the workflows an
@@ -267,6 +274,8 @@ export async function getProjectBeginState(
     ).filter(isGeneratableRequirement).length,
     useCaseWorkflows,
     useCaseWorkflowCoveredCount: useCaseWorkflows.filter((s) => s.covered)
+      .length,
+    useCaseWorkflowPendingCount: useCaseWorkflows.filter((s) => s.pending)
       .length,
   };
 }

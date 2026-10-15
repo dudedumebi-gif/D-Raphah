@@ -239,6 +239,7 @@ interface UseCaseSkeletonRef {
   requirementCode: string;
   complete?: boolean;
   covered?: boolean;
+  pending?: boolean;
 }
 
 interface BeginState {
@@ -248,6 +249,7 @@ interface BeginState {
   requirementCount: number;
   useCaseWorkflows: UseCaseSkeletonRef[];
   useCaseWorkflowCoveredCount: number;
+  useCaseWorkflowPendingCount: number;
 }
 
 interface BeginResult {
@@ -297,6 +299,26 @@ function BeginWorkflowSection(props: {
       cancelled = true;
     };
   }, [props.projectId]);
+
+  // A fresh incomplete skeleton counts as covered only while it
+  // may still be in flight (the 60s orphan grace). When the grace
+  // lapses it becomes repairable and the create action should
+  // appear — re-check once shortly after the grace so a mounted
+  // Charter does not hide the repair path until a reload (Codex
+  // on PR #60, round 12).
+  const pendingCount = state?.useCaseWorkflowPendingCount ?? 0;
+  useEffect(() => {
+    if (pendingCount <= 0) return;
+    const timer = setTimeout(() => {
+      api<BeginState>(`/api/projects/${props.projectId}/begin`)
+        .then((d) => setState(d))
+        .catch(() => {
+          // A failed re-check is silent; the section keeps the
+          // last good state and any manual action still works.
+        });
+    }, 65_000);
+    return () => clearTimeout(timer);
+  }, [pendingCount, props.projectId]);
 
   const begin = async () => {
     setBusy(true);

@@ -319,7 +319,11 @@ export function isGeneratableRequirement(
   return (
     requirement.status === "validated" &&
     typeof requirement.humanValidatorId === "string" &&
-    requirement.humanValidatorId.trim().length > 0
+    requirement.humanValidatorId.trim().length > 0 &&
+    // "wont" is deliberately out-of-scope work (MoSCoW): even
+    // human-validated, it must never become a workflow or a
+    // client email saying it will be built (Codex round 12).
+    requirement.priority !== "wont"
   );
 }
 
@@ -389,9 +393,9 @@ function assessSkeletonRow(row: Record<string, unknown>): SkeletonAssessment {
   const complete =
     Number(row.skeleton_node_kinds) >= SKELETON_NODE_KEYS.length &&
     Number(row.skeleton_edges) >= SKELETON_NODE_KEYS.length - 1;
-  if (complete) return { complete: true, repairable: false };
+  if (complete) return { complete: true, repairable: false, pending: false };
   if (Number(row.skeleton_runs ?? 0) > 0) {
-    return { complete: false, repairable: false };
+    return { complete: false, repairable: false, pending: false };
   }
   const createdAt = Date.parse(String(row.created_at ?? ""));
   const updatedAt = Date.parse(String(row.updated_at ?? ""));
@@ -399,13 +403,15 @@ function assessSkeletonRow(row: Record<string, unknown>): SkeletonAssessment {
     Number.isFinite(createdAt) &&
     Number.isFinite(updatedAt) &&
     updatedAt === createdAt;
-  if (!neverUpdated) return { complete: false, repairable: false };
+  if (!neverUpdated) {
+    return { complete: false, repairable: false, pending: false };
+  }
   // In-flight protection: a row younger than the grace period may
   // still be receiving its graph from a concurrent create. A clock
   // skew that makes the age read negative also fails safe (not
   // repairable).
   const aged = Date.now() - createdAt >= ORPHAN_MIN_AGE_MS;
-  return { complete: false, repairable: aged };
+  return { complete: false, repairable: aged, pending: !aged };
 }
 
 /** Every skeleton generated for a project, oldest first. */
@@ -432,6 +438,14 @@ export interface ListedUseCaseSkeleton extends UseCaseSkeleton {
    * no-ops (Codex on PR #60, round 11).
    */
   covered: boolean;
+  /**
+   * True when the row is incomplete and non-repairable ONLY
+   * because it is younger than the orphan grace — it may still be
+   * in flight. Time-dependent: the Charter re-checks after the
+   * grace so a row that becomes repairable surfaces its repair
+   * action without a reload (Codex on PR #60, round 12).
+   */
+  pending: boolean;
 }
 
 export async function listProjectUseCaseWorkflows(
@@ -471,6 +485,7 @@ export async function listProjectUseCaseWorkflows(
       ),
       complete: assessment.complete,
       covered: assessment.complete || !assessment.repairable,
+      pending: assessment.pending,
     };
   });
 }
@@ -507,6 +522,14 @@ interface SkeletonAssessment {
    * one (Codex on PR #60, rounds 2–6).
    */
   repairable: boolean;
+  /**
+   * True when the ONLY thing standing between this row and
+   * repairable is its age — it may still be in flight. The Charter
+   * counts such rows as covered (a create may be landing) but
+   * re-checks after the grace lapses, because the classification
+   * is time-dependent (Codex on PR #60, round 12).
+   */
+  pending: boolean;
 }
 
 function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleton {

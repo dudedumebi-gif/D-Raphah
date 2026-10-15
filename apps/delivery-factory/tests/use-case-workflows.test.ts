@@ -711,6 +711,13 @@ describe("ensureUseCaseWorkflows", () => {
               status: "needs_clarification",
               humanValidatorId: "reviewer-1",
             }),
+            // Human-validated but deliberately out of scope:
+            // "wont" never becomes a workflow (Codex round 12).
+            req({
+              status: "validated",
+              humanValidatorId: "reviewer-1",
+              priority: "wont",
+            }),
             req({ status: "validated", humanValidatorId: "reviewer-1" }),
           ],
           features: [],
@@ -735,6 +742,15 @@ describe("ensureUseCaseWorkflows", () => {
     expect(
       isGeneratableRequirement(
         req({ status: "proposed", humanValidatorId: "reviewer-1" }),
+      ),
+    ).toBe(false);
+    expect(
+      isGeneratableRequirement(
+        req({
+          status: "validated",
+          humanValidatorId: "reviewer-1",
+          priority: "wont",
+        }),
       ),
     ).toBe(false);
   });
@@ -1269,6 +1285,10 @@ describe("skeleton wiring", () => {
     expect(charter).toContain(
       "useCaseWorkflowCoveredCount < state.requirementCount",
     );
+    // Pending (possibly in-flight) rows schedule a re-check after
+    // the orphan grace (Codex round 12).
+    expect(charter).toContain("useCaseWorkflowPendingCount");
+    expect(charter).toContain("65_000");
   });
 
   it("the route is registered in the project dispatcher", () => {

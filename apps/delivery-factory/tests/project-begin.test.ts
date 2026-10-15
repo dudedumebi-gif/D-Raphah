@@ -186,13 +186,19 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
             w.environment === String(values[0]) &&
             w.trigger_config?.projectId === String(values[1]),
         )
-        .map((w) => ({
+        .map((w) => {
+          // One insert stamps both columns with the same now();
+          // fixtures that carry no timestamps read as one instant.
+          const stamp = new Date().toISOString();
+          const createdAt =
+            (w as { created_at?: string }).created_at ?? stamp;
+          return {
           id: w.id,
           name: w.name,
           status: w.status,
           trigger_config: w.trigger_config,
-          created_at: (w as { created_at?: string }).created_at,
-          updated_at: (w as { updated_at?: string }).updated_at,
+          created_at: createdAt,
+          updated_at: (w as { updated_at?: string }).updated_at ?? createdAt,
           skeleton_node_kinds: new Set(
             (w.nodes ?? [])
               .map((n) => String(n.node_key))
@@ -202,7 +208,8 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
           ).size,
           skeleton_edges: (w.edges ?? []).length,
           skeleton_runs: 0,
-        }));
+          };
+        });
     }
     if (head.includes("from public.workflow_nodes")) {
       return byId.get(String(values[0]))?.nodes ?? [];
@@ -1012,12 +1019,15 @@ describe("getProjectBeginState", () => {
         // The fixture carries no graph rows, so it lists as
         // incomplete; being fresh and untouched it reads as
         // possibly-in-flight, hence covered for Charter purposes
-        // (a machine-repairable aged row would not be).
+        // (a machine-repairable aged row would not be) and
+        // pending a re-check once the grace lapses.
         complete: false,
         covered: true,
+        pending: true,
       },
     ]);
     expect(state.useCaseWorkflowCoveredCount).toBe(1);
+    expect(state.useCaseWorkflowPendingCount).toBe(1);
   });
 
   it("404s for an unknown project", async () => {
