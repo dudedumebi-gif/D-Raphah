@@ -15,7 +15,7 @@ import {
  * every shop/office/amenity with a website (clinic sprint build C2).
  */
 export const OverpassAdapterConfigSchema = z.object({
-  categoryPreset: z.enum(["all", "clinics"]).default("all"),
+  categoryPreset: z.enum(["all", "clinics", "field_service"]).default("all"),
 });
 export type OverpassAdapterConfig = z.infer<
   typeof OverpassAdapterConfigSchema
@@ -27,6 +27,20 @@ export type OverpassAdapterConfig = z.infer<
  * (clinic / dentist / doctor / physiotherapist / centre). Every
  * filter still requires a website tag.
  */
+/**
+ * Field-service preset tag filters (Experiment 2 control vertical,
+ * 2026-10-14): dispatch-based trades as tagged in OpenStreetMap —
+ * the craft key carries plumbers/electricians/HVAC, plus the two
+ * repair shop values. Every filter still requires a website tag.
+ * Verified Toronto supply is thin (23 website-bearing elements in
+ * a 20 km radius) — the preset is honest about the vertical's OSM
+ * coverage rather than padding with unrelated categories.
+ */
+const FIELD_SERVICE_TAG_FILTERS = [
+  '["craft"~"^(plumber|electrician|hvac|locksmith|heating_engineer|appliance_repair|garage_door)$"]',
+  '["shop"~"^(appliance_repair|electronics_repair)$"]',
+];
+
 const CLINIC_TAG_FILTERS = [
   '["amenity"="dentist"]',
   '["amenity"="clinic"]',
@@ -64,7 +78,9 @@ export function buildOverpassQuery(
   const filters =
     categoryPreset === "clinics"
       ? CLINIC_TAG_FILTERS
-      : ["shop", "office", "amenity"].map((tag) => `["${tag}"]`);
+      : categoryPreset === "field_service"
+        ? FIELD_SERVICE_TAG_FILTERS
+        : ["shop", "office", "amenity"].map((tag) => `["${tag}"]`);
   const selectors = filters
     .map(
       (filter) =>
@@ -107,7 +123,12 @@ export function overpassElementToCandidate(
     lat: typeof coords.lat === "number" ? coords.lat : null,
     lng: typeof coords.lon === "number" ? coords.lon : null,
     category:
-      tags.shop ?? tags.office ?? tags.healthcare ?? tags.amenity ?? null,
+      tags.craft ??
+      tags.shop ??
+      tags.office ??
+      tags.healthcare ??
+      tags.amenity ??
+      null,
     source: "overpass",
     sourceUrl: `https://www.openstreetmap.org/${element.type}/${element.id}`,
     observedAt: new Date().toISOString(),

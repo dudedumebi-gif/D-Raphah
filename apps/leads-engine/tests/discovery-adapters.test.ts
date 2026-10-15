@@ -256,6 +256,50 @@ describe("overpass category preset (clinic sprint C2)", () => {
     ).toThrow();
   });
 
+  it("parses and sends the field-service preset (Experiment 2)", async () => {
+    const { parseDiscoveryAdapterConfig } = await import(
+      "../api/_lib/discovery/registry"
+    );
+    expect(
+      parseDiscoveryAdapterConfig("overpass", {
+        categoryPreset: "field_service",
+      }),
+    ).toEqual({ categoryPreset: "field_service" });
+
+    const { OverpassAdapter, overpassElementToCandidate } = await import(
+      "../api/_lib/discovery/overpass"
+    );
+    const adapter = new OverpassAdapter();
+    let body = "";
+    const fetcher = (async (_url: unknown, init?: { body?: unknown }) => {
+      body = String(init?.body ?? "");
+      return jsonResponse({ elements: [] });
+    }) as typeof fetch;
+    await adapter.fetchCandidates(geo, {
+      fetcher,
+      config: { categoryPreset: "field_service" },
+    });
+    const query = decodeURIComponent(body.replace(/^data=/, ""));
+    expect(query).toContain('["craft"~"^(plumber|electrician|hvac|');
+    expect(query).toContain('["shop"~"^(appliance_repair|electronics_repair)$"]');
+    expect(query).not.toContain('["amenity"="dentist"]');
+    expect(query).toContain('["website"]');
+
+    const candidate = overpassElementToCandidate({
+      type: "node",
+      id: 42,
+      lat: 43.65,
+      lon: -79.38,
+      tags: {
+        name: "Rapid Flow Plumbing",
+        craft: "plumber",
+        website: "https://rapidflow.example.ca",
+      },
+    });
+    expect(candidate.category).toBe("plumber");
+    expect(candidate.website).toBe("https://rapidflow.example.ca");
+  });
+
   it("sends clinic-only selectors when the preset is configured", async () => {
     const { OverpassAdapter } = await import(
       "../api/_lib/discovery/overpass"
