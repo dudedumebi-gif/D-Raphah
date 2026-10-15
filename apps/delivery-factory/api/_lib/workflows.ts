@@ -1128,7 +1128,21 @@ export async function executeWorkflow(
           body: String(cfg.body ?? ""),
           encryptSensitive: cfg.encryptSensitive === true,
         };
-        if (!args.to) throw new Error("send_email: 'to' is required");
+        if (!args.to.trim()) {
+          // No recipient: the step is a draft by design. Use-case
+          // skeletons deliberately ship send_email with to:""
+          // (draft-first, never auto-send), so failing here made an
+          // untouched skeleton unable to ever complete a dry run.
+          // Complete the step as an auditable draft stub instead —
+          // nothing is sent, and no provider hook is consulted.
+          return {
+            delivered: false,
+            draft: true,
+            reason: "no recipient set — draft only",
+            subject: args.subject,
+            body: args.body,
+          };
+        }
         if (hooks.sendEmail) return hooks.sendEmail(args);
         // No provider configured: record intent, mark delivered=false.
         return { delivered: false, queued: true, ...args };

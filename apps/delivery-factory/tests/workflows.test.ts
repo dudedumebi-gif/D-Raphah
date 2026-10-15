@@ -7,6 +7,11 @@ import {
   specFor,
   type Workflow,
 } from "../api/_lib/workflows.js";
+import {
+  buildUseCaseWorkflowDraft,
+  type UseCaseWorkflowProjectRef,
+} from "../api/_lib/use-case-workflows.js";
+import { packageBase, signTestPackage } from "./helpers.js";
 
 /**
  * Minimal fake of the @neondatabase/serverless tag client. Matches on the
@@ -200,15 +205,77 @@ describe("workflow engine", () => {
       ...demoWorkflow,
       nodes: [
         { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
-        { node_key: "a1", type: "action", kind: "send_email", label: "Email", position_x: 0, position_y: 0, config: { subject: "x" }, enabled: true },
+        { node_key: "a1", type: "action", kind: "slack_notify", label: "Notify", position_x: 0, position_y: 0, config: { webhookUrl: "https://example.com/hook", message: "hi" }, enabled: true },
       ],
       edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
     };
     const { db, steps } = makeFakeDb(bad);
     const run = await executeWorkflow(db, bad.id, {});
     expect(run.status).toBe("failed");
-    expect(run.error).toContain("'to' is required");
+    expect(run.error).toContain("invalid Slack webhook URL");
     expect(steps.find((s) => s.node_key === "a1")?.status).toBe("failed");
+  });
+
+  it("send_email with a recipient records the no-provider draft unchanged", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "send_email", label: "Email", position_x: 0, position_y: 0, config: { to: "client@example.com", subject: "Hi {{trigger.lead.name}}", body: "<p>Hello</p>" }, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db, steps } = makeFakeDb(wf);
+    const run = await executeWorkflow(db, wf.id, { lead: { name: "Acme Corp" } });
+    expect(run.status).toBe("completed");
+    const email = steps.find((s) => s.node_key === "a1");
+    expect(email?.status).toBe("success");
+    // No provider configured: intent recorded, nothing delivered.
+    expect(email?.output).toMatchObject({
+      delivered: false, queued: true,
+      to: "client@example.com", subject: "Hi Acme Corp", body: "<p>Hello</p>",
+    });
+  });
+
+  it("send_email with a recipient uses the provider hook when configured", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "send_email", label: "Email", position_x: 0, position_y: 0, config: { to: "client@example.com", subject: "Hello", body: "<p>Hi</p>" }, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db, steps } = makeFakeDb(wf);
+    const seen: Array<Record<string, unknown>> = [];
+    const run = await executeWorkflow(
+      db, wf.id, {},
+      { sendEmail: async (args) => { seen.push(args); return { delivered: true, id: "msg-1" }; } },
+    );
+    expect(run.status).toBe("completed");
+    expect(seen).toEqual([{ to: "client@example.com", subject: "Hello", body: "<p>Hi</p>", encryptSensitive: false }]);
+    expect(steps.find((s) => s.node_key === "a1")?.output).toMatchObject({ delivered: true, id: "msg-1" });
+  });
+
+  it("send_email with a whitespace-only recipient completes as a draft", async () => {
+    const wf: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        { node_key: "a1", type: "action", kind: "send_email", label: "Email", position_x: 0, position_y: 0, config: { to: "   ", subject: "Draft subject", body: "<p>Draft body</p>" }, enabled: true },
+      ],
+      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
+    };
+    const { db, steps } = makeFakeDb(wf);
+    const run = await executeWorkflow(db, wf.id, {});
+    expect(run.status).toBe("completed");
+    const email = steps.find((s) => s.node_key === "a1");
+    expect(email?.status).toBe("success");
+    expect(email?.output).toMatchObject({
+      delivered: false, draft: true,
+      reason: "no recipient set — draft only",
+      subject: "Draft subject", body: "<p>Draft body</p>",
+    });
   });
 
   it("send_sms records a draft when no provider is configured", async () => {
@@ -457,5 +524,116 @@ describe("lead follow-up (SMS, draft-first) demo", () => {
       draft: true,
       message: "Hi INS Market — quick question about your follow-up plan?",
     });
+  });
+});
+
+/**
+ * A use-case skeleton exactly as the generator builds it from a
+ * landed package (buildUseCaseWorkflowDraft), wrapped as the
+ * published workflow an operator live-tests from Automations.
+ * The skeleton's send_email ships to:"" by design (draft-first,
+ * never auto-send) — executing it must still complete end-to-end,
+ * with the email step recorded as a draft. This is the flow that
+ * failed in production on 2026-10-15 (the user's Donddental
+ * skeleton run died at send_email: 'to' is required) before the
+ * executor learned to complete recipient-less email steps as
+ * drafts instead of throwing.
+ */
+describe("use-case skeleton (generator output)", () => {
+  const { pkg } = signTestPackage(
+    packageBase({
+      organization: { name: "Donddental", domain: "donddental.ca" },
+      requirementBaseline: {
+        version: 1,
+        requirements: [
+          {
+            id: randomUUID(),
+            opportunityId: randomUUID(),
+            code: "UC-ONLINE-APPOINTMENT-BOOKING",
+            statement:
+              "The business will enable patients to book appointments online seamlessly.",
+            priority: "must",
+            status: "validated",
+            humanValidatorId: "reviewer-1",
+            acceptanceCriteria: [
+              "Patients can book appointments 24/7 through the website",
+              "Confirmation emails are sent to patients immediately after booking",
+            ],
+            blockingQuestions: [],
+          },
+        ],
+        features: [],
+      },
+      successMeasures: [
+        {
+          metric: "Increase in online bookings",
+          target:
+            "Achieve a 30% increase in online appointment bookings within the next quarter",
+        },
+      ],
+    }),
+  );
+
+  function skeletonWorkflow(): Workflow {
+    const project: UseCaseWorkflowProjectRef = {
+      id: randomUUID(),
+      environment: "production",
+      package_id: pkg.packageId,
+      organization_name: pkg.organization.name,
+    };
+    const draft = buildUseCaseWorkflowDraft({
+      project,
+      packageId: pkg.packageId,
+      requirement: pkg.requirementBaseline.requirements[0],
+      successMeasures: pkg.successMeasures,
+    });
+    return {
+      id: randomUUID(),
+      name: draft.name,
+      description: draft.description,
+      status: "published",
+      environment: "production",
+      trigger_type: "manual",
+      trigger_config: draft.trigger_config,
+      created_by: "intake-skeleton",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      published_at: new Date().toISOString(),
+      nodes: draft.nodes,
+      edges: draft.edges,
+    };
+  }
+
+  it("runs end-to-end: every step succeeds and the email step completes as a draft", async () => {
+    const wf = skeletonWorkflow();
+    const { db, steps, auditLog } = makeFakeDb(wf);
+    const run = await executeWorkflow(db, wf.id, {});
+
+    expect(run.status).toBe("completed");
+    expect(run.error).toBeNull();
+    const labels = steps.map((s) => `${s.node_label}:${s.status}`);
+    expect(labels).toEqual([
+      "Manual start:success",
+      "Draft plan — Online Appointment Booking:success",
+      "Draft client email:success",
+      "Log run:success",
+    ]);
+
+    // Nothing was sent: the recipient-less email step completed as
+    // an auditable draft carrying the rendered subject and body.
+    const email = steps.find((s) => s.node_key === "action-2")!;
+    expect(email.output).toMatchObject({
+      delivered: false,
+      draft: true,
+      reason: "no recipient set — draft only",
+      subject: "Donddental — Online Appointment Booking",
+    });
+    expect(String((email.output as Record<string, unknown>).body)).toContain(
+      "Patients can book appointments 24/7 through the website",
+    );
+
+    // The run continued past the email step to the audit log.
+    expect(auditLog).toHaveLength(1);
+    expect(auditLog[0].message).toContain("UC-ONLINE-APPOINTMENT-BOOKING");
   });
 });
