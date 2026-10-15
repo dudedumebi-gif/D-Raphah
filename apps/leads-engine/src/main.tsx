@@ -1735,6 +1735,9 @@ export function Discovery({
                     <option value="clinics">
                       Clinics only (dental / medical / wellness)
                     </option>
+                    <option value="field_service">
+                      Field service trades (plumbing / HVAC / electrical)
+                    </option>
                   </select>
                 </label>
               </>
