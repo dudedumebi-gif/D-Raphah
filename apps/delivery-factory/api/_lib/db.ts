@@ -399,16 +399,19 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
       // artifacts carrying one demo organization's requirements, so
       // they are deleted with the package data they came from (they
       // are recognizable by their trigger_config linkage keys).
+      // Runs are deleted (and counted) FIRST: a generated
+      // skeleton's runs would otherwise cascade away with its
+      // workflow row and be missing from the reported count.
+      const runs = (await client`
+        delete from public.workflow_runs
+        where environment = 'demo'
+        returning id
+      `) as unknown as Array<{ id: string }>;
       const workflows = (await client`
         delete from public.workflows
         where environment = 'demo'
           and trigger_config ? 'projectId'
           and trigger_config ? 'requirementId'
-        returning id
-      `) as unknown as Array<{ id: string }>;
-      const runs = (await client`
-        delete from public.workflow_runs
-        where environment = 'demo'
         returning id
       `) as unknown as Array<{ id: string }>;
       const projects = (await client`

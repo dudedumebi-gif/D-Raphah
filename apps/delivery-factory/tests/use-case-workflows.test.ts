@@ -175,7 +175,7 @@ function makeEngine() {
     }
     if (
       head.includes("from public.workflows") &&
-      head.includes("status, trigger_config")
+      head.includes("skeleton_node_kinds")
     ) {
       // listProjectUseCaseWorkflows: values are environment, projectId.
       return [...workflows.values()]
@@ -189,6 +189,14 @@ function makeEngine() {
           name: w.name,
           status: w.status,
           trigger_config: w.trigger_config,
+          skeleton_node_kinds: new Set(
+            w.nodes
+              .map((n) => String(n.node_key))
+              .filter((k) =>
+                ["trigger-1", "action-1", "action-2", "action-3"].includes(k),
+              ),
+          ).size,
+          skeleton_edges: w.edges.length,
         }));
     }
     if (
@@ -467,7 +475,7 @@ describe("ensureUseCaseWorkflows", () => {
     expect(prompt).toContain(
       "Confirmation emails are sent to patients immediately after booking",
     );
-    // The paired success measure rides along (3 requirements, 3 measures).
+    // The package's measures ride along as unattributed context.
     expect(prompt).toContain("Increase in online bookings");
     expect(prompt).toContain("30% increase");
 
@@ -511,6 +519,8 @@ describe("ensureUseCaseWorkflows", () => {
     );
     expect(listed).toHaveLength(3);
     expect(listed[0].requirementCode).toBe("UC-ONLINE-APPOINTMENT-BOOKING");
+    // Generator-produced skeletons list as complete (round 8).
+    expect(listed.every((s) => s.complete)).toBe(true);
   });
 
   it("adopts the winner when a concurrent create wins the race (Codex on PR #60)", async () => {
@@ -534,7 +544,7 @@ describe("ensureUseCaseWorkflows", () => {
           project,
           packageId: pkg.packageId,
           requirement: firstRequirement,
-          successMeasure: pkg.successMeasures[0],
+          successMeasures: pkg.successMeasures,
         });
         const rivalId = randomUUID();
         engine.workflows.set(rivalId, {
@@ -569,7 +579,7 @@ describe("ensureUseCaseWorkflows", () => {
       project,
       packageId: pkg.packageId,
       requirement,
-      successMeasure: pkg.successMeasures[0],
+      successMeasures: pkg.successMeasures,
     });
     const partialId = randomUUID();
     const orphanStamp = new Date(Date.now() - 5 * 60_000).toISOString();
@@ -700,7 +710,7 @@ describe("ensureUseCaseWorkflows", () => {
       project,
       packageId: pkg.packageId,
       requirement,
-      successMeasure: pkg.successMeasures[0],
+      successMeasures: pkg.successMeasures,
     });
     const editedId = randomUUID();
     engine.workflows.set(editedId, {
@@ -736,7 +746,7 @@ describe("ensureUseCaseWorkflows", () => {
       project,
       packageId: pkg.packageId,
       requirement,
-      successMeasure: pkg.successMeasures[0],
+      successMeasures: pkg.successMeasures,
     });
     const now = Date.now();
     const editedId = randomUUID();
@@ -775,7 +785,7 @@ describe("ensureUseCaseWorkflows", () => {
       project,
       packageId: pkg.packageId,
       requirement,
-      successMeasure: pkg.successMeasures[0],
+      successMeasures: pkg.successMeasures,
     });
     const created = Date.parse("2026-10-14T12:00:00.000Z");
     const editedId = randomUUID();
@@ -802,7 +812,7 @@ describe("ensureUseCaseWorkflows", () => {
     expect(engine.workflows.get(editedId)?.nodes).toHaveLength(1);
   });
 
-  it("never pairs a measure across the generatable filter (Codex round 5)", async () => {
+  it("never attributes a measure to a requirement (Codex rounds 5 and 8)", async () => {
     const engine = makeEngine();
     const mkReq = (overrides: Partial<HandoffRequirement>) =>
       ({
@@ -843,14 +853,15 @@ describe("ensureUseCaseWorkflows", () => {
     const result = await ensureUseCaseWorkflows(engine.db, project);
     expect(result.created).toHaveLength(1);
     expect(result.created[0].requirementCode).toBe("UC-SECOND-VALIDATED");
-    // measures (1) do not cover the full baseline (2), so NO pairing
-    // may be claimed — the validated requirement's skeleton must not
-    // inherit the first requirement's target.
+    // The v1 contract gives measures no requirement association,
+    // so the measure may ride along ONLY as unattributed project
+    // context — never as this requirement's own target (Codex
+    // rounds 5 and 8).
     const stored = [...engine.workflows.values()][0];
     const aiNode = stored.nodes.find((n) => n.kind === "ai_assist");
-    expect(JSON.stringify(aiNode?.config)).not.toContain(
-      "FIRST-REQUIREMENT-TARGET-TEXT",
-    );
+    const prompt = JSON.stringify(aiNode?.config);
+    expect(prompt).toContain("FIRST-REQUIREMENT-TARGET-TEXT");
+    expect(prompt).toContain("not specific to this use case");
   });
 
   it("revalidates the untouched marker inside the delete (TOCTOU, Codex round 5)", async () => {
@@ -862,7 +873,7 @@ describe("ensureUseCaseWorkflows", () => {
       project,
       packageId: pkg.packageId,
       requirement,
-      successMeasure: pkg.successMeasures[0],
+      successMeasures: pkg.successMeasures,
     });
     const partialId = randomUUID();
     const orphanStamp = new Date(Date.now() - 5 * 60_000).toISOString();
@@ -950,7 +961,7 @@ describe("ensureUseCaseWorkflows", () => {
       project,
       packageId: pkg.packageId,
       requirement,
-      successMeasure: pkg.successMeasures[0],
+      successMeasures: pkg.successMeasures,
     });
     const inFlightId = randomUUID();
     const young = new Date(Date.now() - 5_000).toISOString();
@@ -1143,8 +1154,12 @@ describe("skeleton wiring", () => {
     expect(charter).toContain("/workflow-skeletons");
     expect(charter).toContain("Use-case workflows");
     expect(charter).toContain("useCaseWorkflows");
-    // Partial success keeps the action available (Codex round 3).
-    expect(charter).toContain("skeletons.length < state.requirementCount");
+    // Partial success keeps the action available (Codex round 3),
+    // counted in COMPLETE skeletons so an incomplete row cannot
+    // hide the repair path (round 8).
+    expect(charter).toContain(
+      "useCaseWorkflowCompleteCount < state.requirementCount",
+    );
   });
 
   it("the route is registered in the project dispatcher", () => {

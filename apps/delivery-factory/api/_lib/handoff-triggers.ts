@@ -33,7 +33,7 @@ import {
 import {
   isGeneratableRequirement,
   listProjectUseCaseWorkflows,
-  type UseCaseSkeleton,
+  type ListedUseCaseSkeleton,
 } from "./use-case-workflows.js";
 
 /**
@@ -214,7 +214,14 @@ export interface ProjectBeginState {
   /** Requirements in the project's stored package (0 when it has none). */
   requirementCount: number;
   /** Use-case skeletons already generated for this project. */
-  useCaseWorkflows: UseCaseSkeleton[];
+  useCaseWorkflows: ListedUseCaseSkeleton[];
+  /**
+   * How many of those skeletons have COMPLETE graphs. The Charter
+   * keeps skeleton generation available until this reaches
+   * requirementCount — an incomplete row must not hide the repair
+   * path (Codex on PR #60, round 8).
+   */
+  useCaseWorkflowCompleteCount: number;
 }
 
 /** What the project's begin surface needs: stage + the workflows an
@@ -249,6 +256,8 @@ export async function getProjectBeginState(
       pkgData?.package.requirementBaseline?.requirements ?? []
     ).filter(isGeneratableRequirement).length,
     useCaseWorkflows,
+    useCaseWorkflowCompleteCount: useCaseWorkflows.filter((s) => s.complete)
+      .length,
   };
 }
 

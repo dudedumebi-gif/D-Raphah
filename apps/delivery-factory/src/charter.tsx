@@ -237,6 +237,7 @@ interface UseCaseSkeletonRef {
   name: string;
   status: string;
   requirementCode: string;
+  complete?: boolean;
 }
 
 interface BeginState {
@@ -245,6 +246,7 @@ interface BeginState {
   publishedWorkflows: Array<{ id: string; name: string }>;
   requirementCount: number;
   useCaseWorkflows: UseCaseSkeletonRef[];
+  useCaseWorkflowCompleteCount: number;
 }
 
 interface BeginResult {
@@ -434,15 +436,19 @@ function BeginWorkflowSection(props: {
                     <b>{s.name}</b>{" "}
                     <span className="skeleton-status">{s.status}</span>{" "}
                     <span className="muted">· {s.requirementCode}</span>
+                    {s.complete === false ? (
+                      <span className="muted"> · incomplete</span>
+                    ) : null}
                   </li>
                 ))}
               </ul>
             ) : null}
             {/* The create action stays available until every
-                generatable requirement has a skeleton: generation is
-                idempotent, and a partial result (an intake that
-                stopped midway) must stay retryable from here. */}
-            {skeletons.length < state.requirementCount ? (
+                generatable requirement has a COMPLETE skeleton:
+                generation is idempotent, and a partial result (an
+                intake that stopped midway, an incomplete row) must
+                stay retryable/repairable from here. */}
+            {state.useCaseWorkflowCompleteCount < state.requirementCount ? (
               <>
                 <p className="muted">
                   This project's package carries {state.requirementCount}{" "}

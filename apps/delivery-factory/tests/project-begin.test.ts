@@ -177,7 +177,7 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
     }
     if (
       head.includes("from public.workflows") &&
-      head.includes("status, trigger_config")
+      head.includes("skeleton_node_kinds")
     ) {
       // listProjectUseCaseWorkflows: values are environment, projectId.
       return [...byId.values()]
@@ -191,6 +191,14 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
           name: w.name,
           status: w.status,
           trigger_config: w.trigger_config,
+          skeleton_node_kinds: new Set(
+            (w.nodes ?? [])
+              .map((n) => String(n.node_key))
+              .filter((k) =>
+                ["trigger-1", "action-1", "action-2", "action-3"].includes(k),
+              ),
+          ).size,
+          skeleton_edges: (w.edges ?? []).length,
         }));
     }
     if (head.includes("from public.workflow_nodes")) {
@@ -998,8 +1006,12 @@ describe("getProjectBeginState", () => {
         name: "Acme Corp — Invoice Reconciliation",
         status: "draft",
         requirementCode: "REQ-001",
+        // The fixture carries no graph rows, so it lists as
+        // incomplete and does not count toward coverage.
+        complete: false,
       },
     ]);
+    expect(state.useCaseWorkflowCompleteCount).toBe(0);
   });
 
   it("404s for an unknown project", async () => {

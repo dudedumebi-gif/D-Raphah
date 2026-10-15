@@ -157,17 +157,28 @@ export function buildUseCaseWorkflowDraft(input: {
   project: UseCaseWorkflowProjectRef;
   packageId: string;
   requirement: HandoffRequirement;
-  successMeasure?: { metric: string; target: string };
+  successMeasures?: Array<{ metric: string; target: string }>;
 }): UseCaseWorkflowDraft {
-  const { project, requirement, successMeasure } = input;
+  const { project, requirement, successMeasures } = input;
   const org = project.organization_name;
   const title = humanizeRequirementTitle(requirement);
   const criteria = requirement.acceptanceCriteria ?? [];
   const criteriaList = criteria.length
     ? criteria.map((c) => `- ${c}`).join("\n")
     : "- (no acceptance criteria were shipped with this requirement)";
-  const measureLine = successMeasure
-    ? `Success measure: ${successMeasure.metric} — target: ${successMeasure.target}`
+  // The v1 contract gives success measures NO requirement
+  // association and no ordering invariant, so no measure may be
+  // attributed to THIS requirement (Codex on PR #60, round 8).
+  // They are included as unattributed project context instead —
+  // the Charter shows which measure belongs to which KPI.
+  const measureTexts = (successMeasures ?? []).map(
+    (m) => `${m.metric} — target: ${m.target}`,
+  );
+  const measuresBlock = measureTexts.length
+    ? [
+        "Project success measures from the handoff package (not specific to this use case):",
+        ...measureTexts.map((t) => `- ${t}`),
+      ]
     : null;
 
   const aiConfig: Record<string, unknown> = {
@@ -183,7 +194,7 @@ export function buildUseCaseWorkflowDraft(input: {
       "",
       "Acceptance criteria:",
       criteriaList,
-      ...(measureLine ? ["", measureLine] : []),
+      ...(measuresBlock ? ["", ...measuresBlock] : []),
       "",
       "Draft: (1) a step-by-step implementation plan for this use case, " +
         "(2) a short client message explaining what will be built and how " +
@@ -198,7 +209,11 @@ export function buildUseCaseWorkflowDraft(input: {
     `<p>We are preparing to build <b>${escapeHtml(title)}</b> for ${escapeHtml(org)}: ${escapeHtml(requirement.statement)}</p>`,
     `<p>What success looks like:</p>`,
     `<ul>${criteria.map((c) => `<li>✓ ${escapeHtml(c)}</li>`).join("")}</ul>`,
-    ...(measureLine ? [`<p>${escapeHtml(measureLine)}</p>`] : []),
+    ...(measuresBlock
+      ? [
+          `<p>Project success measures: ${measureTexts.map(escapeHtml).join("; ")}</p>`,
+        ]
+      : []),
     `<p><i>Draft generated from the approved handoff package (requirement ${escapeHtml(requirement.code)}). It waits for human review before sending.</i></p>`,
   ].join("\n");
 
@@ -335,17 +350,39 @@ async function findUseCaseWorkflow(
 }
 
 /** Every skeleton generated for a project, oldest first. */
+/** A listed skeleton, with its graph completeness assessed. */
+export interface ListedUseCaseSkeleton extends UseCaseSkeleton {
+  /**
+   * Whether the stored graph is the full skeleton graph. An
+   * incomplete row (a create that died mid-graph and was never
+   * repaired) still lists — visibly — but must not count toward
+   * "every requirement has a skeleton": the Charter keeps its
+   * create/repair action available until the COMPLETE count
+   * reaches the requirement count (Codex on PR #60, round 8).
+   */
+  complete: boolean;
+}
+
 export async function listProjectUseCaseWorkflows(
   db: NeonClient,
   projectId: string,
   environment: DeliveryEnvironment,
-): Promise<UseCaseSkeleton[]> {
+): Promise<ListedUseCaseSkeleton[]> {
   const rows = await q(db)`
-    select id, name, status, trigger_config
-    from public.workflows
-    where environment = ${environment}
-      and trigger_config->>'projectId' = ${projectId}
-    order by created_at asc`;
+    select w.id, w.name, w.status, w.trigger_config,
+      (select count(distinct n.node_key)
+         from public.workflow_nodes n
+        where n.workflow_id = w.id
+          and n.node_key in ('trigger-1', 'action-1', 'action-2', 'action-3')
+      ) as skeleton_node_kinds,
+      (select count(*)
+         from public.workflow_edges e
+        where e.workflow_id = w.id
+      ) as skeleton_edges
+    from public.workflows w
+    where w.environment = ${environment}
+      and w.trigger_config->>'projectId' = ${projectId}
+    order by w.created_at asc`;
   return rows.map((r) => ({
     id: String(r.id),
     name: String(r.name),
@@ -354,6 +391,9 @@ export async function listProjectUseCaseWorkflows(
       (r.trigger_config as Record<string, unknown> | null)
         ?.requirementCode ?? "",
     ),
+    complete:
+      Number(r.skeleton_node_kinds) >= SKELETON_NODE_KEYS.length &&
+      Number(r.skeleton_edges) >= SKELETON_NODE_KEYS.length - 1,
   }));
 }
 
@@ -564,12 +604,10 @@ async function createSkeletonWithRecovery(
  * under `existing` and never duplicated. A project with no package —
  * or a package whose baseline is empty — creates nothing.
  *
- * Success measures pair with requirements positionally over the
- * FULL baseline (see the pairing note in the body): LE builds both
- * arrays from the same approved use-case rows in the same order,
- * keeping only rows that carry a measure — so the pairing is exact
- * when the counts cover the whole baseline (the shipped shape),
- * and no pairing is claimed when they do not.
+ * Success measures are passed to every skeleton as unattributed
+ * PROJECT context: the v1 contract gives them no requirement
+ * association or ordering invariant, so no positional pairing is
+ * ever claimed (Codex on PR #60, rounds 5 and 8).
  */
 export async function ensureUseCaseWorkflows(
   db: NeonClient,
@@ -582,17 +620,9 @@ export async function ensureUseCaseWorkflows(
   if (!pkg) return { created, existing };
   const allRequirements = pkg.requirementBaseline?.requirements ?? [];
   const measures = pkg.successMeasures ?? [];
-  // Measures pair with requirements POSITIONALLY over the FULL
-  // baseline: the contract's two arrays carry no linkage ids, so a
-  // pairing is only sound when the measures array covers every
-  // baseline requirement, and each requirement keeps its ORIGINAL
-  // index. Pairing after filtering would silently hand one
-  // requirement's metric to another whenever an ungeneratable
-  // requirement precedes a generatable one (Codex on PR #60).
-  const pairMeasures = measures.length === allRequirements.length;
   const createdBy = options.createdBy ?? "intake-skeleton";
 
-  for (const [index, requirement] of allRequirements.entries()) {
+  for (const requirement of allRequirements) {
     if (!isGeneratableRequirement(requirement)) continue;
     const found = await findUseCaseWorkflow(
       db,
@@ -623,7 +653,7 @@ export async function ensureUseCaseWorkflows(
       project,
       packageId: pkg.packageId,
       requirement,
-      successMeasure: pairMeasures ? measures[index] : undefined,
+      successMeasures: measures,
     });
     const { skeleton, adopted } = await createSkeletonWithRecovery(
       db,
