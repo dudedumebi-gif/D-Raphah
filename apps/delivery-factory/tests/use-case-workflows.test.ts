@@ -225,9 +225,14 @@ function makeEngine() {
       const untouched =
         (wf.updated_at ?? wf.created_at) === (wf.created_at ?? wf.updated_at) ||
         (wf.created_at === undefined && wf.updated_at === undefined);
-      const aged = wf.created_at
-        ? Date.now() - Date.parse(wf.created_at) >= 60_000
-        : false;
+      // values[1] is the ignoreAge flag (the caller's own failed
+      // create waives the in-flight grace for its own row only).
+      const aged =
+        values[1] === true
+          ? true
+          : wf.created_at
+            ? Date.now() - Date.parse(wf.created_at) >= 60_000
+            : false;
       const runCount = runs.filter((r) => r.workflow_id === wf.id).length;
       if (statusOk && untouched && aged && runCount === 0) {
         workflows.delete(wf.id);
@@ -900,6 +905,40 @@ describe("ensureUseCaseWorkflows", () => {
     expect(result.existing.map((s) => s.id)).toContain(partialId);
     expect(engine.workflows.get(partialId)?.nodes).toHaveLength(1);
     expect(result.created).toHaveLength(2);
+  });
+
+  it("retries its OWN partial row within the same call (Codex round 7)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const firstCode = pkg.requirementBaseline.requirements[0].code;
+
+    // The first node write of the whole run fails (a transient DB
+    // error) AFTER the workflow row insert landed: the classic
+    // mid-graph failure, on OUR OWN create.
+    let failed = false;
+    const flakyDb = (async (
+      strings: TemplateStringsArray,
+      ...values: unknown[]
+    ) => {
+      if (!failed && strings[0].includes("insert into public.workflow_nodes")) {
+        failed = true;
+        throw new Error("simulated transient node-write failure");
+      }
+      return engine.db(strings, ...values);
+    }) as unknown as NeonClient;
+
+    const result = await ensureUseCaseWorkflows(flakyDb, project);
+    // The partial was recognized as our own, removed, and retried —
+    // not adopted as a finished skeleton.
+    expect(result.created.map((s) => s.requirementCode)).toContain(firstCode);
+    expect(result.existing).toHaveLength(0);
+    const stored = [...engine.workflows.values()].filter(
+      (w) => w.trigger_config.requirementCode === firstCode,
+    );
+    expect(stored).toHaveLength(1);
+    expect(stored[0].nodes).toHaveLength(4);
+    expect(stored[0].edges).toHaveLength(3);
   });
 
   it("never deletes a skeleton another generator may still be building (Codex round 6)", async () => {

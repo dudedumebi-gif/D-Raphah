@@ -448,22 +448,39 @@ function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleto
  * erasing their work (the TOCTOU window Codex flagged on PR #60).
  * Draft/archived only, as with the lib's deleteWorkflow; the graph
  * and any child rows cascade.
+ *
+ * `ignoreAge` waives ONLY the in-flight grace, and is used solely
+ * for the calling invocation's OWN failed create: that row is
+ * known-abandoned (its create just threw), not in flight — the
+ * never-updated and zero-runs conditions still apply in full.
  */
 async function deleteUntouchedSkeleton(
   db: NeonClient,
   workflowId: string,
+  options: { ignoreAge?: boolean } = {},
 ): Promise<boolean> {
+  const ignoreAge = options.ignoreAge === true;
   const rows = await q(db)`
     delete from public.workflows w
     where w.id = ${workflowId}
       and w.status in ('draft', 'archived')
       and w.updated_at = w.created_at
-      and w.created_at <= now() - interval '60 seconds'
+      and (${ignoreAge} or w.created_at <= now() - interval '60 seconds')
       and not exists (
         select 1 from public.workflow_runs r where r.workflow_id = w.id
       )
     returning w.id`;
   return rows.length > 0;
+}
+
+/** Whether a create error is the skeleton unique index rejecting a
+ *  duplicate — i.e. a rival's row already exists for the key. */
+function isSkeletonUniqueViolation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("uq_workflows_use_case_skeleton") ||
+    message.includes("duplicate key")
+  );
 }
 
 /**
@@ -510,12 +527,27 @@ async function createSkeletonWithRecovery(
     );
     if (!rival) throw error;
     const assessment = await assessSkeleton(db, rival.id);
-    if (assessment.complete || !assessment.repairable) {
+    if (assessment.complete) {
       return { skeleton: rival, adopted: true };
     }
-    const removed = await deleteUntouchedSkeleton(db, rival.id).catch(
-      () => false,
-    );
+    // The found row is incomplete. Whose is it? If our create died
+    // on the unique index, a rival's row pre-existed (complete or
+    // in flight) — the ordinary rules apply. If our create died
+    // anywhere else (a node/edge write), the row can only be OUR
+    // OWN partial: a rival's row would have tripped the unique
+    // index at our insert, before any graph write. Our own row is
+    // known-abandoned, so the in-flight grace is waived for it —
+    // otherwise it would be adopted as "existing", count toward
+    // the Charter's skeleton total, and hide its own retry action
+    // with an unusable graph (Codex on PR #60, round 7). The
+    // guarded delete still revalidates never-updated + zero runs.
+    const ownFailedCreate = !isSkeletonUniqueViolation(error);
+    if (!assessment.repairable && !ownFailedCreate) {
+      return { skeleton: rival, adopted: true };
+    }
+    const removed = await deleteUntouchedSkeleton(db, rival.id, {
+      ignoreAge: ownFailedCreate,
+    }).catch(() => false);
     if (!removed) return { skeleton: rival, adopted: true };
     const workflow = await createWorkflow(db, input);
     return {

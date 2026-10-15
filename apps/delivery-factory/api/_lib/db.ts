@@ -151,6 +151,8 @@ export interface DemoResetSummary {
   workflowRuns: number;
   projects: number;
   inbox: number;
+  /** Generated use-case skeletons removed (fixtures are kept). */
+  workflows: number;
 }
 
 /**
@@ -392,7 +394,18 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
     async resetDemoEnvironment(): Promise<DemoResetSummary> {
       // Child rows (run steps, milestones, stage history, clarifications,
       // feedback events, linked projects) follow via ON DELETE CASCADE.
-      // Demo workflow definitions are fixtures and intentionally kept.
+      // Demo workflow definitions are fixtures and intentionally kept —
+      // EXCEPT generated use-case skeletons: those are per-package
+      // artifacts carrying one demo organization's requirements, so
+      // they are deleted with the package data they came from (they
+      // are recognizable by their trigger_config linkage keys).
+      const workflows = (await client`
+        delete from public.workflows
+        where environment = 'demo'
+          and trigger_config ? 'projectId'
+          and trigger_config ? 'requirementId'
+        returning id
+      `) as unknown as Array<{ id: string }>;
       const runs = (await client`
         delete from public.workflow_runs
         where environment = 'demo'
@@ -412,6 +425,7 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
         workflowRuns: runs.length,
         projects: projects.length,
         inbox: inbox.length,
+        workflows: workflows.length,
       };
     },
 
