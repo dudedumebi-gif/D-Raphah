@@ -191,8 +191,8 @@ function makeEngineDb(workflows: FixtureWorkflow[]) {
           name: w.name,
           status: w.status,
           trigger_config: w.trigger_config,
-          created_at: w.created_at,
-          updated_at: w.updated_at,
+          created_at: (w as { created_at?: string }).created_at,
+          updated_at: (w as { updated_at?: string }).updated_at,
           skeleton_node_kinds: new Set(
             (w.nodes ?? [])
               .map((n) => String(n.node_key))
