@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
+import type {
+  HandoffRequirement,
+  LeadEngineHandoffPackage,
+} from "@raphah/handoff-contract";
 import type { NeonClient } from "../api/_lib/db.js";
 import {
   buildUseCaseWorkflowDraft,
   ensureUseCaseWorkflows,
   generateUseCaseWorkflowsForAcceptedPackage,
   humanizeRequirementTitle,
+  isGeneratableRequirement,
   listProjectUseCaseWorkflows,
   type UseCaseWorkflowProjectRef,
 } from "../api/_lib/use-case-workflows.js";
@@ -134,6 +138,8 @@ function makeEngine() {
   const projectsByPackage = new Map<string, string>();
   /** projectId -> project row facts. */
   const projectRows = new Map<string, UseCaseWorkflowProjectRef>();
+  /** workflow_runs rows (workflow_id only — the count is what matters). */
+  const runs: Array<{ workflow_id: string }> = [];
 
   const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const head = strings[0];
@@ -186,16 +192,25 @@ function makeEngine() {
       head.includes("from public.workflows") &&
       head.includes("select id, name, status")
     ) {
-      // findUseCaseWorkflow: values are environment, projectId, code.
+      // findUseCaseWorkflow: values are environment, projectId,
+      // requirementId (the unique key — codes can collide).
       const match = [...workflows.values()].find(
         (w) =>
           w.environment === String(values[0]) &&
           w.trigger_config.projectId === String(values[1]) &&
-          w.trigger_config.requirementCode === String(values[2]),
+          w.trigger_config.requirementId === String(values[2]),
       );
       return match
         ? [{ id: match.id, name: match.name, status: match.status }]
         : [];
+    }
+    if (
+      head.includes("from public.workflow_runs") &&
+      head.includes("count(*)")
+    ) {
+      return [
+        { runs: runs.filter((r) => r.workflow_id === String(values[0])).length },
+      ];
     }
     if (head.includes("delete from public.workflows")) {
       // deleteWorkflow: drafts and archived only.
@@ -208,18 +223,18 @@ function makeEngine() {
     }
     if (head.includes("insert into public.workflows")) {
       // Mirrors uq_workflows_use_case_skeleton (migration
-      // 202610140002): one skeleton per (projectId, requirementCode).
+      // 202610140002): one skeleton per (projectId, requirementId).
       const triggerConfig = JSON.parse(String(values[3])) as Record<
         string,
         unknown
       >;
-      if (triggerConfig.projectId && triggerConfig.requirementCode) {
+      if (triggerConfig.projectId && triggerConfig.requirementId) {
         const clash = [...workflows.values()].some(
           (w) =>
             w.environment === String(values[5]) &&
             w.trigger_config.projectId === triggerConfig.projectId &&
-            w.trigger_config.requirementCode ===
-              triggerConfig.requirementCode,
+            w.trigger_config.requirementId ===
+              triggerConfig.requirementId,
         );
         if (clash) {
           throw new Error(
@@ -308,7 +323,7 @@ function makeEngine() {
     throw new Error(`Unexpected query: ${head.slice(0, 100)}`);
   }) as unknown as NeonClient;
 
-  return { db, workflows, packages, projectsByPackage, projectRows };
+  return { db, workflows, packages, projectsByPackage, projectRows, runs };
 }
 
 function seedProject(
@@ -557,6 +572,132 @@ describe("ensureUseCaseWorkflows", () => {
     );
     expect(repaired?.nodes).toHaveLength(4);
     expect(repaired?.edges).toHaveLength(3);
+  });
+
+  it("creates skeletons only for human-validated requirements (Codex round 2 on PR #60)", async () => {
+    const engine = makeEngine();
+    const req = (overrides: Partial<HandoffRequirement>) =>
+      ({
+        id: randomUUID(),
+        opportunityId: randomUUID(),
+        code: "UC-SOME-USE-CASE",
+        statement: "The business will automate a recurring manual process.",
+        priority: "should",
+        status: "draft",
+        acceptanceCriteria: ["The process completes without manual steps"],
+        blockingQuestions: [],
+        ...overrides,
+      }) as HandoffRequirement;
+    const pkg = signTestPackage(
+      packageBase({
+        requirementBaseline: {
+          version: 1,
+          requirements: [
+            req({ status: "draft" }),
+            req({ status: "validated" }),
+            req({
+              status: "needs_clarification",
+              humanValidatorId: "reviewer-1",
+            }),
+            req({ status: "validated", humanValidatorId: "reviewer-1" }),
+          ],
+          features: [],
+        },
+        successMeasures: [],
+      }),
+    ).pkg;
+    const project = seedProject(engine, pkg);
+
+    const result = await ensureUseCaseWorkflows(engine.db, project);
+    // The freeze gate validates Must requirements only; a valid
+    // package can carry the first three shapes, and none of them may
+    // be presented as approved by a workflow or a client email.
+    expect(result.created).toHaveLength(1);
+    expect(engine.workflows.size).toBe(1);
+    expect(
+      isGeneratableRequirement(
+        req({ status: "validated", humanValidatorId: "reviewer-1" }),
+      ),
+    ).toBe(true);
+    expect(isGeneratableRequirement(req({ status: "validated" }))).toBe(false);
+    expect(
+      isGeneratableRequirement(
+        req({ status: "proposed", humanValidatorId: "reviewer-1" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("keys skeletons by requirement id — duplicate codes get one each (Codex round 2)", async () => {
+    const engine = makeEngine();
+    const mkReq = () =>
+      ({
+        id: randomUUID(),
+        opportunityId: randomUUID(),
+        // LE derives codes by truncating slugs: two distinct use
+        // cases can legitimately share this code.
+        code: "UC-AUTOMATED-APPOINTMENT-REMINDER-SYSTE",
+        statement: "The business will automate appointment reminders.",
+        priority: "must",
+        status: "validated",
+        humanValidatorId: "reviewer-1",
+        acceptanceCriteria: ["Reminders send automatically"],
+        blockingQuestions: [],
+      }) as HandoffRequirement;
+    const pkg = signTestPackage(
+      packageBase({
+        requirementBaseline: {
+          version: 1,
+          requirements: [mkReq(), mkReq()],
+          features: [],
+        },
+        successMeasures: [],
+      }),
+    ).pkg;
+    const project = seedProject(engine, pkg);
+
+    const result = await ensureUseCaseWorkflows(engine.db, project);
+    expect(result.created).toHaveLength(2);
+    expect(engine.workflows.size).toBe(2);
+    const ids = [...engine.workflows.values()].map(
+      (w) => w.trigger_config.requirementId,
+    );
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("never erases an operator's live-tested draft, however non-canonical (Codex round 2)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const requirement = pkg.requirementBaseline.requirements[0];
+    const draft = buildUseCaseWorkflowDraft({
+      project,
+      packageId: pkg.packageId,
+      requirement,
+      successMeasure: pkg.successMeasures[0],
+    });
+    const editedId = randomUUID();
+    engine.workflows.set(editedId, {
+      id: editedId,
+      name: draft.name,
+      description: draft.description,
+      status: "draft",
+      environment: project.environment,
+      trigger_type: "manual",
+      trigger_config: draft.trigger_config,
+      created_by: "intake-skeleton",
+      // The operator removed two nodes while customizing the draft…
+      nodes: [{ ...draft.nodes[0] }, { ...draft.nodes[1] }],
+      edges: [{ ...draft.edges[0] }],
+    });
+    // …and live-tested it: a run exists.
+    engine.runs.push({ workflow_id: editedId });
+
+    const result = await ensureUseCaseWorkflows(engine.db, project);
+    // The edited draft is reported, not replaced; the other two
+    // requirements still get their skeletons.
+    expect(result.existing.map((s) => s.id)).toContain(editedId);
+    expect(result.created).toHaveLength(2);
+    expect(engine.workflows.get(editedId)?.nodes).toHaveLength(2);
   });
 
   it("creates nothing for an empty baseline, a rejected-only baseline, or no package", async () => {

@@ -21,16 +21,28 @@
  *   handoff_inbox.package). No Lead Engine calls, no contract changes.
  * - Skeletons are DRAFTS. The generator never publishes and never
  *   executes; sends inside a run stay draft-first for human approval.
+ * - Only human-validated requirements get skeletons: status
+ *   "validated" with a humanValidatorId — the same bar the baseline
+ *   freeze applies to Must requirements. A package may legitimately
+ *   carry draft/proposed non-Must requirements; nothing here may
+ *   present those as approved (repo rule: no requirement becomes
+ *   authoritative without an identified human validator).
  * - Idempotent per (project, requirement): the link lives in the
- *   workflow's trigger_config ({projectId, packageId, requirementCode})
- *   and an existing match is reported, never duplicated. Uniqueness is
- *   database-backed (the partial unique index
- *   uq_workflows_use_case_skeleton, migration 202610140002): a create
- *   that loses a concurrent race adopts the winner's row. A matched
- *   skeleton whose graph is incomplete (a create that died mid-graph
- *   before this hardening) is deleted and regenerated rather than
- *   adopted — unless it has been published since, in which case an
- *   operator has taken it over and it is left alone.
+ *   workflow's trigger_config ({projectId, packageId, requirementId,
+ *   requirementCode}) and an existing match is reported, never
+ *   duplicated. The key is the requirement's unique id, not its
+ *   code — codes are display slugs LE truncates, so two distinct
+ *   use cases can share one. Uniqueness is database-backed (the
+ *   partial unique index uq_workflows_use_case_skeleton, migration
+ *   202610140002): a create that loses a concurrent race adopts the
+ *   winner's row.
+ * - A matched skeleton whose graph is incomplete (a create that
+ *   died mid-graph) is regenerated ONLY when it is provably
+ *   untouched machine state: never run, still carrying the
+ *   generator's description, and either created by the intake
+ *   generator or created moments ago. Anything else — above all an
+ *   operator's edited, live-tested draft — is reported as existing
+ *   and left exactly as it is.
  */
 
 import type {
@@ -255,6 +267,7 @@ export function buildUseCaseWorkflowDraft(input: {
     trigger_config: {
       projectId: project.id,
       packageId: input.packageId,
+      requirementId: requirement.id,
       requirementCode: requirement.code,
     },
     nodes,
@@ -277,11 +290,30 @@ async function getStoredProjectPackage(
   return (pkg ?? null) as LeadEngineHandoffPackage | null;
 }
 
+/**
+ * Whether a requirement may become a skeleton: it must be
+ * human-validated — status "validated" AND an identified
+ * humanValidatorId. The intake freeze gate enforces this only for
+ * Must requirements, so a valid package can carry lesser
+ * requirements in draft/proposed/needs_clarification states; those
+ * never get a workflow or a client email here.
+ */
+export function isGeneratableRequirement(
+  requirement: HandoffRequirement,
+): boolean {
+  return (
+    requirement.status === "validated" &&
+    typeof requirement.humanValidatorId === "string" &&
+    requirement.humanValidatorId.trim().length > 0
+  );
+}
+
 /** The skeleton already generated for (project, requirement), if any. */
 async function findUseCaseWorkflow(
   db: NeonClient,
   environment: DeliveryEnvironment,
   projectId: string,
+  requirementId: string,
   requirementCode: string,
 ): Promise<UseCaseSkeleton | null> {
   const rows = await q(db)`
@@ -289,7 +321,7 @@ async function findUseCaseWorkflow(
     from public.workflows
     where environment = ${environment}
       and trigger_config->>'projectId' = ${projectId}
-      and trigger_config->>'requirementCode' = ${requirementCode}
+      and trigger_config->>'requirementId' = ${requirementId}
     order by created_at asc
     limit 1`;
   if (!rows.length) return null;
@@ -327,23 +359,63 @@ export async function listProjectUseCaseWorkflows(
 /** The node keys every complete skeleton graph carries. */
 const SKELETON_NODE_KEYS = ["trigger-1", "action-1", "action-2", "action-3"];
 
+/** Description prefix stamped on every generator-created skeleton. */
+const SKELETON_DESCRIPTION_PREFIX = "Use-case skeleton generated from";
+
+/** How long after creation an incomplete skeleton still counts as
+ *  a just-failed create rather than an operator's draft. */
+const ORPHAN_REPAIR_WINDOW_MS = 10 * 60 * 1000;
+
+interface SkeletonAssessment {
+  complete: boolean;
+  /**
+   * True only for provably untouched machine state: incomplete
+   * graph, zero runs, the generator's description still in place,
+   * and either intake-created or created within the repair window.
+   * An operator's edited or live-tested draft never qualifies — its
+   * edits and run history are preserved (Codex on PR #60).
+   */
+  repairable: boolean;
+}
+
 /**
- * Whether a stored workflow still holds the full skeleton graph.
- * createWorkflow writes the workflow row and its graph in separate
- * statements, so a failure mid-create can leave a row with a partial
- * graph; such an orphan must be repaired, never adopted as done.
+ * Assess a stored skeleton. createWorkflow writes the workflow row
+ * and its graph in separate statements, so a failure mid-create can
+ * leave a row with a partial graph; such an orphan must be repaired,
+ * never adopted as done — but an incomplete graph alone does not
+ * prove abandonment, so repair demands the untouched-state evidence
+ * described on SkeletonAssessment.
  */
-async function skeletonGraphIsComplete(
+async function assessSkeleton(
   db: NeonClient,
   workflowId: string,
-): Promise<boolean> {
+): Promise<SkeletonAssessment> {
   const workflow = await getWorkflow(db, workflowId);
-  if (!workflow) return false;
+  if (!workflow) return { complete: false, repairable: false };
   const keys = new Set(workflow.nodes.map((n) => n.node_key));
-  return (
+  const complete =
     SKELETON_NODE_KEYS.every((key) => keys.has(key)) &&
-    workflow.edges.length >= SKELETON_NODE_KEYS.length - 1
-  );
+    workflow.edges.length >= SKELETON_NODE_KEYS.length - 1;
+  if (complete) return { complete: true, repairable: false };
+  const runRows = await q(db)`
+    select count(*)::int as runs
+    from public.workflow_runs
+    where workflow_id = ${workflowId}`;
+  const runs = Number(runRows[0]?.runs ?? 0);
+  if (runs > 0) return { complete: false, repairable: false };
+  if (
+    !(workflow.description ?? "").startsWith(SKELETON_DESCRIPTION_PREFIX)
+  ) {
+    return { complete: false, repairable: false };
+  }
+  const createdAt = Date.parse(workflow.created_at);
+  const fresh =
+    Number.isFinite(createdAt) &&
+    Date.now() - createdAt < ORPHAN_REPAIR_WINDOW_MS;
+  return {
+    complete: false,
+    repairable: fresh || workflow.created_by === "intake-skeleton",
+  };
 }
 
 function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleton {
@@ -361,14 +433,16 @@ function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleto
  * - a concurrent generator won the race — the unique index rejects
  *   this insert; adopt the winner's complete row;
  * - the insert (or a rival's) died mid-graph — the row exists with a
- *   partial graph; delete it (drafts only) and retry exactly once.
+ *   partial graph; regenerate it, but only when the assessment proves
+ *   it untouched machine state (an operator's draft is adopted
+ *   as-is instead, never erased).
  * A genuine second failure propagates to the caller.
  */
 async function createSkeletonWithRecovery(
   db: NeonClient,
   project: UseCaseWorkflowProjectRef,
   draft: UseCaseWorkflowDraft,
-  requirementCode: string,
+  requirement: HandoffRequirement,
   createdBy: string,
 ): Promise<{ skeleton: UseCaseSkeleton; adopted: boolean }> {
   const input = {
@@ -383,28 +457,30 @@ async function createSkeletonWithRecovery(
   };
   try {
     const workflow = await createWorkflow(db, input);
-    return { skeleton: toSkeleton(workflow, requirementCode), adopted: false };
+    return {
+      skeleton: toSkeleton(workflow, requirement.code),
+      adopted: false,
+    };
   } catch (error) {
     const rival = await findUseCaseWorkflow(
       db,
       project.environment,
       project.id,
-      requirementCode,
+      requirement.id,
+      requirement.code,
     );
-    if (rival && (await skeletonGraphIsComplete(db, rival.id))) {
+    if (!rival) throw error;
+    const assessment = await assessSkeleton(db, rival.id);
+    if (assessment.complete || !assessment.repairable) {
       return { skeleton: rival, adopted: true };
     }
-    if (rival) {
-      const removed = await deleteWorkflow(db, rival.id).catch(() => false);
-      if (removed) {
-        const workflow = await createWorkflow(db, input);
-        return {
-          skeleton: toSkeleton(workflow, requirementCode),
-          adopted: false,
-        };
-      }
-    }
-    throw error;
+    const removed = await deleteWorkflow(db, rival.id).catch(() => false);
+    if (!removed) return { skeleton: rival, adopted: true };
+    const workflow = await createWorkflow(db, input);
+    return {
+      skeleton: toSkeleton(workflow, requirement.code),
+      adopted: false,
+    };
   }
 }
 
@@ -431,7 +507,7 @@ export async function ensureUseCaseWorkflows(
   const pkg = await getStoredProjectPackage(db, project.id);
   if (!pkg) return { created, existing };
   const requirements = (pkg.requirementBaseline?.requirements ?? []).filter(
-    (r) => r.status !== "rejected",
+    isGeneratableRequirement,
   );
   const measures = pkg.successMeasures ?? [];
   const pairMeasures = measures.length === requirements.length;
@@ -442,16 +518,19 @@ export async function ensureUseCaseWorkflows(
       db,
       project.environment,
       project.id,
+      requirement.id,
       requirement.code,
     );
     if (found) {
-      if (await skeletonGraphIsComplete(db, found.id)) {
+      const assessment = await assessSkeleton(db, found.id);
+      if (assessment.complete || !assessment.repairable) {
         existing.push(found);
         continue;
       }
-      // A partial orphan from a create that died mid-graph: remove
-      // and regenerate. If it can no longer be deleted (an operator
-      // published it), it has been taken over — report it as-is.
+      // A partial orphan from a create that died mid-graph, proven
+      // untouched: remove it and fall through to regeneration. If it
+      // can no longer be deleted (an operator published it), it has
+      // been taken over — report it as-is.
       const removed = await deleteWorkflow(db, found.id).catch(() => false);
       if (!removed) {
         existing.push(found);
@@ -468,7 +547,7 @@ export async function ensureUseCaseWorkflows(
       db,
       project,
       draft,
-      requirement.code,
+      requirement,
       createdBy,
     );
     (adopted ? existing : created).push(skeleton);

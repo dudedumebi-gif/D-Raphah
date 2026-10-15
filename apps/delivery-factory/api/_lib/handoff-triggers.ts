@@ -31,6 +31,7 @@ import {
   type TriggerableWorkflow,
 } from "./workflows.js";
 import {
+  isGeneratableRequirement,
   listProjectUseCaseWorkflows,
   type UseCaseSkeleton,
 } from "./use-case-workflows.js";
@@ -244,8 +245,9 @@ export async function getProjectBeginState(
     stage: project.current_stage,
     environment: project.environment,
     publishedWorkflows: published.map((wf) => ({ id: wf.id, name: wf.name })),
-    requirementCount:
-      pkgData?.package.requirementBaseline?.requirements?.length ?? 0,
+    requirementCount: (
+      pkgData?.package.requirementBaseline?.requirements ?? []
+    ).filter(isGeneratableRequirement).length,
     useCaseWorkflows,
   };
 }

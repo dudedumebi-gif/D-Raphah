@@ -49,11 +49,17 @@ function engineDb() {
         (w) =>
           w.environment === String(values[0]) &&
           w.trigger_config.projectId === String(values[1]) &&
-          w.trigger_config.requirementCode === String(values[2]),
+          w.trigger_config.requirementId === String(values[2]),
       );
       return match
         ? [{ id: match.id, name: match.name, status: match.status }]
         : [];
+    }
+    if (
+      head.includes("from public.workflow_runs") &&
+      head.includes("count(*)")
+    ) {
+      return [{ runs: 0 }];
     }
     if (head.includes("insert into public.workflows")) {
       const id = randomUUID();
