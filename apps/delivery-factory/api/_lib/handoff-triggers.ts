@@ -75,6 +75,12 @@ export async function triggerLeadHandoffWorkflows(
   db: NeonClient,
   pkg: LeadEngineHandoffPackage,
   environment: DeliveryEnvironment,
+  /**
+   * The project the intake accept just created, when the caller
+   * knows it. Preferred over re-resolving by packageId, which is
+   * ambiguous across package versions (Codex on PR #60).
+   */
+  knownProjectId?: string,
 ): Promise<LeadHandoffTriggerResult> {
   const workflows = await listPublishedWorkflowsByTrigger(
     db,
@@ -100,7 +106,8 @@ export async function triggerLeadHandoffWorkflows(
     // breaking package acceptance.
     let claimId: string | null = null;
     let reservedElsewhere = false;
-    const projectId = await getProjectIdForPackage(db, pkg.packageId);
+    const projectId =
+      knownProjectId ?? (await getProjectIdForPackage(db, pkg.packageId));
     if (projectId) {
       try {
         claimId = await claimProjectWorkflowStart(db, {

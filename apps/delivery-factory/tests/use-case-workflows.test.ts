@@ -1104,6 +1104,39 @@ describe("generateUseCaseWorkflowsForAcceptedPackage", () => {
     expect(engine.workflows.size).toBe(3);
   });
 
+  it("prefers the just-created project id over the ambiguous package lookup (Codex round 9)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    // An earlier package version created a project under the SAME
+    // packageId; the package-only lookup resolves to it.
+    const oldProject = seedProject(engine, pkg);
+    // The new version's accept created a second project; intake
+    // knows its id and passes it explicitly.
+    const newProject: UseCaseWorkflowProjectRef = {
+      id: randomUUID(),
+      environment: "production",
+      package_id: pkg.packageId,
+      organization_name: "Donddental",
+    };
+    engine.projectRows.set(newProject.id, newProject);
+    engine.packages.set(newProject.id, pkg);
+
+    const result = await generateUseCaseWorkflowsForAcceptedPackage(
+      engine.db,
+      pkg,
+      "production",
+      newProject.id,
+    );
+    expect(result?.created).toHaveLength(3);
+    const owners = new Set(
+      [...engine.workflows.values()].map(
+        (w) => w.trigger_config.projectId,
+      ),
+    );
+    expect(owners).toEqual(new Set([newProject.id]));
+    expect(owners.has(oldProject.id)).toBe(false);
+  });
+
   it("returns null (never throws) when the database fails", async () => {
     const throwingDb = (async () => {
       throw new Error("connection reset");

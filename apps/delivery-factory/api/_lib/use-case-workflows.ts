@@ -679,9 +679,17 @@ export async function generateUseCaseWorkflowsForAcceptedPackage(
   db: NeonClient,
   pkg: LeadEngineHandoffPackage,
   environment: DeliveryEnvironment,
+  /**
+   * The project the intake accept just created, when known (the
+   * intake hook passes it). Resolving by packageId alone is
+   * ambiguous — packageIds repeat across versions and the lookup
+   * is unordered — so the known id always wins (Codex on PR #60).
+   */
+  knownProjectId?: string,
 ): Promise<EnsureUseCaseWorkflowsResult | null> {
   try {
-    const projectId = await getProjectIdForPackage(db, pkg.packageId);
+    const projectId =
+      knownProjectId ?? (await getProjectIdForPackage(db, pkg.packageId));
     if (!projectId) return null;
     const rows = await q(db)`
       select id, environment, package_id, organization_name

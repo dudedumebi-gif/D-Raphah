@@ -60,7 +60,7 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
       createDeliveryDb(),
       env,
       {
-        onHandoffAccepted: async (pkg, environment) => {
+        onHandoffAccepted: async (pkg, environment, projectId) => {
           // Use-case skeletons first: one draft workflow per approved
           // requirement in the package, ready to live-test. The
           // generator is fail-open (it logs and returns null on any
@@ -70,8 +70,14 @@ export default async function handler(req: ApiRequest, res: ServerResponse) {
             getDb(),
             pkg,
             environment,
+            projectId,
           );
-          await triggerLeadHandoffWorkflows(getDb(), pkg, environment);
+          await triggerLeadHandoffWorkflows(
+            getDb(),
+            pkg,
+            environment,
+            projectId,
+          );
         },
       },
     );

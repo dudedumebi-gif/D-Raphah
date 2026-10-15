@@ -663,6 +663,7 @@ export async function getProjectIdForPackage(
       select id
       from public.delivery_projects
       where package_id = ${packageId}
+      order by created_at desc
       limit 1`;
     if (!rows.length) return null;
     return String(rows[0].id);
