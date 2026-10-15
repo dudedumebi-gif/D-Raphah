@@ -43,6 +43,38 @@ function engineDb() {
     }
     if (
       head.includes("from public.workflows") &&
+      head.includes("skeleton_runs")
+    ) {
+      // findAndAssessSkeleton: one computed row per match.
+      const match = [...workflows.values()].find(
+        (w) =>
+          w.environment === String(values[0]) &&
+          w.trigger_config.projectId === String(values[1]) &&
+          w.trigger_config.requirementId === String(values[2]),
+      );
+      if (!match) return [];
+      const stamp = new Date().toISOString();
+      return [
+        {
+          id: match.id,
+          name: match.name,
+          status: match.status,
+          created_at: stamp,
+          updated_at: stamp,
+          skeleton_node_kinds: new Set(
+            match.nodes
+              .map((n) => String(n.node_key))
+              .filter((k) =>
+                ["trigger-1", "action-1", "action-2", "action-3"].includes(k),
+              ),
+          ).size,
+          skeleton_edges: match.edges.length,
+          skeleton_runs: 0,
+        },
+      ];
+    }
+    if (
+      head.includes("from public.workflows") &&
       head.includes("select id, name, status")
     ) {
       const match = [...workflows.values()].find(

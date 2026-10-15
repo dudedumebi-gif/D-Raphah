@@ -56,7 +56,6 @@ import { log } from "./telemetry.js";
 import {
   createWorkflow,
   getProjectIdForPackage,
-  getWorkflow,
   specFor,
   type Workflow,
   type WorkflowEdge,
@@ -324,29 +323,89 @@ export function isGeneratableRequirement(
   );
 }
 
-/** The skeleton already generated for (project, requirement), if any. */
-async function findUseCaseWorkflow(
+interface AssessedSkeleton {
+  skeleton: UseCaseSkeleton;
+  assessment: SkeletonAssessment;
+}
+
+/**
+ * The skeleton already generated for (project, requirement), WITH
+ * its repair assessment, in ONE round trip: graph completeness,
+ * run count, and both timestamps are computed by the query itself.
+ * The per-requirement cost of generation matters — intake awaits
+ * this on the acceptance response path, inside the Lead Engine's
+ * dispatch timeout (Codex on PR #60, round 10).
+ */
+async function findAndAssessSkeleton(
   db: NeonClient,
   environment: DeliveryEnvironment,
   projectId: string,
   requirementId: string,
   requirementCode: string,
-): Promise<UseCaseSkeleton | null> {
+): Promise<AssessedSkeleton | null> {
   const rows = await q(db)`
-    select id, name, status
-    from public.workflows
-    where environment = ${environment}
-      and trigger_config->>'projectId' = ${projectId}
-      and trigger_config->>'requirementId' = ${requirementId}
-    order by created_at asc
+    select w.id, w.name, w.status, w.created_at, w.updated_at,
+      (select count(distinct n.node_key)
+         from public.workflow_nodes n
+        where n.workflow_id = w.id
+          and n.node_key in ('trigger-1', 'action-1', 'action-2', 'action-3')
+      ) as skeleton_node_kinds,
+      (select count(*)
+         from public.workflow_edges e
+        where e.workflow_id = w.id
+      ) as skeleton_edges,
+      (select count(*)
+         from public.workflow_runs r
+        where r.workflow_id = w.id
+      ) as skeleton_runs
+    from public.workflows w
+    where w.environment = ${environment}
+      and w.trigger_config->>'projectId' = ${projectId}
+      and w.trigger_config->>'requirementId' = ${requirementId}
+    order by w.created_at asc
     limit 1`;
   if (!rows.length) return null;
+  const row = rows[0];
   return {
-    id: String(rows[0].id),
-    name: String(rows[0].name),
-    status: String(rows[0].status),
-    requirementCode,
+    skeleton: {
+      id: String(row.id),
+      name: String(row.name),
+      status: String(row.status),
+      requirementCode,
+    },
+    assessment: assessSkeletonRow(row),
   };
+}
+
+/**
+ * Pure assessment of one looked-up skeleton row. createWorkflow
+ * writes the workflow row and its graph in separate statements, so
+ * a failure mid-create can leave a row with a partial graph; such
+ * an orphan must be repaired, never adopted as done — but an
+ * incomplete graph alone does not prove abandonment, so repair
+ * demands the untouched-state evidence on SkeletonAssessment.
+ */
+function assessSkeletonRow(row: Record<string, unknown>): SkeletonAssessment {
+  const complete =
+    Number(row.skeleton_node_kinds) >= SKELETON_NODE_KEYS.length &&
+    Number(row.skeleton_edges) >= SKELETON_NODE_KEYS.length - 1;
+  if (complete) return { complete: true, repairable: false };
+  if (Number(row.skeleton_runs ?? 0) > 0) {
+    return { complete: false, repairable: false };
+  }
+  const createdAt = Date.parse(String(row.created_at ?? ""));
+  const updatedAt = Date.parse(String(row.updated_at ?? ""));
+  const neverUpdated =
+    Number.isFinite(createdAt) &&
+    Number.isFinite(updatedAt) &&
+    updatedAt === createdAt;
+  if (!neverUpdated) return { complete: false, repairable: false };
+  // In-flight protection: a row younger than the grace period may
+  // still be receiving its graph from a concurrent create. A clock
+  // skew that makes the age read negative also fails safe (not
+  // repairable).
+  const aged = Date.now() - createdAt >= ORPHAN_MIN_AGE_MS;
+  return { complete: false, repairable: aged };
 }
 
 /** Every skeleton generated for a project, oldest first. */
@@ -429,46 +488,6 @@ interface SkeletonAssessment {
    * one (Codex on PR #60, rounds 2–6).
    */
   repairable: boolean;
-}
-
-/**
- * Assess a stored skeleton. createWorkflow writes the workflow row
- * and its graph in separate statements, so a failure mid-create can
- * leave a row with a partial graph; such an orphan must be repaired,
- * never adopted as done — but an incomplete graph alone does not
- * prove abandonment, so repair demands the untouched-state evidence
- * described on SkeletonAssessment.
- */
-async function assessSkeleton(
-  db: NeonClient,
-  workflowId: string,
-): Promise<SkeletonAssessment> {
-  const workflow = await getWorkflow(db, workflowId);
-  if (!workflow) return { complete: false, repairable: false };
-  const keys = new Set(workflow.nodes.map((n) => n.node_key));
-  const complete =
-    SKELETON_NODE_KEYS.every((key) => keys.has(key)) &&
-    workflow.edges.length >= SKELETON_NODE_KEYS.length - 1;
-  if (complete) return { complete: true, repairable: false };
-  const runRows = await q(db)`
-    select count(*)::int as runs
-    from public.workflow_runs
-    where workflow_id = ${workflowId}`;
-  const runs = Number(runRows[0]?.runs ?? 0);
-  if (runs > 0) return { complete: false, repairable: false };
-  const createdAt = Date.parse(workflow.created_at);
-  const updatedAt = Date.parse(workflow.updated_at);
-  const neverUpdated =
-    Number.isFinite(createdAt) &&
-    Number.isFinite(updatedAt) &&
-    updatedAt === createdAt;
-  if (!neverUpdated) return { complete: false, repairable: false };
-  // In-flight protection: a row younger than the grace period may
-  // still be receiving its graph from a concurrent create. A clock
-  // skew that makes the age read negative also fails safe (not
-  // repairable).
-  const aged = Date.now() - createdAt >= ORPHAN_MIN_AGE_MS;
-  return { complete: false, repairable: aged };
 }
 
 function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleton {
@@ -558,15 +577,15 @@ async function createSkeletonWithRecovery(
       adopted: false,
     };
   } catch (error) {
-    const rival = await findUseCaseWorkflow(
+    const found = await findAndAssessSkeleton(
       db,
       project.environment,
       project.id,
       requirement.id,
       requirement.code,
     );
-    if (!rival) throw error;
-    const assessment = await assessSkeleton(db, rival.id);
+    if (!found) throw error;
+    const { skeleton: rival, assessment } = found;
     if (assessment.complete) {
       return { skeleton: rival, adopted: true };
     }
@@ -618,51 +637,63 @@ export async function ensureUseCaseWorkflows(
   const existing: UseCaseSkeleton[] = [];
   const pkg = await getStoredProjectPackage(db, project.id);
   if (!pkg) return { created, existing };
-  const allRequirements = pkg.requirementBaseline?.requirements ?? [];
+  const requirements = (
+    pkg.requirementBaseline?.requirements ?? []
+  ).filter(isGeneratableRequirement);
   const measures = pkg.successMeasures ?? [];
   const createdBy = options.createdBy ?? "intake-skeleton";
 
-  for (const requirement of allRequirements) {
-    if (!isGeneratableRequirement(requirement)) continue;
-    const found = await findUseCaseWorkflow(
-      db,
-      project.environment,
-      project.id,
-      requirement.id,
-      requirement.code,
-    );
-    if (found) {
-      const assessment = await assessSkeleton(db, found.id);
-      if (assessment.complete || !assessment.repairable) {
-        existing.push(found);
-        continue;
-      }
-      // A partial orphan from a create that died mid-graph, proven
-      // untouched: remove it and fall through to regeneration. If it
-      // can no longer be deleted (an operator published it), it has
-      // been taken over — report it as-is.
-      const removed = await deleteUntouchedSkeleton(db, found.id).catch(
-        () => false,
+  // Requirements are independent of one another, so they generate
+  // CONCURRENTLY: intake awaits this on the acceptance response
+  // path, and a sequential loop would multiply the per-requirement
+  // round trips by the baseline size against the Lead Engine's
+  // dispatch timeout (Codex on PR #60, round 10). Result order
+  // still follows the baseline.
+  const outcomes = await Promise.all(
+    requirements.map(async (requirement) => {
+      const found = await findAndAssessSkeleton(
+        db,
+        project.environment,
+        project.id,
+        requirement.id,
+        requirement.code,
       );
-      if (!removed) {
-        existing.push(found);
-        continue;
+      if (found) {
+        const { skeleton, assessment } = found;
+        if (assessment.complete || !assessment.repairable) {
+          return { kind: "existing" as const, skeleton };
+        }
+        // A partial orphan from a create that died mid-graph,
+        // proven untouched: remove it and fall through to
+        // regeneration. If it can no longer be deleted (an
+        // operator published it), it has been taken over — report
+        // it as-is.
+        const removed = await deleteUntouchedSkeleton(db, skeleton.id).catch(
+          () => false,
+        );
+        if (!removed) return { kind: "existing" as const, skeleton };
       }
-    }
-    const draft = buildUseCaseWorkflowDraft({
-      project,
-      packageId: pkg.packageId,
-      requirement,
-      successMeasures: measures,
-    });
-    const { skeleton, adopted } = await createSkeletonWithRecovery(
-      db,
-      project,
-      draft,
-      requirement,
-      createdBy,
-    );
-    (adopted ? existing : created).push(skeleton);
+      const draft = buildUseCaseWorkflowDraft({
+        project,
+        packageId: pkg.packageId,
+        requirement,
+        successMeasures: measures,
+      });
+      const { skeleton, adopted } = await createSkeletonWithRecovery(
+        db,
+        project,
+        draft,
+        requirement,
+        createdBy,
+      );
+      return {
+        kind: adopted ? ("existing" as const) : ("created" as const),
+        skeleton,
+      };
+    }),
+  );
+  for (const outcome of outcomes) {
+    (outcome.kind === "created" ? created : existing).push(outcome.skeleton);
   }
   return { created, existing };
 }
