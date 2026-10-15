@@ -101,7 +101,9 @@ describe("workflow retire wiring", () => {
   });
 
   it("the editor saves drafts before archiving and never offers Execute to archived", () => {
-    expect(ui).toContain('if (workflow.status === "draft") await save();');
+    expect(ui).toContain(
+      'if (workflow.status === "draft" && !(await save())) return;',
+    );
     expect(ui).toContain('workflow.status === "published"');
     expect(ui).toContain("setName(d.workflow.name)");
   });
@@ -117,5 +119,30 @@ describe("workflow retire wiring", () => {
     expect(ui).toContain('w.status === "draft" || w.status === "archived"');
     expect(ui).toContain('isDraft || workflow.status === "archived"');
     expect(ui).toContain('w.status !== "archived"');
+  });
+});
+
+
+describe("editor chained actions respect a failed save (Codex round 2 on PR #56)", () => {
+  const ui = readFileSync(
+    new URL("../src/workflows.tsx", import.meta.url),
+    "utf8",
+  );
+
+  it("save reports its outcome instead of swallowing errors", () => {
+    expect(ui).toContain("Promise<boolean>");
+    expect(ui).toContain('setNotice("Draft saved.");\n      return true;');
+  });
+
+  it("archive and publish abort when the draft save fails", () => {
+    expect(ui).toContain('if (workflow.status === "draft" && !(await save())) return;');
+    expect(ui).toContain("if (!(await save())) return;");
+  });
+
+  it("the archive callback refreshes when save changes (name edits)", () => {
+    // archive depends on [workflow, save]; with save in the deps, a
+    // name-only edit (which recreates save) recreates archive too,
+    // so it can never call the stale-name save closure.
+    expect(ui).toMatch(/\}, \[workflow, save\]\);\n\n  const execute/);
   });
 });

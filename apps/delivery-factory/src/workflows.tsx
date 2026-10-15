@@ -941,8 +941,12 @@ export function WorkflowsSection(props: {
       );
   }, [open, props.environment]);
 
-  const save = useCallback(async () => {
-    if (!workflow) return;
+  // Returns false when the save was rejected: callers that chain a
+  // second action (publish, archive) must abort on a failed save
+  // instead of proceeding over the stale server copy — save() owns
+  // the error notice either way (Codex round 2 on PR #56).
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!workflow) return false;
     setSaving(true);
     setNotice(null);
     try {
@@ -961,8 +965,10 @@ export function WorkflowsSection(props: {
       );
       setWorkflow(d.workflow);
       setNotice("Draft saved.");
+      return true;
     } catch (e: unknown) {
       setNotice(e instanceof Error ? e.message : "Save failed");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -973,7 +979,7 @@ export function WorkflowsSection(props: {
     setSaving(true);
     setNotice(null);
     try {
-      await save();
+      if (!(await save())) return;
       const d = await api<{ workflow: WorkflowDetail }>(
         `/api/workflows/${workflow.id}`,
         { method: "PUT", body: JSON.stringify({ action: "publish" }) },
@@ -995,7 +1001,7 @@ export function WorkflowsSection(props: {
       // Mirror Publish: persist unsaved draft edits first, or the
       // status-only response would replace them with the older
       // server copy (Codex on PR #56).
-      if (workflow.status === "draft") await save();
+      if (workflow.status === "draft" && !(await save())) return;
       const d = await api<{ workflow: WorkflowDetail }>(
         `/api/workflows/${workflow.id}`,
         { method: "PUT", body: JSON.stringify({ action: "archive" }) },
@@ -1010,7 +1016,7 @@ export function WorkflowsSection(props: {
     } finally {
       setSaving(false);
     }
-  }, [workflow]);
+  }, [workflow, save]);
 
   const execute = useCallback(async () => {
     if (!workflow) return;
