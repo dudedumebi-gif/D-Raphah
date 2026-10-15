@@ -23,7 +23,14 @@
  *   executes; sends inside a run stay draft-first for human approval.
  * - Idempotent per (project, requirement): the link lives in the
  *   workflow's trigger_config ({projectId, packageId, requirementCode})
- *   and an existing match is reported, never duplicated.
+ *   and an existing match is reported, never duplicated. Uniqueness is
+ *   database-backed (the partial unique index
+ *   uq_workflows_use_case_skeleton, migration 202610140002): a create
+ *   that loses a concurrent race adopts the winner's row. A matched
+ *   skeleton whose graph is incomplete (a create that died mid-graph
+ *   before this hardening) is deleted and regenerated rather than
+ *   adopted — unless it has been published since, in which case an
+ *   operator has taken it over and it is left alone.
  */
 
 import type {
@@ -34,8 +41,11 @@ import type { DeliveryEnvironment, NeonClient } from "./db.js";
 import { log } from "./telemetry.js";
 import {
   createWorkflow,
+  deleteWorkflow,
   getProjectIdForPackage,
+  getWorkflow,
   specFor,
+  type Workflow,
   type WorkflowEdge,
   type WorkflowNode,
 } from "./workflows.js";
@@ -314,12 +324,96 @@ export async function listProjectUseCaseWorkflows(
   }));
 }
 
+/** The node keys every complete skeleton graph carries. */
+const SKELETON_NODE_KEYS = ["trigger-1", "action-1", "action-2", "action-3"];
+
+/**
+ * Whether a stored workflow still holds the full skeleton graph.
+ * createWorkflow writes the workflow row and its graph in separate
+ * statements, so a failure mid-create can leave a row with a partial
+ * graph; such an orphan must be repaired, never adopted as done.
+ */
+async function skeletonGraphIsComplete(
+  db: NeonClient,
+  workflowId: string,
+): Promise<boolean> {
+  const workflow = await getWorkflow(db, workflowId);
+  if (!workflow) return false;
+  const keys = new Set(workflow.nodes.map((n) => n.node_key));
+  return (
+    SKELETON_NODE_KEYS.every((key) => keys.has(key)) &&
+    workflow.edges.length >= SKELETON_NODE_KEYS.length - 1
+  );
+}
+
+function toSkeleton(workflow: Workflow, requirementCode: string): UseCaseSkeleton {
+  return {
+    id: workflow.id,
+    name: workflow.name,
+    status: workflow.status,
+    requirementCode,
+  };
+}
+
+/**
+ * Create one skeleton, recovering from the two ways a create can go
+ * wrong concurrently or partially (Codex on PR #60):
+ * - a concurrent generator won the race — the unique index rejects
+ *   this insert; adopt the winner's complete row;
+ * - the insert (or a rival's) died mid-graph — the row exists with a
+ *   partial graph; delete it (drafts only) and retry exactly once.
+ * A genuine second failure propagates to the caller.
+ */
+async function createSkeletonWithRecovery(
+  db: NeonClient,
+  project: UseCaseWorkflowProjectRef,
+  draft: UseCaseWorkflowDraft,
+  requirementCode: string,
+  createdBy: string,
+): Promise<{ skeleton: UseCaseSkeleton; adopted: boolean }> {
+  const input = {
+    name: draft.name,
+    description: draft.description,
+    environment: project.environment,
+    trigger_type: "manual" as const,
+    trigger_config: draft.trigger_config,
+    created_by: createdBy,
+    nodes: draft.nodes,
+    edges: draft.edges,
+  };
+  try {
+    const workflow = await createWorkflow(db, input);
+    return { skeleton: toSkeleton(workflow, requirementCode), adopted: false };
+  } catch (error) {
+    const rival = await findUseCaseWorkflow(
+      db,
+      project.environment,
+      project.id,
+      requirementCode,
+    );
+    if (rival && (await skeletonGraphIsComplete(db, rival.id))) {
+      return { skeleton: rival, adopted: true };
+    }
+    if (rival) {
+      const removed = await deleteWorkflow(db, rival.id).catch(() => false);
+      if (removed) {
+        const workflow = await createWorkflow(db, input);
+        return {
+          skeleton: toSkeleton(workflow, requirementCode),
+          adopted: false,
+        };
+      }
+    }
+    throw error;
+  }
+}
+
 /**
  * Ensure one draft skeleton exists per requirement in the project's
  * stored handoff package. Idempotent: requirements that already have
- * a skeleton in the project's environment are reported under
- * `existing` and never duplicated. A project with no package — or a
- * package whose baseline is empty — creates nothing.
+ * a complete skeleton in the project's environment are reported
+ * under `existing` and never duplicated. A project with no package —
+ * or a package whose baseline is empty — creates nothing.
  *
  * Success measures pair with requirements by position: LE builds
  * both arrays from the same approved use-case rows in the same
@@ -341,6 +435,7 @@ export async function ensureUseCaseWorkflows(
   );
   const measures = pkg.successMeasures ?? [];
   const pairMeasures = measures.length === requirements.length;
+  const createdBy = options.createdBy ?? "intake-skeleton";
 
   for (const [index, requirement] of requirements.entries()) {
     const found = await findUseCaseWorkflow(
@@ -350,8 +445,18 @@ export async function ensureUseCaseWorkflows(
       requirement.code,
     );
     if (found) {
-      existing.push(found);
-      continue;
+      if (await skeletonGraphIsComplete(db, found.id)) {
+        existing.push(found);
+        continue;
+      }
+      // A partial orphan from a create that died mid-graph: remove
+      // and regenerate. If it can no longer be deleted (an operator
+      // published it), it has been taken over — report it as-is.
+      const removed = await deleteWorkflow(db, found.id).catch(() => false);
+      if (!removed) {
+        existing.push(found);
+        continue;
+      }
     }
     const draft = buildUseCaseWorkflowDraft({
       project,
@@ -359,22 +464,14 @@ export async function ensureUseCaseWorkflows(
       requirement,
       successMeasure: pairMeasures ? measures[index] : undefined,
     });
-    const workflow = await createWorkflow(db, {
-      name: draft.name,
-      description: draft.description,
-      environment: project.environment,
-      trigger_type: "manual",
-      trigger_config: draft.trigger_config,
-      created_by: options.createdBy ?? "intake-skeleton",
-      nodes: draft.nodes,
-      edges: draft.edges,
-    });
-    created.push({
-      id: workflow.id,
-      name: workflow.name,
-      status: workflow.status,
-      requirementCode: requirement.code,
-    });
+    const { skeleton, adopted } = await createSkeletonWithRecovery(
+      db,
+      project,
+      draft,
+      requirement.code,
+      createdBy,
+    );
+    (adopted ? existing : created).push(skeleton);
   }
   return { created, existing };
 }

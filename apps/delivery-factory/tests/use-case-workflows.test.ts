@@ -197,7 +197,36 @@ function makeEngine() {
         ? [{ id: match.id, name: match.name, status: match.status }]
         : [];
     }
+    if (head.includes("delete from public.workflows")) {
+      // deleteWorkflow: drafts and archived only.
+      const wf = workflows.get(String(values[0]));
+      if (wf && (wf.status === "draft" || wf.status === "archived")) {
+        workflows.delete(wf.id);
+        return [{ id: wf.id }];
+      }
+      return [];
+    }
     if (head.includes("insert into public.workflows")) {
+      // Mirrors uq_workflows_use_case_skeleton (migration
+      // 202610140002): one skeleton per (projectId, requirementCode).
+      const triggerConfig = JSON.parse(String(values[3])) as Record<
+        string,
+        unknown
+      >;
+      if (triggerConfig.projectId && triggerConfig.requirementCode) {
+        const clash = [...workflows.values()].some(
+          (w) =>
+            w.environment === String(values[5]) &&
+            w.trigger_config.projectId === triggerConfig.projectId &&
+            w.trigger_config.requirementCode ===
+              triggerConfig.requirementCode,
+        );
+        if (clash) {
+          throw new Error(
+            'duplicate key value violates unique constraint "uq_workflows_use_case_skeleton"',
+          );
+        }
+      }
       const id = randomUUID();
       workflows.set(id, {
         id,
@@ -445,6 +474,89 @@ describe("ensureUseCaseWorkflows", () => {
     );
     expect(listed).toHaveLength(3);
     expect(listed[0].requirementCode).toBe("UC-ONLINE-APPOINTMENT-BOOKING");
+  });
+
+  it("adopts the winner when a concurrent create wins the race (Codex on PR #60)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const firstRequirement = pkg.requirementBaseline.requirements[0];
+
+    // Simulate the race: as this call tries to insert the first
+    // skeleton, a concurrent generator completes its own insert of a
+    // complete skeleton for the same requirement — the unique index
+    // then rejects ours, and we must adopt the winner, not fail.
+    let raced = false;
+    const racingDb = (async (
+      strings: TemplateStringsArray,
+      ...values: unknown[]
+    ) => {
+      if (!raced && strings[0].includes("insert into public.workflows")) {
+        raced = true;
+        const rivalDraft = buildUseCaseWorkflowDraft({
+          project,
+          packageId: pkg.packageId,
+          requirement: firstRequirement,
+          successMeasure: pkg.successMeasures[0],
+        });
+        const rivalId = randomUUID();
+        engine.workflows.set(rivalId, {
+          id: rivalId,
+          name: rivalDraft.name,
+          description: rivalDraft.description,
+          status: "draft",
+          environment: project.environment,
+          trigger_type: "manual",
+          trigger_config: rivalDraft.trigger_config,
+          created_by: "intake-skeleton",
+          nodes: rivalDraft.nodes.map((n) => ({ ...n })),
+          edges: rivalDraft.edges.map((e) => ({ ...e })),
+        });
+      }
+      return engine.db(strings, ...values);
+    }) as unknown as NeonClient;
+
+    const result = await ensureUseCaseWorkflows(racingDb, project);
+    expect(result.created).toHaveLength(2);
+    expect(result.existing).toHaveLength(1);
+    expect(result.existing[0].requirementCode).toBe(firstRequirement.code);
+    expect(engine.workflows.size).toBe(3);
+  });
+
+  it("repairs a partial skeleton left by a create that died mid-graph (Codex on PR #60)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const requirement = pkg.requirementBaseline.requirements[0];
+    const draft = buildUseCaseWorkflowDraft({
+      project,
+      packageId: pkg.packageId,
+      requirement,
+      successMeasure: pkg.successMeasures[0],
+    });
+    const partialId = randomUUID();
+    engine.workflows.set(partialId, {
+      id: partialId,
+      name: draft.name,
+      description: draft.description,
+      status: "draft",
+      environment: project.environment,
+      trigger_type: "manual",
+      trigger_config: draft.trigger_config,
+      created_by: "intake-skeleton",
+      // Only the trigger node landed before the failure; no edges.
+      nodes: [{ ...draft.nodes[0] }],
+      edges: [],
+    });
+
+    const result = await ensureUseCaseWorkflows(engine.db, project);
+    expect(result.created).toHaveLength(3);
+    expect(engine.workflows.has(partialId)).toBe(false);
+    const repaired = [...engine.workflows.values()].find(
+      (w) => w.trigger_config.requirementCode === requirement.code,
+    );
+    expect(repaired?.nodes).toHaveLength(4);
+    expect(repaired?.edges).toHaveLength(3);
   });
 
   it("creates nothing for an empty baseline, a rejected-only baseline, or no package", async () => {
