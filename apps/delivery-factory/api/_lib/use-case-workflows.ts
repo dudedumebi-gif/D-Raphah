@@ -361,24 +361,19 @@ export async function listProjectUseCaseWorkflows(
 /** The node keys every complete skeleton graph carries. */
 const SKELETON_NODE_KEYS = ["trigger-1", "action-1", "action-2", "action-3"];
 
-/**
- * Tolerance for the never-updated check: created_at and updated_at
- * are stamped by the same insert, and timestamp rendering can wobble
- * by a second across drivers.
- */
-const NEVER_UPDATED_TOLERANCE_MS = 2000;
-
 interface SkeletonAssessment {
   complete: boolean;
   /**
    * True only for provably untouched machine state: incomplete
    * graph, zero runs, and the workflow row never updated since
-   * creation (updated_at = created_at; the trg_workflows_touch
-   * trigger bumps updated_at on ANY update, and the create path
-   * never updates the row). Freshness is deliberately NOT evidence:
-   * an operator can edit a draft seconds after creating it, and
-   * that edit moves updated_at and protects the draft (Codex on
-   * PR #60, rounds 2–3).
+   * creation. The check is EXACT equality of the parsed timestamps:
+   * both columns are stamped by the same insert's now() — one
+   * transaction timestamp, microsecond-identical in Postgres — and
+   * the trg_workflows_touch trigger bumps updated_at on ANY update,
+   * so any positive delta, however small, is an operator's edit
+   * and protects the draft. Freshness is deliberately NOT evidence:
+   * an operator can edit a draft seconds after creating it (Codex
+   * on PR #60, rounds 2–4).
    */
   repairable: boolean;
 }
@@ -413,7 +408,7 @@ async function assessSkeleton(
   const neverUpdated =
     Number.isFinite(createdAt) &&
     Number.isFinite(updatedAt) &&
-    Math.abs(updatedAt - createdAt) <= NEVER_UPDATED_TOLERANCE_MS;
+    updatedAt === createdAt;
   return { complete: false, repairable: neverUpdated };
 }
 

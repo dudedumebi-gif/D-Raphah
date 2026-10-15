@@ -301,6 +301,9 @@ function makeEngine() {
     if (head.includes("from public.workflows where id =")) {
       const w = workflows.get(String(values[0]));
       if (!w) return [];
+      // One insert stamps both columns with the same now():
+      // fabricate a single instant so untouched rows read equal.
+      const stamp = new Date().toISOString();
       return [
         {
           id: w.id,
@@ -311,8 +314,8 @@ function makeEngine() {
           trigger_type: w.trigger_type,
           trigger_config: w.trigger_config,
           created_by: w.created_by,
-          created_at: w.created_at ?? new Date().toISOString(),
-          updated_at: w.updated_at ?? w.created_at ?? new Date().toISOString(),
+          created_at: w.created_at ?? stamp,
+          updated_at: w.updated_at ?? w.created_at ?? stamp,
           published_at: null,
         },
       ];
@@ -740,6 +743,42 @@ describe("ensureUseCaseWorkflows", () => {
     expect(result.existing.map((s) => s.id)).toContain(editedId);
     expect(engine.workflows.get(editedId)?.nodes).toHaveLength(2);
     expect(result.created).toHaveLength(2);
+  });
+
+  it("protects a draft edited a single millisecond after creation (Codex round 4)", async () => {
+    const engine = makeEngine();
+    const pkg = donddentalPackage();
+    const project = seedProject(engine, pkg);
+    const requirement = pkg.requirementBaseline.requirements[0];
+    const draft = buildUseCaseWorkflowDraft({
+      project,
+      packageId: pkg.packageId,
+      requirement,
+      successMeasure: pkg.successMeasures[0],
+    });
+    const created = Date.parse("2026-10-14T12:00:00.000Z");
+    const editedId = randomUUID();
+    engine.workflows.set(editedId, {
+      id: editedId,
+      name: draft.name,
+      description: draft.description,
+      status: "draft",
+      environment: project.environment,
+      trigger_type: "manual",
+      trigger_config: draft.trigger_config,
+      created_by: "operator@example.com",
+      created_at: new Date(created).toISOString(),
+      // Any positive delta is an update: Postgres stamps both
+      // columns from one transaction now(), so exact equality is
+      // the only never-updated state.
+      updated_at: new Date(created + 1).toISOString(),
+      nodes: [{ ...draft.nodes[0] }],
+      edges: [],
+    });
+
+    const result = await ensureUseCaseWorkflows(engine.db, project);
+    expect(result.existing.map((s) => s.id)).toContain(editedId);
+    expect(engine.workflows.get(editedId)?.nodes).toHaveLength(1);
   });
 
   it("creates nothing for an empty baseline, a rejected-only baseline, or no package", async () => {

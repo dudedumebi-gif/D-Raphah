@@ -115,6 +115,7 @@ function engineDb() {
     if (head.includes("from public.workflows where id =")) {
       const w = workflows.get(String(values[0]));
       if (!w) return [];
+      const stamp = new Date().toISOString();
       return [
         {
           id: w.id,
@@ -125,8 +126,8 @@ function engineDb() {
           trigger_type: w.trigger_type,
           trigger_config: w.trigger_config,
           created_by: w.created_by,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          created_at: stamp,
+          updated_at: stamp,
           published_at: null,
         },
       ];

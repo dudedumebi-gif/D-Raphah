@@ -85,7 +85,17 @@ export default defineRoute(
       name: body.name,
       description: typeof body.description === "string" ? body.description : undefined,
       trigger_type: body.trigger_type as "manual",
-      trigger_config: (body.trigger_config ?? {}) as Record<string, unknown>,
+      // Omitted trigger_config means UNCHANGED, never "clear it":
+      // the builder's save payload does not carry the field, and
+      // generated skeletons keep their project/requirement linkage
+      // in it — defaulting to {} here silently unlinked every
+      // skeleton an operator reviewed and saved (Codex on PR #60).
+      // An explicit object (including {}) still replaces it.
+      trigger_config:
+        typeof body.trigger_config === "object" &&
+        body.trigger_config !== null
+          ? (body.trigger_config as Record<string, unknown>)
+          : undefined,
       nodes: (body.nodes ?? []) as [],
       edges: (body.edges ?? []) as [],
     });
