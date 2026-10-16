@@ -2127,12 +2127,24 @@ async function authenticatedRoutes(
         return (data as DiscoverySourceRow | null) ?? null;
       },
       createRun: async (discoverySourceId: string) => {
+        // Runs inherit their source's data_mode stamp: the column
+        // default is the legacy 'pilot', and the v4 production-only
+        // run history keys on this stamp (Codex P2 on PR #64).
+        const { data: sourceRow } = await client
+          .from("discovery_sources")
+          .select("data_mode")
+          .eq("workspace_id", workspaceId)
+          .eq("id", discoverySourceId)
+          .maybeSingle();
         const { data, error } = await client
           .from("discovery_runs")
           .insert({
             workspace_id: workspaceId,
             discovery_source_id: discoverySourceId,
             status: "running",
+            data_mode:
+              (sourceRow as { data_mode?: string } | null)?.data_mode ??
+              "production",
           })
           .select("id,started_at")
           .single();

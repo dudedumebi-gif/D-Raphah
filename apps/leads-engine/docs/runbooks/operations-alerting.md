@@ -1,38 +1,27 @@
 # Operations Alerting — Lead Engine
 
-Lead Engine evaluates operational health at the end of every signed worker
-tick and through an independent five-minute QStash monitor schedule. The
-independent schedule can detect a stale worker even when no worker tick is
-running. Incidents are persisted in Neon, audited, and delivered to the Slack
-Incoming Webhook for `#ops-alert`. Slack delivery is best-effort and can never
-fail a worker tick, scrape result, or canary.
+Lead Engine evaluates operational health inside every signed worker tick:
+the alert/incident reconcile runs at the start of the tick, before the tick
+refreshes its own heartbeat, so an outage gap is evaluated rather than
+erased. (Before LE v4 an independent five-minute monitor schedule also
+evaluated; it was retired and its route is a one-release stub.) Incidents
+are persisted in Neon, audited, and delivered to the Slack Incoming Webhook
+for `#ops-alert`. Slack delivery is best-effort and can never fail a worker
+tick or a scrape result.
 
 ## Alert conditions
 
 | Type | Severity | Opens when | Recovers when |
 |---|---|---|---|
-| `worker_stale` | Critical | latest heartbeat is missing or older than 10 minutes | a current heartbeat is observed |
-| `canary_stuck` | Critical | queued/running canary exceeds 10 minutes | that run leaves queued/running |
-| `canary_failed` | Critical | latest terminal canary failed | a later canary completes |
+| `worker_stale` | Critical | a recorded heartbeat is older than 10 minutes (no heartbeat ever recorded is a bootstrap state, not an incident) | a current heartbeat is observed |
 | `dead_letter` | Critical | any scrape job enters `dead_letter` | that job succeeds after controlled retry |
-| `canary_target_mismatch` | Critical | latest completed canary target differs from `LEAD_ENGINE_CANARY_URL` | a later canary completes against the configured target |
 | `scheduled_start_p95_breach` | Warning | 72-hour scheduled-start p95 is at least 300,000 ms | p95 falls below 300,000 ms |
 | `qstash_delivery_failed` | Critical | signed failure callback reports retries exhausted | the same schedule next delivers successfully |
-| `soak_passed` | Info | 72-hour canary reaches the promotion gate | one-time release evidence; no reminders |
-| `production_gate_passed` | Info | all five promotion checks are green | one-time request for explicit product-owner approval; no reminders or automatic promotion |
 
-## Production-approval probe
-
-The independent five-minute operations run also evaluates the composite
-promotion gate. It requires, for one workspace, a passing 72-hour soak,
-scheduled-start p95 below five minutes, no unresolved critical condition,
-retry/dead-letter recovery evidence with no dead-letter in the rolling window,
-and live RLS/audit catalogue integrity plus durable RLS behavioural evidence.
-
-Passing the probe creates and audits one `production_gate_passed` alert and
-sends it to `#ops-alert`. The notification requests approval; it does not
-change a source, campaign, job, lead, or release mode. The product owner must
-still approve the move from Pilot to Production explicitly.
+The canary and release-gate alert types (`canary_stuck`, `canary_failed`,
+`canary_target_mismatch`, `soak_passed`, `production_gate_passed`) were
+retired with the canary subsystem in LE v4; the v4 upgrade migration
+resolves any still-open rows of those types.
 
 ## State, dedupe, and reminders
 
@@ -57,20 +46,21 @@ on the incident row, preventing duplicate transition notifications.
 | `SLACK_ALERT_COOLDOWN_MINUTES` | Config | Production | No; defaults to `30` |
 
 `LEAD_ENGINE_ALERT_WEBHOOK_URL` remains a temporary compatibility fallback.
-Do not expose either webhook variable with a `VITE_` prefix and never print it
-in logs, Slack messages, test output, or Postman.
+Do not expose either webhook variable with a `VITE_` prefix and never print
+it in logs, Slack messages, or test output.
 
 ## QStash setup
 
 Run `pnpm qstash:configure` from `apps/leads-engine` after the deployment. The
-script configures:
+script configures only the worker schedule:
 
-- worker every four minutes;
-- independent operational evaluator every five minutes;
-- canary hourly;
-- discovery daily;
-- three retries and a signed failure callback to
-  `/api/v1/qstash/failure` for every schedule.
+- worker tick every four minutes (`*/4 * * * *`), three retries, and a
+  signed failure callback to `/api/v1/qstash/failure`.
+
+It also retires the `raphah-lead-discovery-v1` schedule on existing
+deployments (its route was removed in v4). The retired canary and monitor
+schedules are paused in the Upstash console by the operator; their routes
+answer `200 {retired: true}` for one release.
 
 The callback accepts QStash's documented final-failure payload only after
 `Upstash-Signature` verification. It records the source message ID, schedule,
@@ -78,11 +68,11 @@ HTTP status, and DLQ ID but never stores a webhook secret or raw evidence.
 
 ## Verification
 
-1. Apply schema `3.3.4` on a disposable Neon branch and run regression/RLS
-   tests before production migration.
+1. Apply the latest schema on a disposable Neon branch and run
+   regression/RLS tests before production migration.
 2. Deploy the code and confirm `/api/health/ready` returns `200`.
-3. Re-run `pnpm qstash:configure`; confirm worker cron is `*/4 * * * *`, the
-   monitor cron is `*/5 * * * *`, and each schedule has the failure callback.
+3. Re-run `pnpm qstash:configure`; confirm the worker cron is `*/4 * * * *`
+   and the schedule has the failure callback.
 4. Use a disposable signed test delivery that returns non-2xx until retries
    exhaust. Confirm one `qstash_delivery_failed` incident, audit event, and
    Slack message. Restore delivery and confirm one recovery message.
@@ -90,5 +80,5 @@ HTTP status, and DLQ ID but never stores a webhook secret or raw evidence.
    the configured cooldown and no duplicate transition is emitted.
 6. Confirm Vercel runtime logs remain authoritative if Slack delivery fails.
 
-Do not deliberately stop the production worker or corrupt production canary
-data to test alerts. Use a disposable QStash message or rehearsal branch.
+Do not deliberately stop the production worker or corrupt production data
+to test alerts. Use a disposable QStash message or rehearsal branch.

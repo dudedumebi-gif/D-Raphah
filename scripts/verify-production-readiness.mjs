@@ -17,10 +17,10 @@ const [
   leDomain,
   dfMigration,
   dfReady,
-  postman,
   adapterMigration,
   adapterRegistry,
   productionReadme,
+  leReadme,
 ] = await Promise.all([
   read("package.json"),
   read(".github/workflows/ci.yml"),
@@ -32,13 +32,11 @@ const [
   read("apps/delivery-factory/neon/migrations/202609270001_delivery_audit.sql"),
   read("apps/delivery-factory/api/ready.ts"),
   read(
-    "apps/leads-engine/postman/Lead_Engine_Production.postman_collection.json",
-  ),
-  read(
     "apps/leads-engine/neon/migrations/202609290001_source_adapters_and_data_modes.sql",
   ),
   read("apps/leads-engine/api/_lib/discovery/registry.ts"),
   read("PRODUCTION_README.md"),
+  read("apps/leads-engine/README.md"),
 ]);
 
 check(
@@ -69,12 +67,8 @@ check(
   dfReady.includes("DELIVERY_DATABASE_URL"),
 );
 check(
-  "Postman covers signed handoff",
-  postman.includes("Signed Delivery Factory handoff"),
-);
-check(
-  "Toronto and Job Bank adapters registered",
-  adapterRegistry.includes("toronto_open_data") &&
+  "Overpass and Job Bank adapters registered",
+  adapterRegistry.includes("overpass") &&
     adapterRegistry.includes("job_bank"),
 );
 check(
@@ -84,16 +78,15 @@ check(
     adapterMigration.includes("resolve_discovery_candidate"),
 );
 check(
-  "Postman covers discovery lifecycle",
-  postman.includes("Inspect persistent candidates") &&
-    postman.includes("Human-resolve candidate website and queue"),
+  "production handover documents explicit gates",
+  productionReadme.includes(
+    "terms reviewed and accepted by a human operator",
+  ),
 );
 check(
-  "production handover documents explicit gates",
-  productionReadme.includes("72-hour canary completion is at least 99%") &&
-    productionReadme.includes(
-      "terms reviewed and accepted by a human operator",
-    ),
+  "Lead Engine v4 provisioning is documented",
+  leReadme.includes("LEAD_ENGINE_SCHEDULER_WORKSPACE_ID") &&
+    leReadme.includes("202610150001_disable_campaign_schedules"),
 );
 
 if (process.argv.includes("--live")) {
