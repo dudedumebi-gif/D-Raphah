@@ -40,6 +40,7 @@ import {
 import { readJobBankMarketView } from "./job-bank-market.js";
 import {
   DiscoveryGeoInputSchema,
+  normalizeWebsiteUrl,
   resolveGeoQuery,
 } from "./discovery/adapter.js";
 import {
@@ -117,6 +118,11 @@ const DiscoverySourceInputSchema = z.object({
   adapterConfig: z.record(z.unknown()).default({}),
   sourceId: z.string().uuid(),
   campaignId: z.string().uuid().optional(),
+});
+
+const CandidateResolutionInputSchema = z.object({
+  website: z.string().url().max(2000),
+  notes: z.string().min(3).max(1000),
 });
 
 function json(
@@ -1845,24 +1851,28 @@ async function authenticatedRoutes(
       .from("source_definitions")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
+      .eq("data_mode", "production")
       .eq("status", "active");
     if (sourcesError) throw new Error(sourcesError.message);
     const { count: candidatesEvaluated, error: evaluatedError } = await client
       .from("discovery_candidates")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
+      .eq("data_mode", "production")
       .gte("last_seen_at", since);
     if (evaluatedError) throw new Error(evaluatedError.message);
     const { count: scored, error: scoredError } = await client
       .from("maturity_assessments")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
+      .eq("data_mode", "production")
       .gte("evaluated_at", since);
     if (scoredError) throw new Error(scoredError.message);
     const { count: qualified, error: qualifiedError } = await client
       .from("maturity_assessments")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
+      .eq("data_mode", "production")
       .gte("evaluated_at", since)
       .eq("qualified", true);
     if (qualifiedError) throw new Error(qualifiedError.message);
@@ -1994,6 +2004,57 @@ async function authenticatedRoutes(
       .limit(500);
     if (error) throw new Error(error.message);
     return json({ data });
+  }
+  const candidateResolution = pathname.match(
+    /^\/api\/v1\/discovery\/candidates\/([0-9a-f-]+)\/resolve$/i,
+  );
+  if (candidateResolution && request.method === "POST") {
+    requireRole(context, ["owner", "administrator", "analyst"]);
+    const input = CandidateResolutionInputSchema.parse(await bodyJson(request));
+    const normalized = new URL(input.website);
+    if (normalized.protocol !== "http:" && normalized.protocol !== "https:")
+      throw Object.assign(new Error("Resolved website must use HTTP(S)"), {
+        statusCode: 422,
+      });
+    normalized.hash = "";
+    const website = normalized.toString();
+    const { data: candidate, error: candidateError } = await client
+      .from("discovery_candidates")
+      .select("id,data_mode,discovery_source_id")
+      .eq("workspace_id", workspaceId)
+      .eq("id", candidateResolution[1])
+      .maybeSingle();
+    if (candidateError) throw new Error(candidateError.message);
+    if (!candidate)
+      throw Object.assign(new Error("Discovery candidate not found"), {
+        statusCode: 404,
+      });
+    const { data: discoverySource, error: discoveryError } = await client
+      .from("discovery_sources")
+      .select("source_id,data_mode")
+      .eq("workspace_id", workspaceId)
+      .eq("id", candidate.discovery_source_id)
+      .single();
+    if (discoveryError) throw new Error(discoveryError.message);
+    // v4 collapsed the data modes: the candidate keeps its own stamp in
+    // the idempotency key (dedupe identity), and no mode-match rule
+    // remains between a candidate and its source.
+    const normalizedTarget = normalizeWebsiteUrl(website);
+    if (!normalizedTarget)
+      throw Object.assign(new Error("Resolved website is invalid"), {
+        statusCode: 422,
+      });
+    const key = `discovery:${candidate.data_mode}:${discoverySource.source_id}:${normalizedTarget}`;
+    const { data, error } = await client.rpc("resolve_discovery_candidate", {
+      p_workspace_id: workspaceId,
+      p_candidate_id: candidate.id,
+      p_website: website,
+      p_domain: normalized.hostname.toLowerCase(),
+      p_key: key,
+      p_notes: input.notes,
+    });
+    if (error) throw new Error(error.message);
+    return json({ data }, 202);
   }
   const discoveryRun = pathname.match(
     /^\/api\/v1\/discovery\/sources\/([0-9a-f-]+)\/run$/i,

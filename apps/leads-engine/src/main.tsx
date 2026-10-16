@@ -76,6 +76,12 @@ function workspaceName(membership: Membership): string {
   );
 }
 
+/** v4 production-view guard: legacy demo/pilot-stamped rows are
+ * pre-v4 fixtures and are never presented under the production label. */
+function isProductionRow(row: { data_mode?: string | null }): boolean {
+  return !row.data_mode || row.data_mode === "production";
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [checking, setChecking] = useState(true);
@@ -356,10 +362,8 @@ function Workspace({ session }: { session: Session }) {
   // production data. Legacy rows stamped demo/pilot are pre-v4 fixtures
   // (e.g. the canary soak's synthetic source and leads) and are never
   // presented under the production label; server queries are
-  // stamp-agnostic, so this presentation guard is where pre-v4 stamps
-  // are excluded (Codex P1 on PR #64).
-  const isProductionRow = (row: { data_mode?: string | null }) =>
-    !row.data_mode || row.data_mode === "production";
+  // stamp-agnostic, so the isProductionRow presentation guard is where
+  // pre-v4 stamps are excluded (Codex P1 on PR #64).
   const visibleData = data
     ? {
         ...data,
@@ -1041,6 +1045,11 @@ export function Discovery({
     useState<DiscoveryAdapterId | null>(null);
   const [termsAcknowledged, setTermsAcknowledged] = useState(false);
   const [termsNotes, setTermsNotes] = useState("");
+  const [resolvingCandidateId, setResolvingCandidateId] = useState<
+    string | null
+  >(null);
+  const [resolutionUrl, setResolutionUrl] = useState("");
+  const [resolutionNotes, setResolutionNotes] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -1067,9 +1076,12 @@ export function Discovery({
             "/api/v1/terms",
           ),
         ]);
-      setSources(sourceResult.data);
-      setRuns(runResult.data);
-      setCandidates(candidateResult.data);
+      // Same production-view guard as the bootstrap views: legacy
+      // demo/pilot discovery records are not shown (or run) here
+      // (Codex P2 on PR #64).
+      setSources(sourceResult.data.filter(isProductionRow));
+      setRuns(runResult.data.filter(isProductionRow));
+      setCandidates(candidateResult.data.filter(isProductionRow));
       setAcceptedTerms(new Set(termsResult.data.map((t) => t.terms_id)));
     } catch {
       // mutate() surfaces request errors; the lists simply stay stale.
@@ -1177,6 +1189,28 @@ export function Discovery({
     );
     setRunningId(null);
     await refresh();
+  }
+
+  async function resolveCandidate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!resolvingCandidateId) return;
+    const result = await mutate(
+      `/api/v1/discovery/candidates/${resolvingCandidateId}/resolve`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          website: resolutionUrl,
+          notes: resolutionNotes,
+        }),
+      },
+      "Candidate website resolved and persistent scrape job queued.",
+    );
+    if (result) {
+      setResolvingCandidateId(null);
+      setResolutionUrl("");
+      setResolutionNotes("");
+      await refresh();
+    }
   }
 
   return (
@@ -1587,6 +1621,19 @@ export function Discovery({
                   <small>
                     {candidate.resolved_website ?? "Review required"}
                   </small>
+                  {!candidate.resolved_website ? (
+                    <button
+                      type="button"
+                      className="row-action"
+                      onClick={() => {
+                        setResolvingCandidateId(candidate.id);
+                        setResolutionUrl(candidate.website ?? "");
+                        setResolutionNotes("");
+                      }}
+                    >
+                      Resolve website
+                    </button>
+                  ) : null}
                 </span>
                 <span>
                   {new Date(candidate.source_observed_at).toLocaleString()}
@@ -1594,6 +1641,47 @@ export function Discovery({
               </div>
             ))}
           </div>
+          {resolvingCandidateId ? (
+            <form
+              className="horizontal-form resolution-form"
+              onSubmit={resolveCandidate}
+            >
+              <label>
+                Human-validated website
+                <input
+                  type="url"
+                  value={resolutionUrl}
+                  onChange={(event) => setResolutionUrl(event.target.value)}
+                  placeholder="https://business.example"
+                  required
+                />
+              </label>
+              <label>
+                Validation note
+                <input
+                  value={resolutionNotes}
+                  onChange={(event) => setResolutionNotes(event.target.value)}
+                  placeholder="Where and how the website was verified"
+                  minLength={3}
+                  required
+                />
+              </label>
+              <p className="muted">
+                This audited action links the candidate to an approved source
+                policy and queues its collection job.
+              </p>
+              <div>
+                <button className="primary">Resolve and queue</button>{" "}
+                <button
+                  type="button"
+                  className="quiet"
+                  onClick={() => setResolvingCandidateId(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
           {(candidates ?? []).length === 0 && !loading ? (
             <p className="muted">No candidates persisted yet.</p>
           ) : null}
