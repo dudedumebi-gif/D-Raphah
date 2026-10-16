@@ -5,6 +5,7 @@ import {
   torontoRowToCandidate,
 } from "../api/_lib/discovery/toronto-open-data";
 import {
+  JOB_BANK_PACKAGE_URL,
   JobBankAdapter,
   jobBankRowToCandidate,
 } from "../api/_lib/discovery/job-bank";
@@ -28,6 +29,39 @@ function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
     status: 200,
     headers: { "content-type": "application/json" },
+  });
+}
+
+/** Encode text the way the published Job Bank files are written: UTF-16LE with BOM. */
+function utf16Bytes(text: string): Uint8Array {
+  const bytes = new Uint8Array(2 + text.length * 2);
+  bytes[0] = 0xff;
+  bytes[1] = 0xfe;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    bytes[2 + i * 2] = code & 0xff;
+    bytes[2 + i * 2 + 1] = code >> 8;
+  }
+  return bytes;
+}
+
+function utf16CsvResponse(
+  text: string,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(utf16Bytes(text), {
+    status: 200,
+    headers: { "content-type": "text/csv", ...headers },
+  });
+}
+
+function jobBankPackageResponse(resources: unknown[]): Response {
+  return jsonResponse({
+    success: true,
+    result: {
+      metadata_modified: "2026-09-29T00:00:00Z",
+      resources,
+    },
   });
 }
 
@@ -140,19 +174,14 @@ describe("structured discovery adapters", () => {
                 id: "jobs-new",
                 name: "September 2026 Job Postings Advertised",
                 format: "CSV",
-                url: "https://example.test/jobs.csv",
+                url: "https://example.test/jobs-en-2026.csv",
                 last_modified: "2026-09-29",
               },
             ],
           },
         }),
       )
-      .mockResolvedValueOnce(
-        new Response(csv, {
-          status: 200,
-          headers: { "content-type": "text/csv" },
-        }),
-      );
+      .mockResolvedValueOnce(utf16CsvResponse(csv));
     const result = await new JobBankAdapter().fetchCandidates(geo, {
       fetcher: fetcher as typeof fetch,
       config: {
@@ -169,6 +198,152 @@ describe("structured discovery adapters", () => {
       source: "job_bank",
     });
     expect(result[0].evidenceText).toContain("Manual filing");
+  });
+
+  it("selects the English Job Bank file even when the French file is newer", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const header =
+      "Job Posting ID,Employer Name,Job Title,City,Province,Date Posted,Employer Website,Tasks";
+    const enCsv = [
+      header,
+      `E1,English Co,Dispatcher,Toronto,Ontario,${today},https://en.example,Dispatch phones`,
+    ].join("\n");
+    const frCsv = [
+      header,
+      `F1,French Co,Dispatcher,Toronto,Ontario,${today},https://fr.example,Dispatch phones`,
+    ].join("\n");
+    const requested: string[] = [];
+    const fetcher = vi.fn(async (url: unknown) => {
+      const target = String(url);
+      requested.push(target);
+      if (target === JOB_BANK_PACKAGE_URL)
+        return jobBankPackageResponse([
+          {
+            id: "jobs-fr",
+            name: "September 2026 Job Postings Advertised",
+            format: "CSV",
+            url: "https://example.test/jobs-fr-2026.csv",
+            last_modified: "2026-09-30",
+          },
+          {
+            id: "jobs-en",
+            name: "September 2026 Job Postings Advertised",
+            format: "CSV",
+            url: "https://example.test/jobs-en-2026.csv",
+            last_modified: "2026-09-29",
+          },
+        ]);
+      return utf16CsvResponse(target.includes("-fr-") ? frCsv : enCsv);
+    });
+    const result = await new JobBankAdapter().fetchCandidates(geo, {
+      fetcher: fetcher as typeof fetch,
+      config: { keywords: ["dispatcher"], postedWithinDays: 30, maxRecords: 10 },
+    });
+    expect(requested.some((target) => target.includes("-fr-"))).toBe(false);
+    expect(result.map((candidate) => candidate.name)).toEqual(["English Co"]);
+    expect(result[0].sourceUrl).toContain("-en-");
+  });
+
+  it("decodes the UTF-16 Job Bank file before parsing quoted fields", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const csv = [
+      "Job Posting ID,Employer Name,Job Title,City,Province,Date Posted,Employer Website,Tasks",
+      `U1,"Café Müller, Inc.",Service Coordinator,Toronto,Ontario,${today},https://cafe.example,"Answer ""busy"" phones, book jobs"`,
+    ].join("\n");
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jobBankPackageResponse([
+          {
+            id: "jobs-en",
+            name: "September 2026 Job Postings Advertised",
+            format: "CSV",
+            url: "https://example.test/jobs-en-2026.csv",
+            last_modified: "2026-09-29",
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(utf16CsvResponse(csv));
+    const result = await new JobBankAdapter().fetchCandidates(geo, {
+      fetcher: fetcher as typeof fetch,
+      config: { keywords: ["coordinator"], postedWithinDays: 30, maxRecords: 10 },
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe("Café Müller, Inc.");
+    expect(result[0].evidenceText).toContain('Answer "busy" phones');
+  });
+
+  it("filters the full Job Bank file before applying maxRecords", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const header =
+      "Job Posting ID,Employer Name,Job Title,City,Province,Date Posted,Employer Website,Tasks";
+    const filler = Array.from(
+      { length: 800 },
+      (_, i) =>
+        `F${i},Filler Co ${i},Baker,Ottawa,Ontario,${today},,Bread and pastries`,
+    ).join("\n");
+    const matches = [1, 2, 3]
+      .map(
+        (i) =>
+          `T${i},Toronto Dispatch ${i},Dispatcher,Toronto,Ontario,${today},https://t${i}.example,Dispatch board`,
+      )
+      .join("\n");
+    const csv = [header, filler, matches].join("\n");
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jobBankPackageResponse([
+          {
+            id: "jobs-en",
+            name: "September 2026 Job Postings Advertised",
+            format: "CSV",
+            url: "https://example.test/jobs-en-2026.csv",
+            last_modified: "2026-09-29",
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(utf16CsvResponse(csv));
+    const result = await new JobBankAdapter().fetchCandidates(geo, {
+      fetcher: fetcher as typeof fetch,
+      config: { keywords: ["dispatcher"], postedWithinDays: 30, maxRecords: 2 },
+    });
+    // The matching rows sit beyond row 800 of the national file; the
+    // old fetch sliced a prefix before filtering and missed them all.
+    expect(result.map((candidate) => candidate.externalId)).toEqual([
+      "T1",
+      "T2",
+    ]);
+  });
+
+  it("does not reject a Job Bank file over the generic CKAN size cap", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const csv = [
+      "Job Posting ID,Employer Name,Job Title,City,Province,Date Posted,Employer Website,Tasks",
+      `S1,Big File Co,Dispatcher,Toronto,Ontario,${today},https://big.example,Dispatch board`,
+    ].join("\n");
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jobBankPackageResponse([
+          {
+            id: "jobs-en",
+            name: "September 2026 Job Postings Advertised",
+            format: "CSV",
+            url: "https://example.test/jobs-en-2026.csv",
+            last_modified: "2026-09-29",
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        utf16CsvResponse(csv, {
+          "content-length": String(64 * 1024 * 1024),
+        }),
+      );
+    const result = await new JobBankAdapter().fetchCandidates(geo, {
+      fetcher: fetcher as typeof fetch,
+      config: { keywords: ["dispatcher"], postedWithinDays: 30, maxRecords: 10 },
+    });
+    expect(result.map((candidate) => candidate.name)).toEqual(["Big File Co"]);
   });
 
   it("registers all adapters and their separate human terms gates", () => {
