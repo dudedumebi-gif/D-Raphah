@@ -425,3 +425,21 @@ describe("production-readiness implementation", () => {
     expect(fixture).toContain("noindex,nofollow");
   });
 });
+
+describe("alert reconcile ordering (LE v4)", () => {
+  const worker = readFileSync(
+    new URL("../api/_lib/worker.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("evaluates alerts before the tick refreshes the worker heartbeat", () => {
+    // If the tick refreshed last_heartbeat_at first, a resumed tick
+    // would erase the outage before evaluation and worker_stale could
+    // never open (Codex P1 on PR #64).
+    const reconcile = worker.indexOf("await checkOperationalAlerts");
+    const heartbeat = worker.indexOf("insert into public.worker_nodes");
+    expect(reconcile).toBeGreaterThan(-1);
+    expect(heartbeat).toBeGreaterThan(-1);
+    expect(reconcile).toBeLessThan(heartbeat);
+  });
+});

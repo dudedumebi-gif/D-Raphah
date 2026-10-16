@@ -407,6 +407,20 @@ export async function runWorkerTick(
     jobBankCitiesSynced: 0,
   };
   const now = new Date().toISOString();
+  // The alert/incident reconcile runs FIRST, before this tick refreshes
+  // the worker heartbeat: evaluating after the heartbeat write would
+  // erase any outage gap (a resumed tick would see its own fresh
+  // heartbeat and worker_stale could never open — Codex P1 on PR #64).
+  // The reconcile is failure-isolated: Slack or alert persistence can
+  // never fail the worker tick or a lead pipeline result. Dead-letter
+  // and p95 conditions therefore reflect state as of the previous tick.
+  try {
+    const sql = client as unknown as Parameters<typeof checkOperationalAlerts>[0];
+    result.alertsEmitted = await checkOperationalAlerts(sql);
+  } catch (error) {
+    log("error", "alert_tick_failed", { workerId });
+    await reportError(error, { workerId });
+  }
   const deploymentId =
     process.env.VERCEL_DEPLOYMENT_ID ??
     process.env.VERCEL_GIT_COMMIT_SHA ??
@@ -496,15 +510,6 @@ export async function runWorkerTick(
     log("error", "handoff_dispatch_tick_failed", { workerId });
     await reportError(error, { workerId });
     result.handoffsFailed += 1;
-  }
-  // Stateful operational alerting is failure-isolated: Slack or alert
-  // persistence can never fail the worker tick or a lead pipeline result.
-  try {
-    const sql = client as unknown as Parameters<typeof checkOperationalAlerts>[0];
-    result.alertsEmitted = await checkOperationalAlerts(sql);
-  } catch (error) {
-    log("error", "alert_tick_failed", { workerId });
-    await reportError(error, { workerId });
   }
   await client`
     update public.worker_nodes
