@@ -238,3 +238,42 @@ describe("createCharterCache", () => {
     expect(attempts).toBe(2);
   });
 });
+
+describe("summary derivation from current family membership", () => {
+  it("unmarks a requirement when its skeleton leaves the family", () => {
+    const members = [
+      skeleton("Donddental", "Booking", "p1", "req-1", "UC-ONLINE-APPOINTMENT-BOOKING"),
+      skeleton("Donddental", "Reminders", "p1", "req-2", "UC-AUTOMATED-REMINDERS"),
+    ];
+    const before = groupWorkflowsByFamily(members).families[0];
+    const markedBefore = summarizeCharter(charter, {
+      ids: before.requirementIds,
+      codes: before.requirementCodes,
+    });
+    expect(
+      markedBefore.requirements.map((r) => [r.id, r.implemented]),
+    ).toEqual([
+      ["req-1", true],
+      ["req-2", true],
+      ["req-3", false],
+    ]);
+
+    // The req-2 skeleton is deleted. The summary the Charter toggle
+    // renders is derived from the SAME cached charter and the family's
+    // CURRENT membership, so req-2 unmarks without a remount
+    // (Codex P2 on PR #63).
+    const after = groupWorkflowsByFamily(members.slice(0, 1)).families[0];
+    expect(after.requirementIds).toEqual(["req-1"]);
+    const markedAfter = summarizeCharter(charter, {
+      ids: after.requirementIds,
+      codes: after.requirementCodes,
+    });
+    expect(
+      markedAfter.requirements.map((r) => [r.id, r.implemented]),
+    ).toEqual([
+      ["req-1", true],
+      ["req-2", false],
+      ["req-3", false],
+    ]);
+  });
+});

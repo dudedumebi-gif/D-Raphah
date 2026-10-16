@@ -394,10 +394,16 @@ async function replaceGraph(
   nodes: WorkflowNode[],
   edges: WorkflowEdge[],
 ): Promise<void> {
+  // Validate the COMPLETE incoming graph before any destructive write.
+  // The stored graph is deleted first below, so a node kind the catalog
+  // no longer knows (a v1-era draft can still carry kinds removed in
+  // v2, e.g. send_sms) must be rejected up front: validating inside the
+  // insert loop erased the stored graph and only then failed the save
+  // (Codex P1 on PR #63).
+  for (const n of nodes) specFor(n.kind);
   await q(db)`delete from public.workflow_edges where workflow_id = ${workflowId}`;
   await q(db)`delete from public.workflow_nodes where workflow_id = ${workflowId}`;
   for (const n of nodes) {
-    specFor(n.kind); // validates kind
     await q(db)`
       insert into public.workflow_nodes
         (workflow_id, node_key, type, kind, label, position_x, position_y, config, enabled)

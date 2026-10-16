@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   NODE_CATALOG,
   executeWorkflow,
+  getWorkflow,
   renderTemplate,
   specFor,
+  updateWorkflow,
   type Workflow,
+  type WorkflowNode,
 } from "../api/_lib/workflows.js";
 
 /**
@@ -395,5 +398,118 @@ describe("lead follow-up (email, draft-first)", () => {
       queued: true,
       body: "Hi INS Market — quick question about your follow-up plan?",
     });
+  });
+});
+
+/**
+ * Fake for the save path (getWorkflow / updateWorkflow / replaceGraph).
+ * Keeps the stored graph in plain arrays so a test can assert exactly
+ * what a failed save left behind.
+ */
+function makeGraphDb() {
+  const originalNodes: WorkflowNode[] = [
+    { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+    { node_key: "a1", type: "action", kind: "log_database", label: "Log", position_x: 10, position_y: 20, config: { message: "hi", level: "info" }, enabled: true },
+  ];
+  const storedNodes: Array<Record<string, unknown>> = originalNodes.map(
+    (n) => ({ ...n }),
+  );
+  const storedEdges: Array<Record<string, unknown>> = [
+    { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+  ];
+  const workflowRow = {
+    id: "wf-graph", name: "Draft", description: null, status: "draft",
+    environment: "production", trigger_type: "manual", trigger_config: {},
+    created_by: null, created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(), published_at: null,
+  };
+  let deleteCount = 0;
+
+  const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const head = strings[0];
+    if (head.includes("delete from public.workflow_edges")) {
+      deleteCount += 1;
+      storedEdges.length = 0;
+      return [];
+    }
+    if (head.includes("delete from public.workflow_nodes")) {
+      deleteCount += 1;
+      storedNodes.length = 0;
+      return [];
+    }
+    if (head.includes("insert into public.workflow_nodes")) {
+      storedNodes.push({
+        node_key: values[1], type: values[2], kind: values[3],
+        label: values[4], position_x: values[5], position_y: values[6],
+        config: JSON.parse(String(values[7])), enabled: values[8],
+      });
+      return [];
+    }
+    if (head.includes("insert into public.workflow_edges")) {
+      storedEdges.push({
+        edge_key: values[1], from_node_key: values[2],
+        to_node_key: values[3], from_port: values[4], label: values[5],
+      });
+      return [];
+    }
+    if (head.includes("update public.workflows set")) return [];
+    if (head.includes("from public.workflows where id =")) return [workflowRow];
+    if (head.includes("from public.workflow_nodes")) {
+      return storedNodes.map((n) => ({ ...n }));
+    }
+    if (head.includes("from public.workflow_edges")) {
+      return storedEdges.map((e) => ({ ...e }));
+    }
+    throw new Error(`Unhandled query in fake db: ${head.slice(0, 80)}`);
+  }) as unknown as Parameters<typeof updateWorkflow>[0];
+
+  return { db, originalNodes, deleteCount: () => deleteCount };
+}
+
+describe("updateWorkflow graph replacement", () => {
+  it("rejects a graph carrying a removed kind and leaves the stored graph intact", async () => {
+    const { db, originalNodes, deleteCount } = makeGraphDb();
+    // A v1-era draft can still carry kinds the v2 catalog removed
+    // (send_sms). Even a harmless rename resubmits the whole graph —
+    // the save must fail BEFORE the stored graph is touched
+    // (Codex P1 on PR #63: validation ran inside the insert loop,
+    // after the deletes, erasing the draft).
+    const removedKindNode = {
+      node_key: "a9", type: "action", kind: "send_sms",
+      label: "Text the lead", position_x: 0, position_y: 0,
+      config: { to: "+1 555 0100", message: "hi" }, enabled: true,
+    } as unknown as WorkflowNode;
+
+    await expect(
+      updateWorkflow(db, "wf-graph", {
+        name: "Renamed draft",
+        nodes: [originalNodes[0], removedKindNode],
+        edges: [],
+      }),
+    ).rejects.toThrow("Unknown node kind: send_sms");
+
+    expect(deleteCount()).toBe(0);
+    const after = await getWorkflow(db, "wf-graph");
+    expect(after?.nodes).toEqual(originalNodes);
+    expect(after?.edges).toEqual([
+      { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+    ]);
+  });
+
+  it("replaces the graph when every kind is in the catalog", async () => {
+    const { db, originalNodes, deleteCount } = makeGraphDb();
+    const updated = await updateWorkflow(db, "wf-graph", {
+      name: "Renamed draft",
+      nodes: [
+        originalNodes[0],
+        { node_key: "a2", type: "action", kind: "send_email", label: "Email", position_x: 30, position_y: 40, config: { to: "", subject: "", body: "" }, enabled: true },
+      ],
+      edges: [
+        { edge_key: "e2", from_node_key: "t1", to_node_key: "a2", from_port: null, label: null },
+      ],
+    });
+    expect(deleteCount()).toBe(2);
+    expect(updated?.nodes.map((n) => n.node_key)).toEqual(["t1", "a2"]);
+    expect(updated?.edges.map((e) => e.edge_key)).toEqual(["e2"]);
   });
 });

@@ -8,7 +8,6 @@ import {
   summarizeCharter,
   type CharterCache,
   type CharterLike,
-  type CharterSummary,
 } from "./workflow-families";
 
 /* ── Types (mirror api/_lib/workflows.ts) ─────────────────────────────── */
@@ -136,27 +135,39 @@ function CharterToggle(props: {
   requirementCodes: string[];
   cache: CharterCache;
 }) {
-  const implemented = useMemo(
-    () => ({ ids: props.requirementIds, codes: props.requirementCodes }),
-    [props.requirementIds, props.requirementCodes],
-  );
   const [open, setOpen] = useState(false);
-  const [summary, setSummary] = useState<CharterSummary | null>(() => {
-    const cached = props.cache.peek(props.projectId);
-    return cached ? summarizeCharter(cached, implemented) : null;
-  });
+  const [loaded, setLoaded] = useState<{
+    projectId: string;
+    charter: CharterLike;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The summary is DERIVED at render from the cached charter and the
+  // family's CURRENT membership — never stored in state. A summary
+  // captured in an initializer kept marking requirements whose
+  // skeleton had since been deleted, until the view remounted
+  // (Codex P2 on PR #63).
+  const charter =
+    loaded && loaded.projectId === props.projectId
+      ? loaded.charter
+      : (props.cache.peek(props.projectId) ?? null);
+  const summary = charter
+    ? summarizeCharter(charter, {
+        ids: props.requirementIds,
+        codes: props.requirementCodes,
+      })
+    : null;
 
   const toggle = () => {
     const next = !open;
     setOpen(next);
-    if (!next || summary || loading) return;
+    if (!next || charter || loading) return;
     setLoading(true);
     setError(null);
     props.cache
       .load(props.projectId)
-      .then((charter) => setSummary(summarizeCharter(charter, implemented)))
+      .then((c) => setLoaded({ projectId: props.projectId, charter: c }))
       .catch((e: unknown) =>
         setError(e instanceof Error ? e.message : "Failed to load charter"),
       )

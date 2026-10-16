@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getAuthToken, notifyUnauthorized } from "./auth";
 import { CharterPanel } from "./charter";
+import {
+  readinessFromProbe,
+  type HealthState,
+  type ProductReadiness,
+} from "./monitoring-readiness";
 
 /* ── Monitoring view ────────────────────────────────────────────────────
  * One status strip (Lead Engine alive · Delivery Factory ready ·
@@ -12,8 +17,6 @@ const LEAD_ENGINE_BASE_URL =
   "https://d-raphah-leads-engine.vercel.app";
 
 const POLL_MS = 30_000;
-
-type HealthState = "up" | "down" | "degraded" | "loading" | "unknown";
 
 interface ServiceStatus {
   name: string;
@@ -130,8 +133,16 @@ export function MonitoringSection() {
       checkedAt: null,
     },
   ]);
-  const [readyState, setReadyState] = useState<HealthState>("loading");
-  const [readyDetail, setReadyDetail] = useState("Checking…");
+  // Readiness is tracked per product: each strip indicator derives
+  // ONLY from its own product's probe (Codex P2 on PR #63).
+  const [leadReady, setLeadReady] = useState<ProductReadiness>({
+    state: "loading",
+    detail: "Checking…",
+  });
+  const [factoryReady, setFactoryReady] = useState<ProductReadiness>({
+    state: "loading",
+    detail: "Checking…",
+  });
   const [snapshot, setSnapshot] = useState<MonitoringSnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [charterProjectId, setCharterProjectId] = useState<string | null>(null);
@@ -175,56 +186,16 @@ export function MonitoringSection() {
     ];
     setServices(nextServices);
 
-    // 2. Independent readiness probes for both products.
-    try {
-      const [leadReady, deliveryReady] = await Promise.all([
-        fetchJson(`${LEAD_ENGINE_BASE_URL}/api/health/ready`),
-        fetchJson("/api/ready"),
-      ]);
-      const normalize = (
-        prefix: string,
-        payload: unknown,
-      ): Array<{ name: string; ok: boolean }> => {
-        const data = (payload ?? {}) as Record<string, unknown>;
-        const rows = Array.isArray(data.checks) ? data.checks : [];
-        return rows.map((c) => {
-          const r = c as Record<string, unknown>;
-          return {
-            name: `${prefix}: ${String(r.name ?? r.check ?? "check")}`,
-            ok: r.ok === true || r.status === "ok" || r.status === "pass",
-            detail:
-              typeof r.detail === "string"
-                ? r.detail
-                : typeof r.error === "string"
-                  ? r.error
-                  : undefined,
-          };
-        });
-      };
-      const checks = [
-        ...normalize("Lead Engine", leadReady.data),
-        ...normalize("Delivery Factory", deliveryReady.data),
-      ];
-      if (
-        leadReady.ok &&
-        deliveryReady.ok &&
-        checks.every((check) => check.ok)
-      ) {
-        setReadyState("up");
-        setReadyDetail("Both products ready — all configuration checks pass");
-      } else {
-        setReadyState("degraded");
-        const missing = checks.filter((c) => !c.ok).map((c) => c.name);
-        setReadyDetail(
-          missing.length > 0
-            ? `Not ready: ${missing.join(", ")}`
-            : `Readiness HTTP ${leadReady.status}/${deliveryReady.status}`,
-        );
-      }
-    } catch {
-      setReadyState("down");
-      setReadyDetail("Unreachable");
-    }
+    // 2. Readiness probes — one per product, kept separate: each
+    // product's indicator derives ONLY from its own probe, so a Lead
+    // Engine failure can never mark Delivery Factory degraded
+    // (Codex P2 on PR #63).
+    const [leadRes, deliveryRes] = await Promise.all([
+      fetchJson(`${LEAD_ENGINE_BASE_URL}/api/health/ready`).catch(() => null),
+      fetchJson("/api/ready").catch(() => null),
+    ]);
+    setLeadReady(readinessFromProbe(leadRes));
+    setFactoryReady(readinessFromProbe(deliveryRes));
 
     // 3. Delivery Factory monitoring snapshot (handoffs, outbox).
     try {
@@ -288,18 +259,20 @@ export function MonitoringSection() {
           <span className="mon-strip-detail">
             {services[0]?.latencyMs != null
               ? `${services[0].latencyMs} ms`
-              : (services[0]?.detail ?? "Checking…")}
+              : leadReady.state === "degraded" || leadReady.state === "down"
+                ? leadReady.detail
+                : (services[0]?.detail ?? "Checking…")}
           </span>
         </div>
         <div className="mon-strip-item">
-          <span className={stateDot(readyState)} />
+          <span className={stateDot(factoryReady.state)} />
           <strong>Delivery Factory</strong>
           <span className="mon-state">
-            {readyState === "up"
+            {factoryReady.state === "up"
               ? "READY"
-              : readyState.toUpperCase()}
+              : factoryReady.state.toUpperCase()}
           </span>
-          <span className="mon-strip-detail">{readyDetail}</span>
+          <span className="mon-strip-detail">{factoryReady.detail}</span>
         </div>
         <div className="mon-strip-item">
           <span
