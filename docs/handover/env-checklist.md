@@ -14,6 +14,8 @@ the client's own secret store; none are ever pasted into chat or tickets.
 | `DELIVERY_FACTORY_PUBLIC_KEY_PEM` | ☐ | Verifies feedback acks |
 | `DELIVERY_INTAKE_URL` | ☐ | `https://<df-host>/api/intake` |
 | `WORKER_SECRET` | ☐ | Bearer for `/api/v1/worker/tick` |
+| `QSTASH_CURRENT_SIGNING_KEY` / `QSTASH_NEXT_SIGNING_KEY` | ☐ | Verify QStash deliveries |
+| `LEAD_ENGINE_SCHEDULER_WORKSPACE_ID` | ☐ | Workspace the scheduler routes act on (legacy name `LEAD_ENGINE_CANARY_WORKSPACE_ID` still accepted) |
 | `NEON_DATA_API_URL` / `NEON_AUTH_URL` | ☐ | Required for `/api/health/ready` |
 | `ALLOWED_ORIGINS` | ☐ | Comma-separated HTTPS origins |
 | `APP_ENV` | ☐ | `production` |
@@ -34,14 +36,16 @@ the client's own secret store; none are ever pasted into chat or tickets.
 
 | Schedule | Target | Cadence | Set |
 |---|---|---|---|
-| Worker tick | LE `POST /api/v1/worker/tick` | every 5 min | ☐ |
-| Canary | LE `POST /api/v1/canary/run` | hourly | ☐ |
+| Worker tick | LE `POST /api/v1/worker/tick` | every 4 min | ☐ |
 | Feedback dispatch | DF `POST /api/internal/dispatch-feedback` | every 5 min | ☐ |
+
+(The hourly canary schedule was retired in LE v4; the worker tick now
+also runs the alert/incident reconcile.)
 
 ## Sign-off
 
 - [ ] `/api/health/live` → `ok` on both services
 - [ ] `/api/health/ready` → `ready` on both services
 - [ ] Synthetic handoff accepted end-to-end (intake → project → feedback)
-- [ ] 72-hour canary green
+- [ ] Worker tick delivering and the alert reconcile running inside it
 - Operator: ______________________ Date: __________

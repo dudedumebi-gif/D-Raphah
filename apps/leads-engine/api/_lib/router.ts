@@ -452,7 +452,8 @@ async function authenticatedRoutes(
       createAdminClient(),
       workspaceId,
     );
-    // Full-table job counts by mode + status. The jobs list above is a
+    // Full-table job counts (production-stamped rows, matching the
+    // production-only views). The jobs list above is a
     // 100-row window (newest first): deriving the Overview "Active
     // jobs / completed" card from it hides completions as soon as more
     // than 100 jobs exist — the first sprint batch's completed jobs
@@ -462,6 +463,7 @@ async function authenticatedRoutes(
       select status, count(*)::int as count
       from public.scrape_jobs
       where workspace_id = ${workspaceId}
+        and data_mode = 'production'
       group by status
     `) as unknown as Array<{
       status: string;
@@ -2022,6 +2024,18 @@ async function authenticatedRoutes(
           statusCode: 409,
         });
     }
+    // An adapter retired in a later release (e.g. toronto_open_data in
+    // v4) leaves persisted sources behind; fail with a clear 409 here
+    // instead of an "Unknown discovery adapter" error deep in the run
+    // (Codex P2 on PR #64). The v4 upgrade migration also deactivates
+    // those rows.
+    if (!DiscoveryAdapterIdSchema.safeParse(discoverySource.adapter_id).success)
+      throw Object.assign(
+        new Error(
+          `Discovery adapter '${discoverySource.adapter_id}' was retired in LE v4`,
+        ),
+        { statusCode: 409 },
+      );
     const requiredTerms = termsForAdapter(discoverySource.adapter_id);
     await requireTermsAcceptance(
       {

@@ -1,5 +1,6 @@
--- LE v4 (simplification wave): campaign schedule fields retired, and
--- open incidents of the retired canary/release-gate alert types closed.
+-- LE v4 (simplification wave): campaign schedule fields retired, open
+-- incidents of the retired canary/release-gate alert types closed, and
+-- persisted Toronto Open Data discovery sources deactivated.
 --
 -- The worker's enqueue_due_scrape_jobs() enqueues collection jobs for
 -- every campaign with schedule_enabled = true whose next_run_at is due.
@@ -40,6 +41,16 @@ where status = 'open'
     'soak_passed',
     'production_gate_passed'
   );
+
+-- The Toronto Open Data discovery adapter was removed from the registry
+-- in v4. A persisted active source would otherwise render as runnable
+-- and fail at run time; deactivate those rows (the run route also 409s
+-- on unregistered adapters). History (runs, candidates) is preserved.
+update public.discovery_sources
+set active = false,
+    updated_at = now()
+where adapter_id = 'toronto_open_data'
+  and active;
 
 insert into public.schema_versions(service, version)
 values ('lead-engine', '3.3.19')

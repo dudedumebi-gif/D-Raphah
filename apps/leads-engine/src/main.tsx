@@ -353,8 +353,22 @@ function Workspace({ session }: { session: Session }) {
     memberships.find((item) => item.workspace_id === workspaceId) ??
     memberships[0];
   // Data modes were collapsed in v4: every view shows the workspace's
-  // production data; the bootstrap is rendered as returned.
-  const visibleData = data;
+  // production data. Legacy rows stamped demo/pilot are pre-v4 fixtures
+  // (e.g. the canary soak's synthetic source and leads) and are never
+  // presented under the production label; server queries are
+  // stamp-agnostic, so this presentation guard is where pre-v4 stamps
+  // are excluded (Codex P1 on PR #64).
+  const isProductionRow = (row: { data_mode?: string | null }) =>
+    !row.data_mode || row.data_mode === "production";
+  const visibleData = data
+    ? {
+        ...data,
+        sources: data.sources.filter(isProductionRow),
+        campaigns: data.campaigns.filter(isProductionRow),
+        jobs: data.jobs.filter(isProductionRow),
+        leads: data.leads.filter(isProductionRow),
+      }
+    : data;
 
   // Keep every hook above this conditional render. Membership bootstrap is
   // asynchronous, so placing hooks below this return causes React to render a
@@ -1220,13 +1234,22 @@ export function Discovery({
                       {source.active ? "active" : "paused"}
                     </small>
                   </div>
-                  <button
-                    className="row-action"
-                    disabled={runningId !== null}
-                    onClick={() => void runSource(source.id, source.name)}
-                  >
-                    {runningId === source.id ? "Running…" : "Run now"}
-                  </button>
+                  {DISCOVERY_ADAPTERS[
+                    source.adapter_id as DiscoveryAdapterId
+                  ] ? (
+                    <button
+                      className="row-action"
+                      disabled={runningId !== null}
+                      onClick={() => void runSource(source.id, source.name)}
+                    >
+                      {runningId === source.id ? "Running…" : "Run now"}
+                    </button>
+                  ) : (
+                    <span className="muted">
+                      Adapter retired in LE v4 — this source can no longer
+                      run.
+                    </span>
+                  )}
                 </div>
               ))}
               {(sources ?? []).length === 0 ? (
