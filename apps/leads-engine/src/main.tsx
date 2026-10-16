@@ -3733,15 +3733,22 @@ function Status({ value }: { value: string }) {
   );
 }
 function HealthBadge({ data }: { data: BootstrapData }) {
-  // Health is worker presence on top of a loaded bootstrap (the
-  // bootstrap itself proves the database path). The canary release-gate
-  // semantics were retired with the canary subsystem in v4.
-  const healthy = data.operations.workers.length > 0;
+  // Health is a FRESH worker heartbeat on top of a loaded bootstrap
+  // (the bootstrap itself proves the database path) — the same 15-minute
+  // freshness rule /api/health/ready applies. Worker rows persist after
+  // a stall (pruning itself runs inside the tick), so presence alone
+  // would read healthy forever. The canary release-gate semantics were
+  // retired with the canary subsystem in v4.
+  const latestWorker = data.operations.workers[0];
+  const healthy =
+    latestWorker !== undefined &&
+    Date.now() - new Date(latestWorker.last_heartbeat_at).getTime() <
+      15 * 60_000;
   return (
     <div className="signal-box">
       <span className={`pulse ${healthy ? "" : "pulse-warn"}`} />
       <span>
-        <b>{healthy ? "Operational" : "Worker heartbeat missing"}</b>
+        <b>{healthy ? "Operational" : "Worker heartbeat stale"}</b>
         <small>
           {data.sources.filter((source) => source.status === "active").length}{" "}
           approved sources · {data.operations.workers.length} workers
