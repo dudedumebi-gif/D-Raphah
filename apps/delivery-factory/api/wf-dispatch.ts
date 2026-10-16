@@ -2,12 +2,10 @@ import type { ServerResponse } from "node:http";
 import { sendJson, type ApiRequest } from "./_lib/http.js";
 import indexHandler from "./_workflows/index.js";
 import catalogHandler from "./_workflows/catalog.js";
-import environmentResetHandler from "./_workflows/environments/reset.js";
 import workflowByIdHandler from "./_workflows/[id].js";
 import executeHandler from "./_workflows/[id]/execute.js";
 import workflowRunsHandler from "./_workflows/[id]/runs.js";
 import runDetailHandler from "./_workflows/runs/[runId].js";
-import draftReviseHandler from "./_workflows/drafts/revise.js";
 
 type Handler = (req: ApiRequest, res: ServerResponse) => Promise<void>;
 
@@ -45,24 +43,11 @@ export default async function wfDispatch(
 
   if (segments.length === 0) {
     handler = indexHandler as Handler;
-  } else if (
-    segments.length === 3 &&
-    segments[0] === "environments" &&
-    segments[2] === "reset"
-  ) {
-    query.environmentScope = segments[1];
-    handler = environmentResetHandler as Handler;
   } else if (segments.length === 1 && segments[0] === "catalog") {
     handler = catalogHandler as Handler;
   } else if (segments.length === 2 && segments[0] === "runs") {
     query.runId = segments[1];
     handler = runDetailHandler as Handler;
-  } else if (
-    segments.length === 2 &&
-    segments[0] === "drafts" &&
-    segments[1] === "revise"
-  ) {
-    handler = draftReviseHandler as Handler;
   } else if (segments.length === 1) {
     query.id = segments[0];
     handler = workflowByIdHandler as Handler;

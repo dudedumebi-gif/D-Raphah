@@ -1257,38 +1257,37 @@ describe("generateUseCaseWorkflowsForAcceptedPackage", () => {
 /* ── wiring contracts ────────────────────────────────────────────────── */
 
 describe("skeleton wiring", () => {
-  it("the intake hook generates skeletons before the trigger fires", () => {
+  it("the intake hook generates skeletons and nothing else fires", () => {
     const intake = readFileSync(
       new URL("../api/intake.ts", import.meta.url),
       "utf8",
     );
     expect(intake).toContain("generateUseCaseWorkflowsForAcceptedPackage");
-    expect(intake).toContain("triggerLeadHandoffWorkflows");
-    expect(
-      intake.indexOf("generateUseCaseWorkflowsForAcceptedPackage"),
-    ).toBeLessThan(intake.indexOf("await triggerLeadHandoffWorkflows"));
+    // DF v2 cut the lead_handoff trigger bundle: the hook keeps ONLY
+    // skeleton generation (fail-open).
+    expect(intake).not.toContain("triggerLeadHandoffWorkflows");
+    expect(intake).not.toContain("handoff-triggers");
   });
 
-  it("the Charter offers skeleton generation and lists skeletons", () => {
+  it("skeleton generation stays behind its route; the Charter has no begin surface", () => {
+    const route = readFileSync(
+      new URL(
+        "../api/_projects/[id]/workflow-skeletons.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(route).toContain("ensureUseCaseWorkflows");
     const charter = readFileSync(
       new URL("../src/charter.tsx", import.meta.url),
       "utf8",
     );
-    expect(charter).toContain("Create use-case workflows");
-    expect(charter).toContain("/workflow-skeletons");
-    expect(charter).toContain("Use-case workflows");
-    expect(charter).toContain("useCaseWorkflows");
-    // Partial success keeps the action available (Codex round 3),
-    // counted in COVERED skeletons so a machine-repairable row
-    // cannot hide the repair path (round 8) while an operator's
-    // protected draft settles its requirement (round 11).
-    expect(charter).toContain(
-      "useCaseWorkflowCoveredCount < state.requirementCount",
-    );
-    // Pending (possibly in-flight) rows schedule a re-check after
-    // the orphan grace (Codex round 12).
-    expect(charter).toContain("useCaseWorkflowPendingCount");
-    expect(charter).toContain("65_000");
+    // The Charter's Begin section (with its begin-state fetch) was
+    // cut in v2; the charter + KPI verification survive.
+    expect(charter).not.toContain("/begin");
+    expect(charter).not.toContain("BeginWorkflowSection");
+    expect(charter).toContain("/kpis/");
+    expect(charter).toContain("Verify KPI");
   });
 
   it("the route is registered in the project dispatcher", () => {

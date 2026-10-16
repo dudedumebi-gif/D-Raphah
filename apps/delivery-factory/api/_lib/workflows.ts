@@ -16,38 +16,19 @@ import {
   type DeliveryEnvironment,
   type NeonClient,
 } from "./db.js";
-import type { LeadEngineHandoffPackage } from "@raphah/handoff-contract";
-
 /* ── Types ─────────────────────────────────────────────────────────────── */
 
 export type WorkflowStatus = "draft" | "published" | "archived";
-export type WorkflowTriggerType =
-  | "webhook"
-  | "schedule"
-  | "manual"
-  | "lead_handoff"
-  | "event";
+export type WorkflowTriggerType = "manual";
 
 export type NodeType = "trigger" | "action" | "logic";
 export type NodeKind =
   // triggers
-  | "webhook"
-  | "schedule"
   | "manual"
-  | "lead_handoff"
   // actions
   | "send_email"
-  | "send_sms"
   | "ai_assist"
-  | "http_request"
-  | "log_database"
-  | "slack_notify"
-  | "create_project"
-  | "update_status"
-  | "assign_gate"
-  // logic
-  | "if_else"
-  | "wait";
+  | "log_database";
 
 export interface WorkflowNode {
   node_key: string;
@@ -144,36 +125,10 @@ export interface NodeSpec {
 export const NODE_CATALOG: NodeSpec[] = [
   // ── triggers ──
   {
-    kind: "webhook", type: "trigger", label: "Webhook", icon: "🪝",
-    description: "Start when an HTTP POST hits the workflow's webhook URL.",
-    defaultConfig: { path: "", secret: "" },
-    configSchema: [
-      { key: "path", label: "Path suffix", kind: "text", placeholder: "e.g. new-lead", help: "Appended to /api/workflows/trigger/" },
-      { key: "secret", label: "Shared secret (optional)", kind: "text", placeholder: "Bearer token expected in X-Webhook-Secret" },
-    ],
-  },
-  {
-    kind: "schedule", type: "trigger", label: "Schedule", icon: "⏰",
-    description: "Start on a cron schedule.",
-    defaultConfig: { cron: "0 9 * * *", timezone: "America/Toronto" },
-    configSchema: [
-      { key: "cron", label: "Cron expression", kind: "text", placeholder: "0 9 * * *" },
-      { key: "timezone", label: "Timezone", kind: "text", placeholder: "America/Toronto" },
-    ],
-  },
-  {
     kind: "manual", type: "trigger", label: "Manual", icon: "▶️",
     description: "Start from the dashboard or API.",
     defaultConfig: {},
     configSchema: [],
-  },
-  {
-    kind: "lead_handoff", type: "trigger", label: "Lead Handoff", icon: "📥",
-    description: "Start when the Lead Engine delivers an accepted handoff package.",
-    defaultConfig: { minScore: 0 },
-    configSchema: [
-      { key: "minScore", label: "Minimum lead score", kind: "number", placeholder: "0" },
-    ],
   },
   // ── actions ──
   {
@@ -188,15 +143,6 @@ export const NODE_CATALOG: NodeSpec[] = [
     ],
   },
   {
-    kind: "send_sms", type: "action", label: "Send SMS", icon: "📱",
-    description: "Send (or draft) an SMS via the configured provider. With no provider, records the draft for human approval per the no-automated-outreach rule.",
-    defaultConfig: { to: "", message: "" },
-    configSchema: [
-      { key: "to", label: "Recipient phone", kind: "text", placeholder: "+14165550123" },
-      { key: "message", label: "Message", kind: "textarea", placeholder: "Hi {{lead.name}}, thanks for contacting us…" },
-    ],
-  },
-  {
     kind: "ai_assist", type: "action", label: "AI Assist", icon: "🤖",
     description: "Draft content with an AI model (summaries, replies, content). Output lands in the run context for a human to review — never sent automatically.",
     defaultConfig: { model: "gpt-4o-mini", systemPrompt: "", userPrompt: "", maxTokens: 500 },
@@ -208,93 +154,14 @@ export const NODE_CATALOG: NodeSpec[] = [
     ],
   },
   {
-    kind: "http_request", type: "action", label: "HTTP Request", icon: "🌐",
-    description: "Call any HTTPS endpoint. Body supports {{path}} templates and a JSON payload editor.",
-    defaultConfig: { method: "POST", url: "", headers: {}, body: {} },
-    configSchema: [
-      { key: "method", label: "Method", kind: "select", options: [
-        { value: "GET", label: "GET" }, { value: "POST", label: "POST" },
-        { value: "PUT", label: "PUT" }, { value: "PATCH", label: "PATCH" },
-        { value: "DELETE", label: "DELETE" },
-      ]},
-      { key: "url", label: "URL", kind: "text", placeholder: "https://api.example.com/hook" },
-      { key: "headers", label: "Headers (JSON)", kind: "json" },
-      { key: "body", label: "JSON payload", kind: "json" },
-    ],
-  },
-  {
     kind: "log_database", type: "action", label: "Log to Database", icon: "🗄️",
-    description: "Write an audit entry into the delivery audit log.",
+    description: "Record a log entry on the run — the message is stored with this step's output in the run record.",
     defaultConfig: { message: "", level: "info" },
     configSchema: [
       { key: "message", label: "Message", kind: "textarea", placeholder: "Workflow {{workflow.name}} ran" },
       { key: "level", label: "Level", kind: "select", options: [
         { value: "info", label: "Info" }, { value: "warn", label: "Warning" }, { value: "error", label: "Error" },
       ]},
-    ],
-  },
-  {
-    kind: "slack_notify", type: "action", label: "Slack", icon: "💬",
-    description: "Post a message to a Slack channel via incoming webhook.",
-    defaultConfig: { webhookUrl: "", message: "" },
-    configSchema: [
-      { key: "webhookUrl", label: "Incoming webhook URL", kind: "text", placeholder: "https://hooks.slack.com/..." },
-      { key: "message", label: "Message", kind: "textarea", placeholder: "New lead: {{lead.name}}" },
-    ],
-  },
-  {
-    kind: "create_project", type: "action", label: "Create Project", icon: "📁",
-    description: "Create a Delivery Factory project (e.g. from an accepted lead).",
-    defaultConfig: { name: "{{lead.name}}", client: "{{lead.company}}" },
-    configSchema: [
-      { key: "name", label: "Project name", kind: "text" },
-      { key: "client", label: "Client", kind: "text" },
-    ],
-  },
-  {
-    kind: "update_status", type: "action", label: "Update System Status", icon: "✅",
-    description: "Record a status heartbeat for monitoring dashboards.",
-    defaultConfig: { service: "delivery-factory", status: "ok", note: "" },
-    configSchema: [
-      { key: "service", label: "Service", kind: "text" },
-      { key: "status", label: "Status", kind: "select", options: [
-        { value: "ok", label: "OK" }, { value: "degraded", label: "Degraded" }, { value: "down", label: "Down" },
-      ]},
-      { key: "note", label: "Note", kind: "text" },
-    ],
-  },
-  {
-    kind: "assign_gate", type: "action", label: "Assign Gate", icon: "🚦",
-    description: "Add a review gate (milestone) to a project. projectId accepts {{node_<key>.project_id}} from a Create Project step.",
-    defaultConfig: { projectId: "", label: "Client review", targetDate: "" },
-    configSchema: [
-      { key: "projectId", label: "Project ID", kind: "text", placeholder: "{{node_node-3.project_id}}" },
-      { key: "label", label: "Gate label", kind: "text" },
-      { key: "targetDate", label: "Target date (YYYY-MM-DD)", kind: "text" },
-    ],
-  },
-  // ── logic ──
-  {
-    kind: "if_else", type: "logic", label: "If / Else", icon: "🔀",
-    description: "Branch on a condition. True port → 'true' edge, else → 'false' edge.",
-    defaultConfig: { field: "", operator: "exists", value: "" },
-    configSchema: [
-      { key: "field", label: "Field path", kind: "text", placeholder: "lead.score" },
-      { key: "operator", label: "Operator", kind: "select", options: [
-        { value: "exists", label: "exists" }, { value: "equals", label: "equals" },
-        { value: "not_equals", label: "not equals" }, { value: "gt", label: "greater than" },
-        { value: "gte", label: "greater or equal" }, { value: "lt", label: "less than" },
-        { value: "contains", label: "contains" },
-      ]},
-      { key: "value", label: "Compare value", kind: "text" },
-    ],
-  },
-  {
-    kind: "wait", type: "logic", label: "Wait", icon: "⏳",
-    description: "Pause before continuing. (Long waits are clamped in serverless.)",
-    defaultConfig: { seconds: 5 },
-    configSchema: [
-      { key: "seconds", label: "Seconds", kind: "number", placeholder: "5", help: "Clamped to 60s per execution step" },
     ],
   },
 ];
@@ -359,34 +226,6 @@ export function renderTemplate(
   return template;
 }
 
-function getPath(context: Record<string, unknown>, path: string): unknown {
-  return path.split(".").reduce<unknown>(
-    (acc, key) => (acc != null && typeof acc === "object"
-      ? (acc as Record<string, unknown>)[key]
-      : undefined),
-    context,
-  );
-}
-
-function evaluateCondition(
-  field: string,
-  operator: string,
-  value: string,
-  context: Record<string, unknown>,
-): boolean {
-  const actual = getPath(context, field);
-  switch (operator) {
-    case "exists": return actual !== undefined && actual !== null && actual !== "";
-    case "equals": return String(actual ?? "") === value;
-    case "not_equals": return String(actual ?? "") !== value;
-    case "gt": return Number(actual) > Number(value);
-    case "gte": return Number(actual) >= Number(value);
-    case "lt": return Number(actual) < Number(value);
-    case "contains": return String(actual ?? "").includes(value);
-    default: return false;
-  }
-}
-
 /* ── CRUD ──────────────────────────────────────────────────────────────── */
 
 export async function listWorkflows(
@@ -421,238 +260,12 @@ export async function listWorkflows(
   }));
 }
 
-export interface TriggerableWorkflow {
-  id: string;
-  name: string;
-  environment: DeliveryEnvironment;
-  trigger_config: Record<string, unknown> | null;
-}
-
-/**
- * Published workflows subscribed to a trigger type (e.g. 'lead_handoff')
- * within one environment scope. Trigger matching reuses the workflows
- * table's own trigger_type column — there is no second trigger registry —
- * and the environment filter is what keeps demo automation and production
- * automation from ever firing for each other's events.
- */
-export async function listPublishedWorkflowsByTrigger(
-  db: NeonClient,
-  triggerType: string,
-  environment: DeliveryEnvironment,
-): Promise<TriggerableWorkflow[]> {
-  const rows = await q(db)`
-    select id, name, trigger_config, environment
-    from public.workflows
-    where trigger_type = ${triggerType} and status = 'published'
-      and environment = ${environment}
-    order by created_at asc`;
-  return rows.map((r) => ({
-    id: r.id as string,
-    name: r.name as string,
-    environment: rowEnvironment(r.environment),
-    trigger_config: (r.trigger_config ?? null) as Record<string, unknown> | null,
-  }));
-}
-
-export interface LeadHandoffTriggerPayload {
-  lead: { name: string; phone?: string; score?: number };
-  organization_name: string;
-  /** The full accepted package, for templates that need more than the lead summary. */
-  package: LeadEngineHandoffPackage;
-}
-
-/**
- * Shapes an accepted handoff package into the trigger payload that
- * 'lead_handoff' templates reference ({{trigger.lead.name}},
- * {{trigger.lead.phone}}, {{trigger.lead.score}}, {{trigger.organization_name}}).
- *
- * The v1 contract carries no phone number and no numeric lead score, so both
- * are undefined here — renderTemplate substitutes "" for missing values and
- * templates must tolerate their absence. Recording a basis here never
- * authorizes sending: DF outreach nodes stay draft-first with human approval.
- */
-export interface LeadHandoffRunRef {
-  id: string;
-  status: string;
-}
-
-/**
- * The earliest live (not failed/cancelled) lead_handoff run of this
- * workflow for this handoff package, if any. The manual project begin
- * uses it to stay idempotent: a package accepted while the workflow
- * was already published was already offered to it by the intake
- * trigger, so beginning again must not execute it a second time.
- * Failed/cancelled runs don't count — delivery never started, and
- * the operator may retry.
- */
-export async function findLeadHandoffRunForPackage(
-  db: NeonClient,
-  input: {
-    workflowId: string;
-    packageId: string;
-    environment: DeliveryEnvironment;
-  },
-): Promise<LeadHandoffRunRef | null> {
-  const rows = await q(db)`
-    select id, status
-    from public.workflow_runs
-    where workflow_id = ${input.workflowId}
-      and environment = ${input.environment}
-      and trigger_type = 'lead_handoff'
-      and status not in ('failed', 'cancelled')
-      and trigger_payload->'package'->>'packageId' = ${input.packageId}
-    order by started_at asc
-    limit 1`;
-  if (!rows.length) return null;
-  return { id: String(rows[0].id), status: String(rows[0].status) };
-}
-
-/* ── Project workflow starts (the begin reservation) ──────────────────
-   One row per (project, workflow): the atomic claim that makes the
-   manual begin idempotent under concurrency. workflow_runs has no
-   uniqueness guarantee for a package, so "check for a run, then
-   execute" races — two begins could both execute. Claiming the start
-   row first (INSERT ... ON CONFLICT DO NOTHING) means exactly one
-   caller ever owns execution; everyone else adopts, waits (409), or
-   claims the retry of a failed start. See the migration
-   202610140001_project_workflow_starts. */
-
-export type ProjectWorkflowStartState = "reserved" | "completed" | "failed";
-
-export interface ProjectWorkflowStart {
-  id: string;
-  project_id: string;
-  workflow_id: string;
-  package_id: string;
-  environment: DeliveryEnvironment;
-  run_id: string | null;
-  state: ProjectWorkflowStartState;
-  created_at: string;
-  updated_at: string;
-}
-
-function mapProjectWorkflowStart(
-  r: Record<string, unknown>,
-): ProjectWorkflowStart {
-  return {
-    id: String(r.id),
-    project_id: String(r.project_id),
-    workflow_id: String(r.workflow_id),
-    package_id: String(r.package_id),
-    environment: rowEnvironment(r.environment),
-    run_id: r.run_id ? String(r.run_id) : null,
-    state: r.state as ProjectWorkflowStartState,
-    created_at: String(r.created_at),
-    updated_at: String(r.updated_at),
-  };
-}
-
-export async function getProjectWorkflowStart(
-  db: NeonClient,
-  projectId: string,
-  workflowId: string,
-): Promise<ProjectWorkflowStart | null> {
-  const rows = await q(db)`
-    select id, project_id, workflow_id, package_id, environment,
-           run_id, state, created_at, updated_at
-    from public.project_workflow_starts
-    where project_id = ${projectId} and workflow_id = ${workflowId}`;
-  if (!rows.length) return null;
-  return mapProjectWorkflowStart(rows[0]);
-}
-
-/**
- * Atomically claim the start for (project, workflow). Returns the new
- * row's id when this caller won the claim, or null when a row already
- * existed (the caller must then read and honor it). The initial state
- * is the caller's to choose: 'reserved' for a fresh execution claim,
- * or — when adopting a run that already exists — the state that run
- * maps to, with its run_id recorded at claim time.
- */
-export async function claimProjectWorkflowStart(
-  db: NeonClient,
-  input: {
-    projectId: string;
-    workflowId: string;
-    packageId: string;
-    environment: DeliveryEnvironment;
-    runId: string | null;
-    state: ProjectWorkflowStartState;
-  },
-): Promise<string | null> {
-  const rows = await q(db)`
-    insert into public.project_workflow_starts
-      (project_id, workflow_id, package_id, environment, run_id, state)
-    values (${input.projectId}, ${input.workflowId}, ${input.packageId},
-            ${input.environment}, ${input.runId}, ${input.state})
-    on conflict (project_id, workflow_id) do nothing
-    returning id`;
-  if (!rows.length) return null;
-  return String(rows[0].id);
-}
-
-/** Record the outcome of an owned start: the run it produced and the
- *  terminal state that run maps to. */
-export async function settleProjectWorkflowStart(
-  db: NeonClient,
-  id: string,
-  runId: string | null,
-  state: ProjectWorkflowStartState,
-): Promise<void> {
-  await q(db)`
-    update public.project_workflow_starts
-    set run_id = ${runId}, state = ${state}, updated_at = now()
-    where id = ${id}`;
-}
-
-/**
- * Claim the retry of a failed start. Returns true when this caller won
- * (the row is 'reserved' again, with no run yet); false when another
- * caller claimed it first.
- */
-export async function retryProjectWorkflowStart(
-  db: NeonClient,
-  id: string,
-): Promise<boolean> {
-  const rows = await q(db)`
-    update public.project_workflow_starts
-    set state = 'reserved', run_id = null, updated_at = now()
-    where id = ${id} and state = 'failed'
-    returning id`;
-  return rows.length > 0;
-}
-
-/**
- * Claim the retry of a start whose recorded run failed, was
- * cancelled, or vanished — as ONE conditional update (Codex on
- * PR #53). The previous shape settled the row to 'failed'
- * unconditionally and then claimed the retry as a second step: two
- * concurrent begins could both settle, and the loser's settle could
- * overwrite the winner's fresh reservation back to 'failed',
- * letting both claim and execute. Keyed on the exact (state,
- * run_id) the caller observed, exactly one caller wins.
- */
-export async function claimFailedRunRetry(
-  db: NeonClient,
-  id: string,
-  runId: string,
-): Promise<boolean> {
-  const rows = await q(db)`
-    update public.project_workflow_starts
-    set run_id = null, state = 'reserved', updated_at = now()
-    where id = ${id} and state = 'reserved' and run_id = ${runId}
-    returning id`;
-  return rows.length > 0;
-}
-
 /**
  * The delivery project a handoff package produced, if one exists.
- * Intake persists the project before the trigger hook runs, so the
- * trigger can reserve its start through the same row the manual
- * begin claims. A lookup failure (e.g. the reservation migration
- * has not run yet) resolves to null and the caller falls back to
- * the pre-reservation direct execution — the intake path must never
- * break on the reservation layer.
+ * Intake persists the project before the skeleton-generation hook
+ * runs, so the hook can attribute generated skeletons to the
+ * project. A lookup failure resolves to null — the intake path
+ * must never break on this lookup.
  */
 export async function getProjectIdForPackage(
   db: NeonClient,
@@ -670,40 +283,6 @@ export async function getProjectIdForPackage(
   } catch {
     return null;
   }
-}
-
-/**
- * Reclaim a start whose claimant crashed between claiming and
- * executing: still 'reserved', no run recorded, and the claim is
- * older than ten minutes (the staleness test runs in SQL so no
- * client-side clock or driver Date handling is involved). Returns
- * true when this caller now owns the start.
- */
-export async function reclaimStaleProjectWorkflowStart(
-  db: NeonClient,
-  id: string,
-): Promise<boolean> {
-  const rows = await q(db)`
-    update public.project_workflow_starts
-    set created_at = now(), updated_at = now()
-    where id = ${id} and state = 'reserved' and run_id is null
-      and updated_at < now() - interval '10 minutes'
-    returning id`;
-  return rows.length > 0;
-}
-
-export function buildLeadHandoffTriggerPayload(
-  pkg: LeadEngineHandoffPackage,
-): LeadHandoffTriggerPayload {
-  return {
-    lead: {
-      name: pkg.stakeholders[0]?.name ?? pkg.organization.name,
-      phone: undefined,
-      score: undefined,
-    },
-    organization_name: pkg.organization.name,
-    package: pkg,
-  };
 }
 
 export async function getWorkflow(
@@ -958,77 +537,9 @@ export interface ExecutionHooks {
   sendEmail?: (args: {
     to: string; subject: string; body: string; encryptSensitive: boolean;
   }) => Promise<Record<string, unknown>>;
-  sendSms?: (args: {
-    to: string; message: string;
-  }) => Promise<Record<string, unknown>>;
   aiAssist?: (args: {
     model: string; systemPrompt: string; userPrompt: string; maxTokens: number;
   }) => Promise<Record<string, unknown>>;
-  httpRequest?: (args: {
-    method: string; url: string;
-    headers: Record<string, string>; body: unknown;
-  }) => Promise<Record<string, unknown>>;
-  auditLog?: (args: { message: string; level: string }) => Promise<void>;
-}
-
-/* ── Draft revision (the approval gate's redraft loop) ───────────────
-   When an admin sends a draft back with a note, the note and the
-   current draft go to the same AI provider seam the ai_assist node
-   uses. With no provider configured the result is the same honest
-   stub the engine records for ai_assist: the note is preserved
-   verbatim and no revised text is fabricated. */
-
-export interface DraftRevision {
-  revisedDraft: string | null;
-  provider: "llm" | "stub";
-  model: string;
-  note: string;
-}
-
-export async function reviseDraft(
-  args: { draft: string; feedback: string; model?: string },
-  hooks: ExecutionHooks = {},
-): Promise<DraftRevision> {
-  const model = args.model ?? "gpt-4o-mini";
-  if (hooks.aiAssist) {
-    const out = await hooks.aiAssist({
-      model,
-      systemPrompt:
-        "You revise drafted customer messages. Apply the admin's requested changes to the draft and return only the revised message text — no commentary, no surrounding quotes.",
-      userPrompt: `Current draft:\n${args.draft}\n\nAdmin's requested changes:\n${args.feedback}`,
-      maxTokens: 800,
-    });
-    const text =
-      typeof out.output === "string" && out.output
-        ? out.output
-        : typeof out.text === "string" && out.text
-          ? out.text
-          : null;
-    if (text) {
-      return {
-        revisedDraft: text,
-        provider: "llm",
-        model,
-        note: "Revised by the AI provider from the admin's note.",
-      };
-    }
-  }
-  return {
-    revisedDraft: null,
-    provider: "stub",
-    model,
-    note: `[draft stub — no AI provider configured] Revision requested: ${args.feedback.slice(0, 200)}`,
-  };
-}
-
-/** Append a row to the workflow audit log (the engine's own trail). */
-export async function recordWorkflowAudit(
-  db: NeonClient,
-  args: { runId: string; workflowId: string; level: string; message: string },
-): Promise<void> {
-  await q(db)`
-    insert into public.workflow_audit_log (run_id, workflow_id, level, message)
-    values (${args.runId}, ${args.workflowId}, ${args.level}, ${args.message})`;
 }
 
 const DEFAULT_MAX_STEPS = 100;
@@ -1055,7 +566,6 @@ export async function executeWorkflow(
 
   const wfId = wf.id;
   const wfName = wf.name;
-  const wfEnvironment = wf.environment;
   const context: Record<string, unknown> = {
     trigger: triggerPayload,
     workflow: { id: wfId, name: wfName },
@@ -1133,19 +643,6 @@ export async function executeWorkflow(
         // No provider configured: record intent, mark delivered=false.
         return { delivered: false, queued: true, ...args };
       }
-      case "send_sms": {
-        const args = {
-          to: String(cfg.to ?? ""),
-          message: String(cfg.message ?? ""),
-        };
-        if (!args.to) throw new Error("send_sms: 'to' is required");
-        if (!args.message) throw new Error("send_sms: 'message' is required");
-        if (hooks.sendSms) return hooks.sendSms(args);
-        // No provider configured: record the draft for human approval.
-        // House rule: no automated outreach sending in MVP — a human
-        // approves and sends drafted messages.
-        return { delivered: false, queued: true, draft: true, ...args };
-      }
       case "ai_assist": {
         const args = {
           model: String(cfg.model ?? "gpt-4o-mini"),
@@ -1164,138 +661,13 @@ export async function executeWorkflow(
           output: `[draft stub — no AI provider configured] ${args.userPrompt.slice(0, 200)}`,
         };
       }
-      case "http_request": {
-        const method = String(cfg.method ?? "POST").toUpperCase();
-        const url = String(cfg.url ?? "");
-        if (!url.startsWith("https://")) {
-          throw new Error("http_request: only https:// URLs are allowed");
-        }
-        const headers = (cfg.headers ?? {}) as Record<string, string>;
-        const body = cfg.body ?? null;
-        if (hooks.httpRequest) return hooks.httpRequest({ method, url, headers, body });
-        const res = await fetch(url, {
-          method,
-          headers: { "content-type": "application/json", ...headers },
-          body: method === "GET" ? undefined : JSON.stringify(body),
-          signal: AbortSignal.timeout(15000),
-        });
-        const text = await res.text();
-        let parsed: unknown = text;
-        try { parsed = JSON.parse(text); } catch { /* keep text */ }
-        if (!res.ok) {
-          throw new Error(`http_request: ${method} ${url} -> ${res.status}`);
-        }
-        return { status: res.status, body: parsed };
-      }
       case "log_database": {
+        // The log entry lives in this step's own output in the run
+        // record, like every other step — there is no separate
+        // audit-log write.
         const message = String(cfg.message ?? "");
         const level = String(cfg.level ?? "info");
-        if (hooks.auditLog) await hooks.auditLog({ message, level });
-        else {
-          await q(db)`insert into public.workflow_audit_log
-                     (run_id, workflow_id, level, message)
-                   values (${runId}, ${workflowId}, ${level}, ${message})`;
-        }
-        return { logged: true, level };
-      }
-      case "slack_notify": {
-        const webhookUrl = String(cfg.webhookUrl ?? "");
-        const message = String(cfg.message ?? "");
-        if (!webhookUrl.startsWith("https://hooks.slack.com/")) {
-          throw new Error("slack_notify: invalid Slack webhook URL");
-        }
-        const res = await fetch(webhookUrl, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text: message }),
-          signal: AbortSignal.timeout(15000),
-        });
-        if (!res.ok) throw new Error(`slack_notify: Slack -> ${res.status}`);
-        return { posted: true };
-      }
-      case "create_project": {
-        // delivery_projects requires a handoff_inbox row. For lead_handoff
-        // triggers the inbox context comes from the trigger payload;
-        // synthetic/manual runs create a synthetic inbox row first.
-        const handoff = (context.handoff ?? {}) as Record<string, unknown>;
-        let inboxId = handoff.inbox_id as string | undefined;
-        let packageId = handoff.package_id as string | undefined;
-        let packageVersion = Number(handoff.package_version ?? 1);
-        let opportunityId = handoff.opportunity_id as string | undefined;
-        let organizationName = String(
-          cfg.client ?? handoff.organization_name ?? "Synthetic client",
-        );
-        if (!inboxId) {
-          // PROD guard: fabricating a handoff_inbox row bypasses intake
-          // signature verification. Only allow it for demos/tests when the
-          // operator explicitly opts in; production runs must originate from
-          // a verified handoff (lead_handoff trigger context).
-          if (process.env.WORKFLOW_SYNTHETIC_PROJECTS !== "1") {
-            throw new Error(
-              "create_project requires a verified handoff context; synthetic inbox " +
-                "fabrication is disabled (set WORKFLOW_SYNTHETIC_PROJECTS=1 to allow)",
-            );
-          }
-          const syntheticKey = `synthetic-${runId}`;
-          const pkg = {
-            synthetic: true,
-            name: String(cfg.name ?? "Untitled project"),
-            organization_name: organizationName,
-            generated_by: `workflow:${wfId}`,
-            generated_at: new Date().toISOString(),
-          };
-          const inboxRows = await q(db)`
-            insert into public.handoff_inbox
-              (idempotency_key, package, manifest_checksum, signature, status,
-               environment)
-            values (
-              ${syntheticKey},
-              ${JSON.stringify(pkg)}::jsonb,
-              ${"0".repeat(64)},
-              'synthetic',
-              'processed',
-              ${wfEnvironment}
-            )
-            returning id`;
-          inboxId = inboxRows[0].id as string;
-          packageId = packageId ?? crypto.randomUUID();
-          opportunityId = opportunityId ?? crypto.randomUUID();
-          packageVersion = 1;
-        }
-        const name = String(cfg.name ?? "Untitled project");
-        const rows = await q(db)`
-          insert into public.delivery_projects
-            (inbox_id, package_id, package_version, opportunity_id,
-             organization_name, name, environment)
-          values (
-            ${inboxId}, ${packageId}, ${packageVersion}, ${opportunityId},
-            ${organizationName}, ${name}, ${wfEnvironment}
-          )
-          returning id`;
-        return { project_id: rows[0].id as string, name };
-      }
-      case "update_status": {
-        return {
-          service: String(cfg.service ?? "delivery-factory"),
-          status: String(cfg.status ?? "ok"),
-          note: String(cfg.note ?? ""),
-          at: new Date().toISOString(),
-        };
-      }
-      case "assign_gate": {
-        // Gates are modelled as review milestones on a delivery project.
-        // projectId may be a literal UUID or reference a prior
-        // create_project step via {{node_<node_key>.project_id}}.
-        const projectId = String(cfg.projectId ?? "");
-        if (!projectId) {
-          throw new Error("assign_gate: 'projectId' is required");
-        }
-        const rows = await q(db)`
-          insert into public.milestones (project_id, title, target_date)
-          values (${projectId}, ${String(cfg.label ?? "Review gate")},
-                  ${String(cfg.targetDate ?? "") || null})
-          returning id`;
-        return { gate_id: rows[0].id as string };
+        return { logged: true, level, message };
       }
       default:
         throw new Error(`Unsupported action kind: ${node.kind}`);
@@ -1327,37 +699,6 @@ export async function executeWorkflow(
       if (node.type === "trigger") {
         await recordStep(node, "success", { trigger: triggerPayload }, null, null);
         for (const e of edgesFrom.get(key) ?? []) queue.push(e.to_node_key);
-        continue;
-      }
-
-      if (node.kind === "wait") {
-        const seconds = Math.min(Math.max(Number(cfg.seconds ?? 5), 0), 60);
-        const stepId = await recordStep(node, "running", { seconds }, null, null);
-        await new Promise((r) => setTimeout(r, seconds * 1000));
-        await finishStep(stepId, "success", { waited: true }, null);
-        for (const e of edgesFrom.get(key) ?? []) queue.push(e.to_node_key);
-        continue;
-      }
-
-      if (node.kind === "if_else") {
-        const result = evaluateCondition(
-          String(cfg.field ?? ""),
-          String(cfg.operator ?? "exists"),
-          String(cfg.value ?? ""),
-          context,
-        );
-        const port = result ? "true" : "false";
-        await recordStep(
-          node, "success",
-          { field: cfg.field, operator: cfg.operator, value: cfg.value },
-          { result, port }, null,
-        );
-        context[`branch_${node.node_key}`] = result;
-        for (const e of (edgesFrom.get(key) ?? []).filter(
-          (e) => !e.from_port || e.from_port === port,
-        )) {
-          queue.push(e.to_node_key);
-        }
         continue;
       }
 

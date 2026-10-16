@@ -4,7 +4,6 @@ import {
   type ClarificationRow,
   type DeliveryDb,
   type DeliveryEnvironment,
-  type DemoResetSummary,
   type FeedbackEventRow,
   type InboxRow,
   type MilestoneRow,
@@ -35,12 +34,6 @@ export class FakeDeliveryDb implements DeliveryDb {
     changedBy?: string;
   }> = [];
   operatorSessions = new Map<string, string>();
-  /** Minimal workflow registry for the demo-reset contract:
-   *  id -> { environment, trigger_config }. */
-  workflows = new Map<
-    string,
-    { environment: string; trigger_config: Record<string, unknown> }
-  >();
 
   inboxCount(): number {
     return this.inboxes.size;
@@ -146,37 +139,6 @@ export class FakeDeliveryDb implements DeliveryDb {
     );
     this.clarifications.set(projectId, []);
     return { inboxId, project };
-  }
-
-  async resetDemoEnvironment(): Promise<DemoResetSummary> {
-    // The fake keeps no workflow_runs store; runs are covered by the
-    // engine-level fakes in the workflow suites.
-    let workflows = 0;
-    for (const [id, wf] of this.workflows) {
-      if (wf.environment !== "demo") continue;
-      // Generated skeletons (linkage keys present) reset with
-      // their package; hand-built demo fixtures are kept.
-      if (!("projectId" in wf.trigger_config)) continue;
-      if (!("requirementId" in wf.trigger_config)) continue;
-      this.workflows.delete(id);
-      workflows += 1;
-    }
-    let projects = 0;
-    for (const [id, project] of this.projects) {
-      if (project.environment !== "demo") continue;
-      this.projects.delete(id);
-      this.kpis.delete(id);
-      this.milestones.delete(id);
-      this.clarifications.delete(id);
-      projects += 1;
-    }
-    let inbox = 0;
-    for (const [key, row] of this.inboxes) {
-      if (row.environment !== "demo") continue;
-      this.inboxes.delete(key);
-      inbox += 1;
-    }
-    return { workflowRuns: 0, projects, inbox, workflows };
   }
 
   async getProject(id: string): Promise<ProjectRow | null> {

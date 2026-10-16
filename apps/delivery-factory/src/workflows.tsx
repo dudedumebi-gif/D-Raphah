@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAuthToken, notifyUnauthorized } from "./auth";
 import type { DeliveryEnvironment } from "./environment";
-import { WalkthroughView } from "./walkthrough";
-import { ExportPanel } from "./export-panel";
 
 /* ── Types (mirror api/_lib/workflows.ts) ─────────────────────────────── */
 
@@ -119,7 +117,6 @@ function WorkflowList(props: {
   onNew: () => void;
   refreshToken: number;
   environment: DeliveryEnvironment;
-  onWalkthrough?: () => void;
 }) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -196,11 +193,6 @@ function WorkflowList(props: {
           </p>
         </div>
         <div className="wf-list-actions">
-          {props.onWalkthrough ? (
-            <button className="btn-ghost" onClick={props.onWalkthrough}>
-              ▶ Demo walkthrough
-            </button>
-          ) : null}
           <button className="btn-primary" onClick={props.onNew}>
             + New workflow
           </button>
@@ -892,8 +884,6 @@ export function WorkflowsSection(props: {
 }) {
   const [catalog, setCatalog] = useState<NodeSpec[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [walkthroughOpen, setWalkthroughOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
   const [workflow, setWorkflow] = useState<WorkflowDetail | null>(null);
   const [tab, setTab] = useState<"builder" | "runs">("builder");
   const [name, setName] = useState("");
@@ -1066,14 +1056,6 @@ export function WorkflowsSection(props: {
     }
   }
 
-  if (walkthroughOpen && props.environment === "demo" && !openId) {
-    return (
-      <div className="wf-section">
-        <WalkthroughView onClose={() => setWalkthroughOpen(false)} />
-      </div>
-    );
-  }
-
   if (!openId || !workflow) {
     return (
       <div className="wf-section">
@@ -1083,11 +1065,6 @@ export function WorkflowsSection(props: {
           onNew={createNew}
           refreshToken={refreshToken}
           environment={props.environment}
-          onWalkthrough={
-            props.environment === "demo"
-              ? () => setWalkthroughOpen(true)
-              : undefined
-          }
         />
       </div>
     );
@@ -1127,9 +1104,6 @@ export function WorkflowsSection(props: {
           </button>
         </div>
         <div className="wf-actions">
-          <button className="btn-ghost" onClick={() => setExportOpen(true)}>
-            Export
-          </button>
           <button
             className="btn-ghost"
             onClick={save}
@@ -1191,12 +1165,6 @@ export function WorkflowsSection(props: {
       ) : (
         <RunHistory workflowId={workflow.id} />
       )}
-      {exportOpen ? (
-        <ExportPanel
-          workflow={workflow}
-          onClose={() => setExportOpen(false)}
-        />
-      ) : null}
     </div>
   );
 }
