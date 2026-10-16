@@ -52,6 +52,28 @@ set active = false,
 where adapter_id = 'toronto_open_data'
   and active;
 
+-- Retiring the scheduled-discovery schedule (configure-qstash.mjs
+-- deletes raphah-lead-discovery-v1) also strands any OPEN
+-- qstash_delivery_failed incident recorded against it: no future
+-- delivery can succeed to resolve it. Close those rows too - matched
+-- by the schedule id the failure recorder stores as resource_id, or
+-- by the retired destination URL when no schedule id was recorded.
+-- Delivery-failure incidents for schedules that still exist are NOT
+-- touched; they resolve on their next successful delivery.
+update public.alert_log
+set status = 'resolved',
+    resolved_at = now(),
+    last_observed_at = now(),
+    last_notified_at = now(),
+    last_transition = 'resolved',
+    reason = 'Schedule raphah-lead-discovery-v1 retired in LE v4 (route removed); incident closed by migration 202610150001.'
+where status = 'open'
+  and alert_type = 'qstash_delivery_failed'
+  and (
+    resource_id = 'raphah-lead-discovery-v1'
+    or resource_id like '%/api/v1/discovery/scheduled-run'
+  );
+
 insert into public.schema_versions(service, version)
 values ('lead-engine', '3.3.19')
 on conflict (service) do update
