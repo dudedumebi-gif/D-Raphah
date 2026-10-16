@@ -44,9 +44,11 @@ export interface WorkflowFamily<T extends FamilyMemberLike> {
    * authoritative organizationName once it is loaded. */
   title: string;
   workflows: T[];
+  /** The family's skeleton lineage refs, in list order — the input
+   * the charter summary matches requirements against. */
+  skeletons: SkeletonRef[];
   /** Requirements this family's skeletons implement (ordered, deduped). */
   requirementIds: string[];
-  requirementCodes: string[];
 }
 
 const NAME_SEPARATOR = " — ";
@@ -81,20 +83,15 @@ export function groupWorkflowsByFamily<T extends FamilyMemberLike>(
         projectId: ref.projectId,
         title: "Project family",
         workflows: [],
+        skeletons: [],
         requirementIds: [],
-        requirementCodes: [],
       };
       byProject.set(ref.projectId, family);
     }
     family.workflows.push(w);
+    family.skeletons.push(ref);
     if (ref.requirementId && !family.requirementIds.includes(ref.requirementId)) {
       family.requirementIds.push(ref.requirementId);
-    }
-    if (
-      ref.requirementCode &&
-      !family.requirementCodes.includes(ref.requirementCode)
-    ) {
-      family.requirementCodes.push(ref.requirementCode);
     }
   }
   const families = [...byProject.values()];
@@ -143,14 +140,26 @@ export function shortenText(text: string, max = PROBLEM_STATEMENT_MAX): string {
 }
 
 /** Shape a charter payload into the compact read-only summary, marking
- * the requirements the given skeletons implement (matched by id, with
- * the requirement code as a fallback key). */
+ * the requirements the given skeletons implement. Matching is by
+ * requirement ID: a skeleton that carries an ID matches ONLY that
+ * requirement, never by code — duplicate (truncated) display codes
+ * are possible, and code-matching an id-carrying skeleton would
+ * falsely mark a sibling requirement that shares its code. The code
+ * is a fallback key ONLY for legacy skeletons that carry no ID
+ * (Codex P2 on PR #63). */
 export function summarizeCharter(
   charter: CharterLike,
-  implemented: { ids: string[]; codes: string[] },
+  skeletons: Array<{
+    requirementId: string | null;
+    requirementCode: string | null;
+  }>,
 ): CharterSummary {
-  const ids = new Set(implemented.ids);
-  const codes = new Set(implemented.codes);
+  const ids = new Set<string>();
+  const legacyCodes = new Set<string>();
+  for (const s of skeletons) {
+    if (s.requirementId) ids.add(s.requirementId);
+    else if (s.requirementCode) legacyCodes.add(s.requirementCode);
+  }
   return {
     organizationName: charter.project.organizationName,
     problemStatement: charter.problemStatement
@@ -161,7 +170,7 @@ export function summarizeCharter(
       code: r.code,
       statement: r.statement,
       priority: r.priority,
-      implemented: ids.has(r.id) || codes.has(r.code),
+      implemented: ids.has(r.id) || legacyCodes.has(r.code),
     })),
     kpis: charter.kpis.map((k) => ({
       id: k.id,

@@ -3,7 +3,11 @@ import { getDb } from "../../_lib/db.js";
 import { readJsonBody, routeParam, sendJson } from "../../_lib/http.js";
 import { executeWorkflow } from "../../_lib/workflows.js";
 
-/** POST /api/workflows/:id/execute — run a published workflow immediately. */
+/**
+ * POST /api/workflows/:id/execute — run a published workflow immediately.
+ * A published workflow whose stored graph contains node kinds retired
+ * in v2 is rejected 422 by executeWorkflow before any run is created.
+ */
 export default defineRoute(["POST"], async (req, res) => { const db = getDb();
   const id = routeParam(req, "id");
   if (!id) {

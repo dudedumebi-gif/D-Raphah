@@ -5,6 +5,8 @@ import {
   executeWorkflow,
   getWorkflow,
   renderTemplate,
+  retiredKindsFromList,
+  retiredNodeKinds,
   specFor,
   updateWorkflow,
   type Workflow,
@@ -256,6 +258,92 @@ describe("workflow engine", () => {
     const run = await executeWorkflow(db, wf.id, {});
     expect(run.status).toBe("failed");
     expect(run.error).toContain("'userPrompt' is required");
+  });
+});
+
+/**
+ * Explicit retirement of persisted v1-era graphs (Codex P1 on
+ * PR #63): workflows stored with node kinds v2 removed from the
+ * catalog are rejected by the execute path BEFORE a run exists —
+ * not failed mid-flight, not partially run — while the graph
+ * itself stays intact for viewing, archiving, and deleting.
+ */
+describe("retired node kinds", () => {
+  const legacyNode = (key: string, kind: string): WorkflowNode => ({
+    node_key: key,
+    type: "action",
+    kind: kind as WorkflowNode["kind"],
+    label: kind,
+    position_x: 0,
+    position_y: 0,
+    config: {},
+    enabled: true,
+  });
+
+  it("reports kinds outside the v2 catalog, deduped in first-appearance order", () => {
+    expect(retiredNodeKinds(demoWorkflow.nodes)).toEqual([]);
+    expect(
+      retiredNodeKinds([
+        { kind: "manual" },
+        { kind: "send_sms" },
+        { kind: "if_else" },
+        { kind: "send_sms" },
+        { kind: "send_email" },
+      ] as WorkflowNode[]),
+    ).toEqual(["send_sms", "if_else"]);
+    expect(retiredKindsFromList(["send_sms", "manual", "send_sms"])).toEqual([
+      "send_sms",
+    ]);
+  });
+
+  it("rejects a published legacy workflow before any run row is created", async () => {
+    const legacy: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        legacyNode("a1", "send_sms"),
+        legacyNode("a2", "if_else"),
+      ],
+      edges: [
+        { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+        { edge_key: "e2", from_node_key: "a1", to_node_key: "a2", from_port: null, label: null },
+      ],
+    };
+    const { db, runs, steps } = makeFakeDb(legacy);
+    const err = await executeWorkflow(db, legacy.id, {}).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain(
+      "Workflow contains retired node kinds: send_sms, if_else",
+    );
+    expect((err as Error).message).toContain(
+      "viewed, archived, or deleted, but not executed or edited in v2",
+    );
+    expect((err as { statusCode?: number }).statusCode).toBe(422);
+    // No partial run: the rejection happens before the run insert.
+    expect(runs.size).toBe(0);
+    expect(steps).toHaveLength(0);
+  });
+
+  it("getWorkflow surfaces the retired kinds and leaves the graph intact", async () => {
+    const legacy: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        legacyNode("a1", "http_request"),
+      ],
+      edges: [
+        { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+      ],
+    };
+    const { db } = makeFakeDb(legacy);
+    const stored = await getWorkflow(db, legacy.id);
+    expect(stored?.retired_kinds).toEqual(["http_request"]);
+    expect(stored?.nodes.map((n) => n.kind)).toEqual([
+      "manual",
+      "http_request",
+    ]);
   });
 });
 

@@ -8,6 +8,7 @@ import {
   summarizeCharter,
   type CharterCache,
   type CharterLike,
+  type SkeletonRef,
 } from "./workflow-families";
 
 /* ── Types (mirror api/_lib/workflows.ts) ─────────────────────────────── */
@@ -60,6 +61,10 @@ interface WorkflowSummary {
   /** Carried by both the list and detail payloads; use-case skeletons
    * hold { projectId, packageId, requirementId, requirementCode }. */
   trigger_config: Record<string, unknown>;
+  /** Node kinds in the stored graph that v2 retired (persisted v1-era
+   * workflows only). Non-empty = explicitly retired: viewable,
+   * archivable, deletable — never executable. Server-computed. */
+  retired_kinds?: string[];
   updated_at: string;
 }
 
@@ -131,8 +136,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 function CharterToggle(props: {
   projectId: string;
-  requirementIds: string[];
-  requirementCodes: string[];
+  skeletons: SkeletonRef[];
   cache: CharterCache;
 }) {
   const [open, setOpen] = useState(false);
@@ -153,10 +157,7 @@ function CharterToggle(props: {
       ? loaded.charter
       : (props.cache.peek(props.projectId) ?? null);
   const summary = charter
-    ? summarizeCharter(charter, {
-        ids: props.requirementIds,
-        codes: props.requirementCodes,
-      })
+    ? summarizeCharter(charter, props.skeletons)
     : null;
 
   const toggle = () => {
@@ -353,8 +354,7 @@ function WorkflowList(props: {
           </div>
           <CharterToggle
             projectId={family.projectId}
-            requirementIds={family.requirementIds}
-            requirementCodes={family.requirementCodes}
+            skeletons={family.skeletons}
             cache={props.charterCache}
           />
           <div className="wf-cards">{family.workflows.map(renderCard)}</div>
@@ -379,6 +379,11 @@ function WorkflowList(props: {
       <div key={w.id} className="wf-card">
         <button className="wf-card-open" onClick={() => props.onOpen(w.id)}>
           <span className={`wf-badge wf-badge-${w.status}`}>{w.status}</span>
+          {(w.retired_kinds?.length ?? 0) > 0 && (
+            <span className="wf-badge wf-badge-retired">
+              retired kinds: {w.retired_kinds!.join(", ")}
+            </span>
+          )}
           <span className="wf-card-name">{w.name}</span>
           <span className="wf-card-meta">
             {w.trigger_type} · {w.environment} · updated{" "}
@@ -1246,6 +1251,10 @@ export function WorkflowsSection(props: {
 
   const isDraft = workflow.status === "draft";
   const openSkeleton = skeletonRef(workflow);
+  // Persisted v1-era graphs can carry node kinds v2 retired. They
+  // are explicitly retired: marked here, Execute disabled with the
+  // reason shown, and the execute route rejects them 422 regardless.
+  const retiredKinds = workflow.retired_kinds ?? [];
 
   return (
     <div className="wf-section">
@@ -1264,6 +1273,11 @@ export function WorkflowsSection(props: {
           {workflow.status}
         </span>
         <span className="wf-badge wf-badge-env">{workflow.environment}</span>
+        {retiredKinds.length > 0 && (
+          <span className="wf-badge wf-badge-retired">
+            retired kinds: {retiredKinds.join(", ")}
+          </span>
+        )}
         <div className="wf-tabs">
           <button
             className={tab === "builder" ? "active" : ""}
@@ -1317,7 +1331,12 @@ export function WorkflowsSection(props: {
             <button
               className="btn-primary"
               onClick={execute}
-              disabled={saving}
+              disabled={saving || retiredKinds.length > 0}
+              title={
+                retiredKinds.length > 0
+                  ? `Cannot execute — this workflow contains retired node kinds: ${retiredKinds.join(", ")}`
+                  : undefined
+              }
             >
               ▶ Execute
             </button>
@@ -1325,16 +1344,18 @@ export function WorkflowsSection(props: {
         </div>
       </div>
       {notice && <p className="wf-notice">{notice}</p>}
+      {retiredKinds.length > 0 && (
+        <p className="wf-hint" style={{ padding: "8px 16px" }}>
+          This workflow contains node kinds retired in v2:{" "}
+          {retiredKinds.join(", ")}. It can be viewed, archived, or deleted,
+          but not executed or edited.
+        </p>
+      )}
       {openSkeleton && (
         <div className="wf-editor-charter">
           <CharterToggle
             projectId={openSkeleton.projectId}
-            requirementIds={
-              openSkeleton.requirementId ? [openSkeleton.requirementId] : []
-            }
-            requirementCodes={
-              openSkeleton.requirementCode ? [openSkeleton.requirementCode] : []
-            }
+            skeletons={[openSkeleton]}
             cache={charterCacheRef.current}
           />
         </div>

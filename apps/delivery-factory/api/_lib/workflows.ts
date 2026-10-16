@@ -64,6 +64,12 @@ export interface Workflow {
   published_at: string | null;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  /** Node kinds in the stored graph that the v2 catalog retired
+   * (v1-era workflows can still carry e.g. send_sms / if_else).
+   * Populated by getWorkflow / listWorkflows; such workflows are
+   * explicitly retired — viewable, archivable, deletable, but the
+   * execute path rejects them before a run is created. */
+  retired_kinds?: string[];
 }
 
 export type RunStatus = "running" | "completed" | "failed" | "cancelled";
@@ -172,6 +178,32 @@ export function specFor(kind: NodeKind): NodeSpec {
   return spec;
 }
 
+const CATALOG_KINDS: ReadonlySet<string> = new Set(
+  NODE_CATALOG.map((s) => s.kind),
+);
+
+/** The kinds from a kind list that the v2 catalog no longer knows —
+ * deduped, in first-appearance order. Persisted v1-era workflows can
+ * carry retired kinds (send_sms, http_request, if_else, …): v2 cut
+ * them from the catalog without a data migration, so stored graphs
+ * still contain them. */
+export function retiredKindsFromList(kinds: string[]): string[] {
+  const seen = new Set<string>();
+  const retired: string[] = [];
+  for (const kind of kinds) {
+    if (!CATALOG_KINDS.has(kind) && !seen.has(kind)) {
+      seen.add(kind);
+      retired.push(kind);
+    }
+  }
+  return retired;
+}
+
+/** The retired node kinds in a workflow graph (see retiredKindsFromList). */
+export function retiredNodeKinds(nodes: Array<{ kind: string }>): string[] {
+  return retiredKindsFromList(nodes.map((n) => n.kind));
+}
+
 /**
  * Typed wrapper around the neon tag client. The driver's result type is a
  * union (rows | FullQueryResults); every workflow query selects rows, so we
@@ -232,16 +264,25 @@ export async function listWorkflows(
   db: NeonClient,
   environment?: DeliveryEnvironment,
 ): Promise<Workflow[]> {
+  // The list rows carry no graph, so retired kinds (below) are
+  // computed from a correlated subquery over workflow_nodes — the
+  // list must still mark v1-era workflows the v2 catalog retired.
   const rows = environment
     ? await q(db)`
         select id, name, description, status, environment, trigger_type,
-               trigger_config, created_by, created_at, updated_at, published_at
+               trigger_config, created_by, created_at, updated_at, published_at,
+               (select coalesce(array_agg(distinct n.kind), array[]::text[])
+                  from public.workflow_nodes n
+                 where n.workflow_id = public.workflows.id) as node_kinds
         from public.workflows
         where environment = ${environment}
         order by updated_at desc`
     : await q(db)`
         select id, name, description, status, environment, trigger_type,
-               trigger_config, created_by, created_at, updated_at, published_at
+               trigger_config, created_by, created_at, updated_at, published_at,
+               (select coalesce(array_agg(distinct n.kind), array[]::text[])
+                  from public.workflow_nodes n
+                 where n.workflow_id = public.workflows.id) as node_kinds
         from public.workflows order by updated_at desc`;
   return rows.map((r) => ({
     id: r.id as string,
@@ -257,6 +298,9 @@ export async function listWorkflows(
     published_at: r.published_at ? String(r.published_at) : null,
     nodes: [],
     edges: [],
+    retired_kinds: retiredKindsFromList(
+      Array.isArray(r.node_kinds) ? r.node_kinds.map((k) => String(k)) : [],
+    ),
   }));
 }
 
@@ -300,6 +344,16 @@ export async function getWorkflow(
   const edges = await q(db)`
     select edge_key, from_node_key, to_node_key, from_port, label
     from public.workflow_edges where workflow_id = ${id}`;
+  const mappedNodes: WorkflowNode[] = nodes.map((n) => ({
+    node_key: n.node_key as string,
+    type: n.type as NodeType,
+    kind: n.kind as NodeKind,
+    label: n.label as string,
+    position_x: n.position_x as number,
+    position_y: n.position_y as number,
+    config: (n.config ?? {}) as Record<string, unknown>,
+    enabled: n.enabled as boolean,
+  }));
   return {
     id: r.id as string,
     name: r.name as string,
@@ -312,16 +366,8 @@ export async function getWorkflow(
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
     published_at: r.published_at ? String(r.published_at) : null,
-    nodes: nodes.map((n) => ({
-      node_key: n.node_key as string,
-      type: n.type as NodeType,
-      kind: n.kind as NodeKind,
-      label: n.label as string,
-      position_x: n.position_x as number,
-      position_y: n.position_y as number,
-      config: (n.config ?? {}) as Record<string, unknown>,
-      enabled: n.enabled as boolean,
-    })),
+    nodes: mappedNodes,
+    retired_kinds: retiredNodeKinds(mappedNodes),
     edges: edges.map((e) => ({
       edge_key: e.edge_key as string,
       from_node_key: e.from_node_key as string,
@@ -560,6 +606,24 @@ export async function executeWorkflow(
   if (!wf) throw new Error("Workflow not found");
   if (wf.status !== "published") {
     throw new Error("Only published workflows can execute");
+  }
+  // Explicit retirement for persisted v1-era graphs (Codex P1 on
+  // PR #63): a graph containing kinds the v2 catalog removed is
+  // rejected BEFORE a run row exists — never failed mid-flight at
+  // the interpreter's unsupported-kind branch, and never a partial
+  // run. The stored graph is untouched: the workflow stays
+  // viewable, archivable, and deletable. Any node counts, enabled
+  // or not — retirement is a property of the graph, not the path a
+  // particular run would have taken.
+  const retired = retiredNodeKinds(wf.nodes);
+  if (retired.length > 0) {
+    throw Object.assign(
+      new Error(
+        `Workflow contains retired node kinds: ${retired.join(", ")} — ` +
+          "it can be viewed, archived, or deleted, but not executed or edited in v2",
+      ),
+      { statusCode: 422 },
+    );
   }
 
   const runRows = await q(db)`

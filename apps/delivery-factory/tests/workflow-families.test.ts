@@ -120,7 +120,13 @@ describe("groupWorkflowsByFamily", () => {
     expect(families).toHaveLength(1);
     expect(families[0].title).toBe("Donddental");
     expect(families[0].requirementIds).toEqual(["req-1", "req-2"]);
-    expect(families[0].requirementCodes).toEqual(["UC-1", "UC-2"]);
+    // The family's skeleton refs are the charter summary's matching
+    // input — one per member, duplicates included.
+    expect(families[0].skeletons).toEqual([
+      { projectId: "p1", requirementId: "req-1", requirementCode: "UC-1" },
+      { projectId: "p1", requirementId: "req-2", requirementCode: "UC-2" },
+      { projectId: "p1", requirementId: "req-1", requirementCode: "UC-1" },
+    ]);
   });
 
   it("leaves a skeleton-free list entirely standalone, in order", () => {
@@ -156,11 +162,16 @@ describe("familyTitle", () => {
 });
 
 describe("summarizeCharter", () => {
-  it("marks the requirements the family implements, by id and by code", () => {
-    const summary = summarizeCharter(charter, {
-      ids: ["req-1"],
-      codes: ["UC-REVIEW-REQUESTS"],
-    });
+  it("marks the requirements the family implements, by id and by legacy code", () => {
+    const summary = summarizeCharter(charter, [
+      // An id-carrying skeleton marks its requirement by id…
+      {
+        requirementId: "req-1",
+        requirementCode: "UC-ONLINE-APPOINTMENT-BOOKING",
+      },
+      // …and a legacy skeleton (no id) marks by code.
+      { requirementId: null, requirementCode: "UC-REVIEW-REQUESTS" },
+    ]);
     expect(summary.organizationName).toBe("Donddental");
     expect(
       summary.requirements.map((r) => [r.code, r.implemented]),
@@ -179,16 +190,64 @@ describe("summarizeCharter", () => {
     const long = "x".repeat(PROBLEM_STATEMENT_MAX + 100);
     const summary = summarizeCharter(
       { ...charter, problemStatement: long },
-      { ids: [], codes: [] },
+      [],
     );
     expect(summary.problemStatement).toHaveLength(PROBLEM_STATEMENT_MAX);
     expect(summary.problemStatement?.endsWith("…")).toBe(true);
 
     const empty = summarizeCharter(
       { ...charter, problemStatement: null },
-      { ids: [], codes: [] },
+      [],
     );
     expect(empty.problemStatement).toBeNull();
+  });
+});
+
+describe("summarizeCharter requirement matching (id before code)", () => {
+  // Two requirements sharing one truncated display code — possible in
+  // real packages, and the reason the skeleton generator keys
+  // skeletons by requirement ID (Codex P2 on PR #63).
+  const sharedCodeCharter: CharterLike = {
+    ...charter,
+    requirements: [
+      {
+        id: "req-a",
+        code: "UC-REVIEW",
+        statement: "Automated review requests by email",
+        priority: "Must",
+      },
+      {
+        id: "req-b",
+        code: "UC-REVIEW",
+        statement: "Automated review requests by text message",
+        priority: "Should",
+      },
+    ],
+  };
+
+  it("marks only the requirement whose id the skeleton carries when two share a code", () => {
+    const summary = summarizeCharter(sharedCodeCharter, [
+      { requirementId: "req-a", requirementCode: "UC-REVIEW" },
+    ]);
+    expect(
+      summary.requirements.map((r) => [r.id, r.implemented]),
+    ).toEqual([
+      ["req-a", true],
+      ["req-b", false],
+    ]);
+  });
+
+  it("still matches a legacy skeleton (no requirement id) by code", () => {
+    const summary = summarizeCharter(charter, [
+      { requirementId: null, requirementCode: "UC-AUTOMATED-REMINDERS" },
+    ]);
+    expect(
+      summary.requirements.map((r) => [r.id, r.implemented]),
+    ).toEqual([
+      ["req-1", false],
+      ["req-2", true],
+      ["req-3", false],
+    ]);
   });
 });
 
@@ -246,10 +305,7 @@ describe("summary derivation from current family membership", () => {
       skeleton("Donddental", "Reminders", "p1", "req-2", "UC-AUTOMATED-REMINDERS"),
     ];
     const before = groupWorkflowsByFamily(members).families[0];
-    const markedBefore = summarizeCharter(charter, {
-      ids: before.requirementIds,
-      codes: before.requirementCodes,
-    });
+    const markedBefore = summarizeCharter(charter, before.skeletons);
     expect(
       markedBefore.requirements.map((r) => [r.id, r.implemented]),
     ).toEqual([
@@ -264,10 +320,7 @@ describe("summary derivation from current family membership", () => {
     // (Codex P2 on PR #63).
     const after = groupWorkflowsByFamily(members.slice(0, 1)).families[0];
     expect(after.requirementIds).toEqual(["req-1"]);
-    const markedAfter = summarizeCharter(charter, {
-      ids: after.requirementIds,
-      codes: after.requirementCodes,
-    });
+    const markedAfter = summarizeCharter(charter, after.skeletons);
     expect(
       markedAfter.requirements.map((r) => [r.id, r.implemented]),
     ).toEqual([
