@@ -1,12 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  CriteriaSchema,
   detectSignals,
   evaluateGeography,
-  isSuggestionSuppressed,
-  suggestCriteriaAdjustment,
-  evaluateCanarySoak,
 } from "../api/_lib/domain";
 import {
   extractCoordinates,
@@ -33,7 +29,7 @@ describe("workspace bootstrap UI safety", () => {
       "if (!memberships.length && !data)",
     );
     expect(initializingReturn).toBeGreaterThan(0);
-    expect(workspace.indexOf("const visibleData = useMemo")).toBeLessThan(
+    expect(workspace.indexOf("const visibleData = data")).toBeLessThan(
       initializingReturn,
     );
     expect(
@@ -286,94 +282,6 @@ describe("geographic qualification", () => {
   });
 });
 
-describe("bounded criteria recommendations", () => {
-  it("loosens, holds, and tightens without autonomous application", () => {
-    expect(suggestCriteriaAdjustment({}, 2)).toMatchObject({
-      direction: "loosen",
-      autoApply: false,
-      changes: { qualificationScoreMin: 55 },
-    });
-    expect(suggestCriteriaAdjustment({}, 20)).toMatchObject({
-      direction: "hold",
-      changes: {},
-    });
-    expect(suggestCriteriaAdjustment({}, 40)).toMatchObject({
-      direction: "tighten",
-      changes: { qualificationScoreMin: 65 },
-    });
-  });
-  it("never reverses direction at custom guardrail boundaries", () => {
-    const loose = CriteriaSchema.parse({
-      qualificationScoreMin: 40,
-      confidenceMin: 0.1,
-    });
-    expect(suggestCriteriaAdjustment(loose, 0).changes).toMatchObject({
-      qualificationScoreMin: 40,
-      confidenceMin: 0.1,
-    });
-    const strict = CriteriaSchema.parse({
-      qualificationScoreMin: 95,
-      confidenceMin: 0.95,
-    });
-    expect(suggestCriteriaAdjustment(strict, 100).changes).toMatchObject({
-      qualificationScoreMin: 95,
-      confidenceMin: 0.95,
-    });
-  });
-});
-
-describe("canary gate cannot be manufactured by duplicate or future observations", () => {
-  const now = new Date("2026-09-22T12:35:00Z");
-  const hours = Array.from({ length: 72 }, (_, index) => {
-    const at = Date.parse("2026-09-22T12:00:00Z") - (72 - index) * 3_600_000;
-    return {
-      scheduledAt: new Date(at).toISOString(),
-      completedAt: new Date(at + 60_000).toISOString(),
-      status: "completed" as const,
-    };
-  });
-  it("passes only a complete window, including when checked mid-hour", () => {
-    expect(evaluateCanarySoak([...hours].reverse(), now)).toMatchObject({
-      passed: true,
-      completed: 72,
-      missing: 0,
-    });
-  });
-  it("counts missing hours and failed runs against the completion denominator", () => {
-    expect(evaluateCanarySoak(hours.slice(1), now)).toMatchObject({
-      passed: false,
-      missing: 1,
-      total: 72,
-    });
-    expect(
-      evaluateCanarySoak(
-        [...hours.slice(1), { ...hours[0], status: "failed" }],
-        now,
-      ).passed,
-    ).toBe(false);
-  });
-  it("rejects duplicate-only, conflicting, and future-completed observations", () => {
-    expect(evaluateCanarySoak(Array(72).fill(hours[0]), now).passed).toBe(
-      false,
-    );
-    expect(
-      evaluateCanarySoak([...hours, { ...hours[0], status: "failed" }], now)
-        .passed,
-    ).toBe(false);
-    expect(
-      evaluateCanarySoak(
-        hours.map((h) => ({ ...h, completedAt: "2099-01-01T00:00:00Z" })),
-        now,
-      ).passed,
-    ).toBe(false);
-    expect(
-      evaluateCanarySoak([{ scheduledAt: "invalid", status: "completed" }], now)
-        .passed,
-    ).toBe(false);
-    expect(evaluateCanarySoak([], now).passed).toBe(false);
-  });
-});
-
 describe("hard collection boundaries", () => {
   const policy = {
     allowedDomains: ["linkedin.com", "example.com"],
@@ -431,28 +339,6 @@ describe("scheduler authorization", () => {
   });
 });
 
-describe("suggestion suppression", () => {
-  it("does not suppress when no suggestion was applied yet", () => {
-    expect(isSuggestionSuppressed(null, 0)).toBe(false);
-    expect(isSuggestionSuppressed({}, 0)).toBe(false);
-    expect(isSuggestionSuppressed({ last_suggestion_at: null }, 0)).toBe(false);
-  });
-  it("suppresses while the observed count is unchanged", () => {
-    const campaign = {
-      last_suggestion_at: new Date().toISOString(),
-      last_suggestion_observed_count: 0,
-    };
-    expect(isSuggestionSuppressed(campaign, 0)).toBe(true);
-  });
-  it("releases suppression when new output arrives", () => {
-    const campaign = {
-      last_suggestion_at: new Date().toISOString(),
-      last_suggestion_observed_count: 0,
-    };
-    expect(isSuggestionSuppressed(campaign, 3)).toBe(false);
-  });
-});
-
 describe("production-readiness implementation", () => {
   const migration = readFileSync(
     new URL(
@@ -500,7 +386,7 @@ describe("production-readiness implementation", () => {
     );
   });
 
-  it("uses the real geocode timestamp and keeps canary work in demo mode", () => {
+  it("uses the real geocode timestamp in the recovery migration", () => {
     expect(canaryRecoveryMigration).toContain(
       "where resolved_at < p_now - interval '90 days'",
     );
@@ -508,7 +394,6 @@ describe("production-readiness implementation", () => {
       "geocode_cache where updated_at",
     );
     expect(canaryRecoveryMigration).toContain("set data_mode='demo'");
-    expect(worker).toContain("${run.id}::uuid, 'demo'");
   });
 
   it("persists discovery lineage with RLS, audit, data modes, and atomic resolution", () => {
@@ -530,7 +415,7 @@ describe("production-readiness implementation", () => {
     expect(adapterMigration).toContain("version='3.3.0'");
   });
 
-  it("keeps the owned canary deterministic and evidence-backed", () => {
+  it("keeps the owned fixture page deterministic and evidence-backed", () => {
     const signals = detectSignals(fixture);
     expect(signals.some((signal) => signal.polarity === "manual")).toBe(true);
     expect(signals.some((signal) => signal.polarity === "commercial")).toBe(

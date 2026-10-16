@@ -138,19 +138,6 @@ export interface CampaignRecord {
   retired_at?: string | null;
   retired_from_status?: string | null;
   data_mode: DataMode;
-  criteria_suggestion?: {
-    direction: "loosen" | "hold" | "tighten";
-    observedQualifiedLeads: number;
-    targetQualifiedLeads: number;
-    changes: Record<string, number> & {
-      geography?: {
-        centreLatitude?: number | null;
-        centreLongitude?: number | null;
-      };
-    };
-    rationale: string[];
-    autoApply: false;
-  };
 }
 
 export interface JobRecord {
@@ -291,14 +278,6 @@ export interface OperationsRecord {
     scheduledStartP95Ms: number | null;
     scheduledStartTargetMet: boolean;
   };
-  canary: {
-    hoursCovered: number;
-    total: number;
-    completed: number;
-    completionRate: number;
-    p95CompletionMs: number | null;
-    passed: boolean;
-  };
   workers: Array<{
     id: string;
     status: string;
@@ -331,8 +310,8 @@ export interface BootstrapData {
   sources: SourceRecord[];
   campaigns: CampaignRecord[];
   jobs: JobRecord[];
-  /** Full-table job counts by data_mode -> status (bootstrap aggregate). */
-  jobCounts?: Partial<Record<string, Record<string, number>>>;
+  /** Full-table job counts by status (bootstrap aggregate). */
+  jobCounts?: Partial<Record<string, number>>;
   leads: LeadRecord[];
   audit: AuditRecord[];
   operations: OperationsRecord;

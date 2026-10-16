@@ -98,10 +98,6 @@ describe("archive migration + call-site contract", () => {
     "utf8",
   );
   const router = readFileSync(join(here, "../api/_lib/router.ts"), "utf8");
-  const schedule = readFileSync(
-    join(here, "../api/_lib/discovery/schedule.ts"),
-    "utf8",
-  );
 
   it("defines both lifecycle RPCs and revokes EXECUTE from the API roles", () => {
     expect(migration).toContain(
@@ -136,9 +132,10 @@ describe("archive migration + call-site contract", () => {
     expect(router).toContain("public.set_campaign_retired(");
   });
 
-  it("gates retired campaigns out of scheduled AND manual discovery", () => {
-    expect(schedule).toContain("discovery_skipped_campaign_retired");
-    expect(schedule).toContain("status = 'active'");
+  it("gates retired campaigns out of manual discovery runs", () => {
+    // Scheduled discovery was retired in LE v4; the manual-run gate in
+    // the router is the surviving enforcement point.
     expect(router).toContain('discoverySource.campaign_id');
+    expect(router).toContain("Campaign is retired");
   });
 });

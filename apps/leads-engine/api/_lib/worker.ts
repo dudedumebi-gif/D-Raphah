@@ -5,12 +5,10 @@ import {
   CriteriaSchema,
   detectContactability,
   detectSignals,
-  evaluateAutoApply,
   evaluateGeography,
   inferBusinessProfile,
   retryDelaySeconds,
   scoreSignals,
-  suggestCriteriaAdjustment,
 } from "./domain.js";
 import { truncateToByteLength } from "@raphah/handoff-contract";
 import { createAdminClient } from "./neon.js";
@@ -102,7 +100,6 @@ export interface WorkerTickResult {
   deadLettered: number;
   handoffsDispatched: number;
   handoffsFailed: number;
-  autoApplied: number;
   alertsEmitted: number;
   prunedOperationalRows: number;
   jobBankCitiesSynced: number;
@@ -206,7 +203,6 @@ async function persistEvidenceAndLead(
         from public.discovery_candidates
         where id = ${job.discovery_candidate_id}::uuid
           and workspace_id = ${job.workspace_id}::uuid
-          and data_mode = ${job.data_mode ?? "pilot"}
         limit 1
       `) as unknown as DiscoveryCandidateEvidenceRow[]
       )[0]
@@ -275,9 +271,6 @@ async function persistEvidenceAndLead(
     evidenceFreshness: 100,
     contactability: detectContactability(combinedExtractedText),
   });
-  if (job.canary_run_id && (!score.qualified || signals.length === 0)) {
-    throw new Error("Canary did not produce a qualified, evidence-backed lead");
-  }
   const payload = {
     evidence: evidenceInsert,
     signals,
@@ -409,7 +402,6 @@ export async function runWorkerTick(
     deadLettered: 0,
     handoffsDispatched: 0,
     handoffsFailed: 0,
-    autoApplied: 0,
     alertsEmitted: 0,
     prunedOperationalRows: 0,
     jobBankCitiesSynced: 0,
@@ -480,66 +472,6 @@ export async function runWorkerTick(
   } catch (error) {
     log("error", "job_bank_market_sync_failed", { workerId });
   }
-  // Auto-apply (gap 3): one bounded criteria step per opted-in campaign.
-  // Failure-isolated so a bad campaign row can never fail the tick.
-  try {
-    const optedIn = (await client`
-      select id, workspace_id, criteria, updated_by
-      from public.scrape_campaigns
-      where auto_apply_criteria and status = 'active'
-    `) as unknown as Array<{
-      id: string;
-      workspace_id: string;
-      criteria: unknown;
-      updated_by: string | null;
-    }>;
-    for (const campaign of optedIn) {
-      const counts = (await client`
-        select * from public.campaign_qualified_counts(${campaign.workspace_id}::uuid)
-      `) as unknown as Array<{ campaign_id: string; qualified_count: number }>;
-      const observed = Number(
-        counts.find((row) => row.campaign_id === campaign.id)
-          ?.qualified_count ?? 0,
-      );
-      const suggestion = suggestCriteriaAdjustment(campaign.criteria, observed);
-      const next = evaluateAutoApply(campaign.criteria, suggestion, {
-        autoApplyEnabled: true,
-      });
-      if (!next) continue;
-      await client`
-        update public.scrape_campaigns
-        set criteria = ${JSON.stringify(next)}::jsonb,
-          criteria_version = ${new Date().toISOString()},
-          updated_by = ${campaign.updated_by}
-        where id = ${campaign.id}::uuid
-      `;
-      // humanValidatorId = campaign owner-of-record (updated_by).
-      // NOTE: log_workspace_event() requires a human JWT session
-      // (is_workspace_member), so the service-role worker cannot use it —
-      // write the audit row by direct insert with actor_id = null (system),
-      // the same pattern as alerts.ts.
-      await client`
-        insert into public.audit_events(
-          workspace_id, actor_id, action, resource_type, resource_id,
-          outcome, reason, before_state, after_state
-        ) values (
-          ${campaign.workspace_id}::uuid,
-          null,
-          'criteria.auto_applied',
-          'scrape_campaigns',
-          ${campaign.id}::text,
-          'success',
-          ${`Auto-applied one bounded ${suggestion.direction} step (validator: ${campaign.updated_by ?? "unknown"})`}::text,
-          ${JSON.stringify(campaign.criteria)}::jsonb,
-          ${JSON.stringify(next)}::jsonb
-        )
-      `;
-      result.autoApplied += 1;
-    }
-  } catch (error) {
-    log("error", "auto_apply_tick_failed", { workerId });
-    await reportError(error, { workerId });
-  }
   const jobs = (await client`
     select * from public.lease_scrape_jobs(
       ${workerId}, 20, 240, ${now}::timestamptz
@@ -581,53 +513,4 @@ export async function runWorkerTick(
     where id = ${workerId}
   `;
   return result;
-}
-
-export async function enqueueCanary(client = createAdminClient()) {
-  const workspaceId = process.env.LEAD_ENGINE_CANARY_WORKSPACE_ID;
-  const sourceId = process.env.LEAD_ENGINE_CANARY_SOURCE_ID;
-  const targetUrl = process.env.LEAD_ENGINE_CANARY_URL;
-  if (!workspaceId || !sourceId || !targetUrl)
-    throw new Error("Canary environment variables are incomplete");
-  const scheduledAt = new Date();
-  scheduledAt.setMinutes(0, 0, 0);
-  const key = `canary:${workspaceId}:${sourceId}:${scheduledAt.toISOString()}`;
-  await client`
-    insert into public.canary_runs(
-      workspace_id, scheduled_at, status, idempotency_key
-    ) values (
-      ${workspaceId}::uuid, ${scheduledAt.toISOString()}::timestamptz,
-      'queued', ${key}
-    ) on conflict (idempotency_key) do nothing
-  `;
-  const runRows = (await client`
-    select id from public.canary_runs where idempotency_key = ${key} limit 1
-  `) as unknown as Array<{ id: string }>;
-  const run = runRows[0];
-  if (!run) throw new Error("Canary record failed: no row");
-  const criteria = CriteriaSchema.parse({
-    qualificationScoreMin: 0,
-    confidenceMin: 0,
-  });
-  await client`
-    insert into public.scrape_jobs(
-      workspace_id, source_id, target_url, status, priority, scheduled_for,
-      idempotency_key, criteria_snapshot, max_attempts, canary_run_id,
-      data_mode
-    ) values (
-      ${workspaceId}::uuid, ${sourceId}::uuid, ${targetUrl}, 'queued', 100,
-      ${scheduledAt.toISOString()}::timestamptz, ${key},
-      ${JSON.stringify(criteria)}::jsonb, 3, ${run.id}::uuid, 'demo'
-    ) on conflict (idempotency_key) do nothing
-  `;
-  const jobRows = (await client`
-    select id, status from public.scrape_jobs where idempotency_key = ${key} limit 1
-  `) as unknown as Array<{ id: string; status: string }>;
-  const job = jobRows[0];
-  if (!job) throw new Error("Canary job failed: no row");
-  await client`
-    update public.canary_runs set scrape_job_id = ${job.id}::uuid
-    where id = ${run.id}::uuid
-  `;
-  return { canaryRunId: run.id, jobId: job.id, status: job.status };
 }

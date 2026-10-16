@@ -4,17 +4,13 @@ import {
   CriteriaSchema,
   detectContactability,
   detectSignals,
-  evaluateCanarySoak,
   calculateIcpFit,
   inferBusinessProfile,
-  mergeSuggestionChanges,
   percentile95,
   recoverExpiredLease,
   retryDelaySeconds,
   scheduleIdempotencyKey,
   scoreSignals,
-  suggestCriteriaAdjustment,
-  suggestGeographyCentre,
 } from "../api/_lib/domain";
 import {
   assertUrlAllowed,
@@ -291,73 +287,5 @@ describe("release SLOs", () => {
     const values = [300, 100, 200, 500, 400];
     expect(percentile95(values)).toBe(500);
     expect(values).toEqual([300, 100, 200, 500, 400]);
-  });
-
-  it("passes a complete 72-hour canary at or above 99 percent", () => {
-    const now = new Date("2026-09-22T12:00:00.000Z");
-    const observations = Array.from({ length: 73 }, (_, index) => {
-      const scheduled = new Date(now.getTime() - (72 - index) * 3_600_000);
-      return {
-        scheduledAt: scheduled.toISOString(),
-        completedAt: new Date(scheduled.getTime() + 60_000).toISOString(),
-        status: "completed" as const,
-      };
-    });
-    expect(evaluateCanarySoak(observations, now).passed).toBe(true);
-  });
-});
-
-describe("geography centre suggestion", () => {
-  it("suggests Toronto coordinates when cities are named but centre is missing", () => {
-    const criteria = CriteriaSchema.parse({
-      geography: {
-        mode: "hybrid",
-        cities: ["Toronto", "Ottawa", "Montreal"],
-        centreLatitude: null,
-        centreLongitude: null,
-      },
-    });
-    const suggestion = suggestCriteriaAdjustment(criteria, 0);
-    expect(suggestion.direction).toBe("loosen");
-    expect(suggestion.changes.geography?.centreLatitude).toBe(43.6532);
-    expect(suggestion.changes.geography?.centreLongitude).toBe(-79.3832);
-    expect(
-      suggestion.rationale.some((r) => r.includes("Centre coordinates")),
-    ).toBe(true);
-  });
-
-  it("does not suggest geography when centre is already set", () => {
-    const criteria = CriteriaSchema.parse({
-      geography: {
-        cities: ["Toronto"],
-        centreLatitude: 43.65,
-        centreLongitude: -79.38,
-      },
-    });
-    const suggestion = suggestCriteriaAdjustment(criteria, 0);
-    expect(suggestion.changes.geography).toBeUndefined();
-  });
-
-  it("does not suggest geography when no city is recognized", () => {
-    const criteria = CriteriaSchema.parse({
-      geography: {
-        cities: ["Atlantis"],
-        centreLatitude: null,
-        centreLongitude: null,
-      },
-    });
-    expect(suggestGeographyCentre(criteria)).toBeNull();
-  });
-
-  it("merges a geography suggestion through the same validation as PATCH", () => {
-    const criteria = CriteriaSchema.parse({
-      geography: { cities: ["Ottawa"], centreLatitude: null },
-    });
-    const suggestion = suggestCriteriaAdjustment(criteria, 0);
-    const merged = mergeSuggestionChanges(criteria, suggestion.changes);
-    expect(merged.geography.centreLatitude).toBe(45.4215);
-    expect(merged.geography.centreLongitude).toBe(-75.6972);
-    // Existing geography fields survive the merge.
-    expect(merged.geography.cities).toEqual(["Ottawa"]);
   });
 });

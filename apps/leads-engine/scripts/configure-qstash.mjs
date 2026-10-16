@@ -18,26 +18,14 @@ const schedules = [
     cron: "*/4 * * * *",
     label: "lead-engine-worker",
   },
-  {
-    scheduleId: "raphah-lead-canary-v1",
-    destination: `${baseUrl}/api/v1/canary/run`,
-    cron: "0 * * * *",
-    label: "lead-engine-canary",
-  },
-  {
-    scheduleId: "raphah-lead-monitor-v1",
-    destination: `${baseUrl}/api/v1/operations/evaluate`,
-    cron: "*/5 * * * *",
-    label: "lead-engine-operations-monitor",
-  },
-  {
-    scheduleId: "raphah-lead-discovery-v1",
-    destination: `${baseUrl}/api/v1/discovery/scheduled-run`,
-    // Daily at 06:10 UTC, after the canary window — each active discovery
-    // source runs at most once per 24h, guarded inside the scheduler.
-    cron: "10 6 * * *",
-    label: "lead-engine-discovery",
-  },
+  // LE v4 retired the canary, operations-monitor, and scheduled-discovery
+  // schedules (raphah-lead-canary-v1, raphah-lead-monitor-v1,
+  // raphah-lead-discovery-v1). The worker tick now also runs the
+  // alert/incident reconcile. The retired destinations answer 200
+  // {retired: true} for one release so a still-configured schedule does
+  // not record false delivery failures; pause the leftover schedules in
+  // the Upstash console. The DF dispatch-feedback schedule is managed
+  // with the Delivery Factory, not by this script.
 ];
 
 for (const schedule of schedules) {

@@ -1,5 +1,6 @@
 import {
   FormEvent,
+  Fragment,
   StrictMode,
   useCallback,
   useEffect,
@@ -17,7 +18,6 @@ import {
   neonClient,
   type AuditRecord,
   type BootstrapData,
-  type DataMode,
   type DiscoveryCandidateRecord,
   type DiscoveryRunRecord,
   type DiscoverySourceRecord,
@@ -35,13 +35,13 @@ import {
   type PipelineStageInputs,
 } from "./pipeline-stage";
 import { Settings } from "./CriteriaSettings";
-import { JobBankMarket } from "./JobBankMarket";
-import { JobLiveWindow } from "./JobLiveWindow";
+import { fetchJobEventsText } from "./api";
 import {
-  normalizeSourceUrl,
-  parseSourceCsv,
-  type SourceImportRow,
-} from "../api/_lib/source-import";
+  eventTimeLabel,
+  parseJobEvents,
+  summarizeEvent,
+  type JobEvent,
+} from "./jobEvents";
 import { DISCOVERY_TERMS } from "../api/_lib/discovery/terms";
 import "./styles.css";
 import "./functionality.css";
@@ -52,11 +52,8 @@ type View =
   | "discovery"
   | "jobs"
   | "leads"
-  | "jobbank"
-  | "operations"
   | "audit"
-  | "settings"
-  | "help";
+  | "settings";
 type Mutate = <T>(
   path: string,
   init: RequestInit,
@@ -68,11 +65,8 @@ const views: Array<{ id: View; label: string }> = [
   { id: "discovery", label: "Discovery" },
   { id: "jobs", label: "Scrape jobs" },
   { id: "leads", label: "Qualified leads" },
-  { id: "jobbank", label: "Job Bank market" },
-  { id: "operations", label: "Operations" },
   { id: "audit", label: "Audit log" },
   { id: "settings", label: "Criteria & schedule" },
-  { id: "help", label: "Help & guide" },
 ];
 
 function workspaceName(membership: Membership): string {
@@ -213,10 +207,6 @@ function Workspace({ session }: { session: Session }) {
     workspaceId ? cachedBootstrap(workspaceId, session.user.id) : null,
   );
   const [view, setView] = useState<View>("overview");
-  const [dataMode, setDataMode] = useState<DataMode>(() => {
-    const stored = localStorage.getItem("raphah.lead.data-mode");
-    return stored === "demo" || stored === "production" ? stored : "pilot";
-  });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(
     "Connecting to the production data plane…",
@@ -362,25 +352,9 @@ function Workspace({ session }: { session: Session }) {
   const activeMembership =
     memberships.find((item) => item.workspace_id === workspaceId) ??
     memberships[0];
-  const visibleData = useMemo<BootstrapData | null>(() => {
-    if (!data) return null;
-    return {
-      ...data,
-      sources: data.sources.filter(
-        (row) => (row.data_mode ?? "pilot") === dataMode,
-      ),
-      campaigns: data.campaigns.filter(
-        (row) => (row.data_mode ?? "pilot") === dataMode,
-      ),
-      jobs: data.jobs.filter((row) => (row.data_mode ?? "pilot") === dataMode),
-      leads: data.leads.filter(
-        (row) => (row.data_mode ?? "pilot") === dataMode,
-      ),
-    };
-  }, [data, dataMode]);
-  useEffect(() => {
-    localStorage.setItem("raphah.lead.data-mode", dataMode);
-  }, [dataMode]);
+  // Data modes were collapsed in v4: every view shows the workspace's
+  // production data; the bootstrap is rendered as returned.
+  const visibleData = data;
 
   // Keep every hook above this conditional render. Membership bootstrap is
   // asynchronous, so placing hooks below this return causes React to render a
@@ -400,14 +374,14 @@ function Workspace({ session }: { session: Session }) {
     );
 
   return (
-    <div className={`app-shell lead-shell mode-${dataMode}`}>
+    <div className="app-shell lead-shell">
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">R</span>
           <span>Raphah</span>
         </div>
         <div className="product-label">
-          LEAD ENGINE <span>v3</span>
+          LEAD ENGINE <span>v4</span>
         </div>
         <nav>
           {views.map((item) => (
@@ -419,10 +393,10 @@ function Workspace({ session }: { session: Session }) {
               <span>{item.label}</span>
               {item.id === "jobs" && data ? (
                 <strong>
-                  {data.jobCounts?.[dataMode]
+                  {data.jobCounts
                     ? ["queued", "leased", "running", "retrying"].reduce(
                         (total, status) =>
-                          total + (data.jobCounts![dataMode]![status] ?? 0),
+                          total + (data.jobCounts![status] ?? 0),
                         0,
                       )
                     : (visibleData?.jobs.length ?? 0)}
@@ -466,20 +440,6 @@ function Workspace({ session }: { session: Session }) {
               <h1>{views.find((item) => item.id === view)?.label}</h1>
             </div>
             <div className="top-actions">
-              <label className="mode-selector">
-                <span>Data environment</span>
-                <select
-                  value={dataMode}
-                  onChange={(event) =>
-                    setDataMode(event.target.value as DataMode)
-                  }
-                  aria-label="Data environment"
-                >
-                  <option value="demo">Demo data</option>
-                  <option value="pilot">Pilot data</option>
-                  <option value="production">Production data</option>
-                </select>
-              </label>
               <button
                 className="quiet"
                 disabled={busy}
@@ -491,7 +451,7 @@ function Workspace({ session }: { session: Session }) {
           </header>
           <div className="status-bar" role="status">
             <span className="status-dot" />
-            <strong>{dataMode.toUpperCase()}</strong> · {notice}
+            <strong>PRODUCTION</strong> · {notice}
           </div>
           {toast ? (
             <div className={`toast toast-${toast.kind}`} role="status">
@@ -516,7 +476,6 @@ function Workspace({ session }: { session: Session }) {
             view={view}
             setView={setView}
             data={visibleData}
-            dataMode={dataMode}
             mutate={mutate}
             session={session}
             workspaceId={workspaceId}
@@ -540,42 +499,51 @@ function funnelDiagnosis(stats: FunnelStats): string | null {
 /** Discovery-funnel strip: active sources → candidates evaluated → scored →
  * qualified. Answers the operator's key diagnostic — is zero leads a volume
  * problem or a calibration problem — before any threshold is touched.
- * Prefers GET /api/v1/funnel; falls back to bootstrap job history (7-day
- * window, completed jobs ≈ scored since each completed job yields exactly
- * one maturity assessment) when the endpoint is not present. */
+ * Served by GET /api/v1/funnel; when the endpoint errors, the strip shows
+ * an unavailable state rather than a client-side estimate. */
 function FunnelStrip({
-  data,
   session,
   workspaceId,
-  dataMode,
 }: {
-  data: BootstrapData;
   session: Session;
   workspaceId: string;
-  dataMode: DataMode;
 }) {
   const [live, setLive] = useState<FunnelStats | null>(null);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    apiRequest<{ data?: FunnelStats }>(
-      session,
-      workspaceId,
-      `/api/v1/funnel?mode=${dataMode}`,
-    )
+    apiRequest<{ data?: FunnelStats }>(session, workspaceId, "/api/v1/funnel")
       .then((payload) => {
         if (cancelled) return;
         const stats = payload?.data;
         if (stats && typeof stats.activeSources === "number") setLive(stats);
+        else setFailed(true);
       })
       .catch(() => {
-        // Endpoint not present — the bootstrap fallback below takes over.
+        if (!cancelled) setFailed(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [session, workspaceId, dataMode]);
+  }, [session, workspaceId]);
 
-  const stats: FunnelStats = live ?? fallbackFunnelStats(data);
+  if (!live) {
+    return (
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <h3>Discovery funnel</h3>
+            <p>
+              {failed
+                ? "Funnel data is unavailable right now — the funnel endpoint did not respond."
+                : "Loading funnel…"}
+            </p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+  const stats: FunnelStats = live;
   const stages = [
     {
       label: "Active sources",
@@ -617,9 +585,8 @@ function FunnelStrip({
         <div>
           <h3>Discovery funnel</h3>
           <p>
-            Last {stats.windowDays} days
-            {live ? "" : " · estimated from job history"} — volume vs
-            calibration at a glance
+            Last {stats.windowDays} days — volume vs calibration at a
+            glance
           </p>
         </div>
       </div>
@@ -629,28 +596,6 @@ function FunnelStrip({
   );
 }
 
-function fallbackFunnelStats(data: BootstrapData): FunnelStats {
-  const windowDays = 7;
-  const cutoff = Date.now() - windowDays * 24 * 3600 * 1000;
-  const recentCompleted = data.jobs.filter(
-    (job) =>
-      job.status === "completed" &&
-      new Date(job.created_at).getTime() >= cutoff,
-  ).length;
-  const recentQualified = data.leads.filter(
-    (lead) => new Date(lead.last_refreshed_at).getTime() >= cutoff,
-  ).length;
-  return {
-    activeSources: data.sources.filter((s) => s.status === "active").length,
-    candidatesEvaluated: recentCompleted,
-    // Each completed scrape job yields exactly one maturity assessment, so
-    // completed jobs ≈ scored candidates in the fallback.
-    scored: recentCompleted,
-    qualified: recentQualified,
-    windowDays,
-  };
-}
-
 function DashboardView({
   view,
   setView,
@@ -658,7 +603,6 @@ function DashboardView({
   mutate,
   session,
   workspaceId,
-  dataMode,
 }: {
   view: View;
   setView: (view: View) => void;
@@ -666,10 +610,8 @@ function DashboardView({
   mutate: Mutate;
   session: Session;
   workspaceId: string;
-  dataMode: DataMode;
 }) {
-  if (view === "sources")
-    return <Sources data={data} mutate={mutate} dataMode={dataMode} />;
+  if (view === "sources") return <Sources data={data} mutate={mutate} />;
   if (view === "discovery")
     return (
       <Discovery
@@ -677,7 +619,6 @@ function DashboardView({
         mutate={mutate}
         session={session}
         workspaceId={workspaceId}
-        dataMode={dataMode}
       />
     );
   if (view === "jobs")
@@ -698,17 +639,21 @@ function DashboardView({
         workspaceId={workspaceId}
       />
     );
-  if (view === "jobbank")
-    return <JobBankMarket session={session} workspaceId={workspaceId} />;
-  if (view === "operations") return <Operations data={data} />;
   if (view === "audit")
     return <Audit data={data} session={session} workspaceId={workspaceId} />;
-  if (view === "settings") return <Settings data={data} mutate={mutate} />;
-  if (view === "help") return <HelpGuide />;
-  // Prefer the bootstrap's full-table counts for the current mode;
-  // data.jobs is only a 100-row window, so counting it hides
-  // completions once more than 100 jobs exist.
-  const modeJobCounts = data.jobCounts?.[dataMode];
+  if (view === "settings")
+    return (
+      <Settings
+        data={data}
+        mutate={mutate}
+        session={session}
+        workspaceId={workspaceId}
+      />
+    );
+  // Prefer the bootstrap's full-table counts; data.jobs is only a
+  // 100-row window, so counting it hides completions once more than
+  // 100 jobs exist.
+  const modeJobCounts = data.jobCounts;
   const complete =
     modeJobCounts?.completed ??
     data.jobs.filter((job) => job.status === "completed").length;
@@ -724,7 +669,7 @@ function DashboardView({
     <div className="content">
       <section className="hero-row">
         <div>
-          <p className="eyebrow accent">{dataMode} data environment</p>
+          <p className="eyebrow accent">Production data environment</p>
           <h2>Find the businesses ready for meaningful automation.</h2>
           <p className="muted">
             Permitted evidence becomes explainable signals, maturity scores, and
@@ -751,22 +696,8 @@ function DashboardView({
           value={String(data.leads.length)}
           detail="Persistent and deduplicated"
         />
-        <Metric
-          label="72-hour canary"
-          value={`${Math.round(data.operations.canary.completionRate * 100)}%`}
-          detail={
-            data.operations.canary.passed
-              ? "Release gate passed"
-              : `${data.operations.canary.hoursCovered.toFixed(0)}h observed`
-          }
-        />
       </section>
-      <FunnelStrip
-        data={data}
-        session={session}
-        workspaceId={workspaceId}
-        dataMode={dataMode}
-      />
+      <FunnelStrip session={session} workspaceId={workspaceId} />
       <section className="panel">
         <div className="panel-head">
           <div>
@@ -776,300 +707,17 @@ function DashboardView({
         </div>
         <LeadTable leads={data.leads.slice(0, 8)} />
       </section>
+      <OperationsSection data={data} />
     </div>
-  );
-}
-
-const SOURCE_IMPORT_TEMPLATE =
-  "name,website,collection_method,business_purpose,allow_discovered_domains\n" +
-  '"Example Business",https://example.com,static_html,"Identify public evidence of manual processes and automation opportunity.",false\n';
-
-const MAX_IMPORT_ROWS = 200;
-
-type ImportPreviewStatus = "new" | "duplicate" | "invalid";
-
-interface ImportPreviewRow {
-  key: number;
-  name: string;
-  website: string;
-  domain: string;
-  status: ImportPreviewStatus;
-  detail: string;
-}
-
-interface ImportSummary {
-  created: number;
-  skipped: number;
-  errors: number;
-  approved: number;
-}
-
-function ImportSources({
-  data,
-  mutate,
-  dataMode,
-}: {
-  data: BootstrapData;
-  mutate: Mutate;
-  dataMode: DataMode;
-}) {
-  const [fileName, setFileName] = useState("");
-  const [parseError, setParseError] = useState<string | null>(null);
-  const [rows, setRows] = useState<SourceImportRow[]>([]);
-  const [contactEmail, setContactEmail] = useState(data.actor.email ?? "");
-  const [approveAll, setApproveAll] = useState(false);
-  const [summary, setSummary] = useState<ImportSummary | null>(null);
-
-  const existingUrls = useMemo(() => {
-    const urls = new Set<string>();
-    for (const source of data.sources) {
-      try {
-        urls.add(normalizeSourceUrl(source.base_url));
-      } catch {
-        // Legacy rows that no longer normalize cannot collide.
-      }
-    }
-    return urls;
-  }, [data.sources]);
-
-  const preview = useMemo<ImportPreviewRow[]>(() => {
-    const seen = new Set<string>();
-    return rows.map((row, key) => {
-      const name = row.name.trim();
-      const website = row.website.trim();
-      const label = name || `Row ${key + 1}`;
-      try {
-        const normalized = normalizeSourceUrl(website);
-        const domain = new URL(normalized).hostname;
-        if (!name) {
-          return {
-            key,
-            name: label,
-            website,
-            domain,
-            status: "invalid",
-            detail: "Name is required.",
-          };
-        }
-        if (existingUrls.has(normalized)) {
-          return {
-            key,
-            name,
-            website,
-            domain,
-            status: "duplicate",
-            detail: "A source with this website already exists.",
-          };
-        }
-        if (seen.has(normalized)) {
-          return {
-            key,
-            name,
-            website,
-            domain,
-            status: "duplicate",
-            detail: "Website is repeated in this file.",
-          };
-        }
-        seen.add(normalized);
-        return {
-          key,
-          name,
-          website,
-          domain,
-          status: "new",
-          detail: "Will be created.",
-        };
-      } catch {
-        return {
-          key,
-          name: label,
-          website,
-          domain: "—",
-          status: "invalid",
-          detail: "Website is not a valid HTTP(S) URL.",
-        };
-      }
-    });
-  }, [rows, existingUrls]);
-
-  const newRows = preview.filter((row) => row.status === "new");
-
-  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setSummary(null);
-    setFileName(file.name);
-    const parsed = parseSourceCsv(await file.text());
-    if (parsed.error) {
-      setParseError(parsed.error);
-      setRows([]);
-      return;
-    }
-    if (parsed.rows.length > MAX_IMPORT_ROWS) {
-      setParseError(
-        `The file has ${parsed.rows.length} rows; the import limit is ${MAX_IMPORT_ROWS}. Split it and import in batches.`,
-      );
-      setRows([]);
-      return;
-    }
-    setParseError(null);
-    setRows(parsed.rows);
-  }
-
-  function downloadTemplate() {
-    const blob = new Blob([SOURCE_IMPORT_TEMPLATE], {
-      type: "text/csv;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "source-import-template.csv";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  async function handleImport() {
-    const payload = {
-      rows: newRows.map(({ key }) => rows[key]),
-      contactEmail,
-      approveAll,
-      dataMode,
-    };
-    const result = await mutate<{
-      data: {
-        created: Array<{ id: string; name: string }>;
-        skipped: Array<{ name: string; website: string; reason: string }>;
-        errors: Array<{ index: number; name: string; error: string }>;
-        approved: number;
-      };
-    }>(
-      "/api/v1/sources/import",
-      { method: "POST", body: JSON.stringify(payload) },
-      "Source import finished.",
-    );
-    if (result?.data) {
-      setSummary({
-        created: result.data.created.length,
-        skipped: result.data.skipped.length,
-        errors: result.data.errors.length,
-        approved: result.data.approved,
-      });
-      setRows([]);
-      setFileName("");
-    }
-  }
-
-  return (
-    <section className="panel">
-      <div className="panel-head">
-        <div>
-          <h3>Import sources</h3>
-          <p>
-            Bulk-add sources from a CSV lead list. Each row becomes one source
-            with its own policy.
-          </p>
-        </div>
-        <button type="button" className="row-action" onClick={downloadTemplate}>
-          Download CSV template
-        </button>
-      </div>
-      <form
-        className="inline-form"
-        onSubmit={(event) => event.preventDefault()}
-      >
-        <label>
-          CSV file
-          <input type="file" accept=".csv" onChange={handleFile} />
-          {fileName ? (
-            <small>
-              {fileName} · {rows.length} data rows
-            </small>
-          ) : null}
-        </label>
-        <label>
-          Contact email
-          <input
-            type="email"
-            required
-            value={contactEmail}
-            onChange={(event) => setContactEmail(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>
-            <input
-              type="checkbox"
-              checked={approveAll}
-              onChange={(event) => setApproveAll(event.target.checked)}
-            />{" "}
-            Approve all on import
-          </span>
-          <small>
-            Approved sources become active immediately and appear in the Scrape
-            jobs dropdown.
-          </small>
-        </label>
-      </form>
-      {parseError ? (
-        <p style={{ color: "#b3261e", padding: "0 20px" }}>{parseError}</p>
-      ) : null}
-      {preview.length > 0 ? (
-        <div>
-          <div className="table-head">
-            <span>Name</span>
-            <span>Website</span>
-            <span>Domain</span>
-            <span>Status</span>
-          </div>
-          {preview.map((row) => (
-            <div className="table-row" key={row.key}>
-              <span>
-                <b>{row.name}</b>
-              </span>
-              <span>
-                <small>{row.website}</small>
-              </span>
-              <span>
-                <small>{row.domain}</small>
-              </span>
-              <span>
-                <Status value={row.status} /> <small>{row.detail}</small>
-              </span>
-            </div>
-          ))}
-          <div style={{ padding: "16px 20px" }}>
-            <button
-              type="button"
-              className="primary"
-              onClick={handleImport}
-              disabled={newRows.length === 0 || !contactEmail}
-            >
-              Import {newRows.length} source{newRows.length === 1 ? "" : "s"}
-            </button>{" "}
-            {summary ? (
-              <small>
-                Last import: {summary.created} created · {summary.skipped}{" "}
-                skipped · {summary.errors} errors · {summary.approved} approved.
-              </small>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-    </section>
   );
 }
 
 function Sources({
   data,
   mutate,
-  dataMode,
 }: {
   data: BootstrapData;
   mutate: Mutate;
-  dataMode: DataMode;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -1099,7 +747,6 @@ function Sources({
           intervalMinutes: Number(form.get("interval")),
           userAgent: "RaphahLeadEngineBot/2.0",
           contactEmail: form.get("contactEmail"),
-          dataMode,
         }),
       },
       "Source submitted for policy approval.",
@@ -1112,7 +759,7 @@ function Sources({
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h3>Permitted sources · {dataMode}</h3>
+              <h3>Permitted sources</h3>
               <p>No collection begins before explicit policy approval.</p>
             </div>
           </div>
@@ -1324,9 +971,6 @@ function Sources({
           </form>
         </section>
       </div>
-      <div className="content">
-        <ImportSources data={data} mutate={mutate} dataMode={dataMode} />
-      </div>
     </>
   );
 }
@@ -1337,11 +981,6 @@ const DISCOVERY_ADAPTERS = {
     label: "OpenStreetMap / Overpass",
     terms: DISCOVERY_TERMS.overpass,
     detail: "Business place discovery with public websites and coordinates.",
-  },
-  toronto_open_data: {
-    label: "Toronto Open Data",
-    terms: DISCOVERY_TERMS.toronto_open_data,
-    detail: "Municipal business licence and permit records from Toronto CKAN.",
   },
   job_bank: {
     label: "Canada Job Bank",
@@ -1368,13 +1007,11 @@ export function Discovery({
   mutate,
   session,
   workspaceId,
-  dataMode,
 }: {
   data: BootstrapData;
   mutate: Mutate;
   session: Session;
   workspaceId: string;
-  dataMode: DataMode;
 }) {
   const [sources, setSources] = useState<DiscoverySourceRecord[] | null>(null);
   const [runs, setRuns] = useState<DiscoveryRunRecord[] | null>(null);
@@ -1390,11 +1027,6 @@ export function Discovery({
     useState<DiscoveryAdapterId | null>(null);
   const [termsAcknowledged, setTermsAcknowledged] = useState(false);
   const [termsNotes, setTermsNotes] = useState("");
-  const [resolvingCandidateId, setResolvingCandidateId] = useState<
-    string | null
-  >(null);
-  const [resolutionUrl, setResolutionUrl] = useState("");
-  const [resolutionNotes, setResolutionNotes] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -1413,7 +1045,7 @@ export function Discovery({
           apiRequest<{ data: DiscoveryCandidateRecord[] }>(
             session,
             workspaceId,
-            `/api/v1/discovery/candidates?mode=${dataMode}`,
+            "/api/v1/discovery/candidates",
           ),
           apiRequest<{ data: Array<{ terms_id: string }> }>(
             session,
@@ -1421,8 +1053,8 @@ export function Discovery({
             "/api/v1/terms",
           ),
         ]);
-      setSources(sourceResult.data.filter((row) => row.data_mode === dataMode));
-      setRuns(runResult.data.filter((row) => row.data_mode === dataMode));
+      setSources(sourceResult.data);
+      setRuns(runResult.data);
       setCandidates(candidateResult.data);
       setAcceptedTerms(new Set(termsResult.data.map((t) => t.terms_id)));
     } catch {
@@ -1430,7 +1062,7 @@ export function Discovery({
     } finally {
       setLoading(false);
     }
-  }, [session, workspaceId, dataMode]);
+  }, [session, workspaceId]);
 
   useEffect(() => {
     void refresh();
@@ -1489,13 +1121,6 @@ export function Discovery({
       adapterConfig.categoryPreset = String(
         form.get("categoryPreset") ?? "all",
       );
-    } else if (adapterId === "toronto_open_data") {
-      adapterConfig.categories = String(form.get("categories") ?? "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean);
-      adapterConfig.activeOnly = form.get("activeOnly") === "on";
-      adapterConfig.maxRecords = Number(form.get("maxRecords")) || 200;
     } else if (adapterId === "job_bank") {
       adapterConfig.keywords = String(form.get("keywords") ?? "")
         .split(",")
@@ -1514,7 +1139,6 @@ export function Discovery({
           name: form.get("name"),
           adapterId,
           adapterConfig,
-          dataMode,
           geo,
           sourceId: form.get("sourceId"),
           ...(campaignId ? { campaignId } : {}),
@@ -1541,28 +1165,6 @@ export function Discovery({
     await refresh();
   }
 
-  async function resolveCandidate(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!resolvingCandidateId) return;
-    const result = await mutate(
-      `/api/v1/discovery/candidates/${resolvingCandidateId}/resolve`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          website: resolutionUrl,
-          notes: resolutionNotes,
-        }),
-      },
-      "Candidate website resolved and persistent scrape job queued.",
-    );
-    if (result) {
-      setResolvingCandidateId(null);
-      setResolutionUrl("");
-      setResolutionNotes("");
-      await refresh();
-    }
-  }
-
   return (
     <>
       <div className="content split-layout">
@@ -1572,8 +1174,7 @@ export function Discovery({
               <h3>Discovery sources</h3>
               <p>
                 Permitted public-data adapters persist every candidate, resolve
-                websites, and enqueue approved collection jobs. Showing only
-                <b> {dataMode}</b> records.
+                websites, and enqueue approved collection jobs.
               </p>
             </div>
           </div>
@@ -1739,33 +1340,6 @@ export function Discovery({
                       Field service trades (plumbing / HVAC / electrical)
                     </option>
                   </select>
-                </label>
-              </>
-            ) : null}
-            {adapterId === "toronto_open_data" ? (
-              <>
-                <label>
-                  Licence categories (comma-separated, optional)
-                  <input
-                    name="categories"
-                    placeholder="Restaurant, Contractor"
-                  />
-                </label>
-                <label>
-                  Maximum records
-                  <input
-                    name="maxRecords"
-                    type="number"
-                    min={1}
-                    max={200}
-                    defaultValue={200}
-                  />
-                </label>
-                <label>
-                  <span>
-                    <input name="activeOnly" type="checkbox" defaultChecked />{" "}
-                    Active licences only
-                  </span>
                 </label>
               </>
             ) : null}
@@ -1964,8 +1538,8 @@ export function Discovery({
             <div>
               <h3>Persistent discovery candidates</h3>
               <p>
-                All {dataMode} candidates are retained, including records that
-                need website resolution before collection.
+                All candidates are retained, including records that need
+                website resolution before collection.
               </p>
             </div>
           </div>
@@ -1990,19 +1564,6 @@ export function Discovery({
                   <small>
                     {candidate.resolved_website ?? "Review required"}
                   </small>
-                  {!candidate.resolved_website ? (
-                    <button
-                      type="button"
-                      className="row-action"
-                      onClick={() => {
-                        setResolvingCandidateId(candidate.id);
-                        setResolutionUrl(candidate.website ?? "");
-                        setResolutionNotes("");
-                      }}
-                    >
-                      Resolve website
-                    </button>
-                  ) : null}
                 </span>
                 <span>
                   {new Date(candidate.source_observed_at).toLocaleString()}
@@ -2010,49 +1571,8 @@ export function Discovery({
               </div>
             ))}
           </div>
-          {resolvingCandidateId ? (
-            <form
-              className="horizontal-form resolution-form"
-              onSubmit={resolveCandidate}
-            >
-              <label>
-                Human-validated website
-                <input
-                  type="url"
-                  value={resolutionUrl}
-                  onChange={(event) => setResolutionUrl(event.target.value)}
-                  placeholder="https://business.example"
-                  required
-                />
-              </label>
-              <label>
-                Validation note
-                <input
-                  value={resolutionNotes}
-                  onChange={(event) => setResolutionNotes(event.target.value)}
-                  placeholder="Where and how the website was verified"
-                  minLength={3}
-                  required
-                />
-              </label>
-              <p className="muted">
-                This audited action links the candidate to an approved source
-                policy and queues its mode-scoped collection job.
-              </p>
-              <div>
-                <button className="primary">Resolve and queue</button>{" "}
-                <button
-                  type="button"
-                  className="quiet"
-                  onClick={() => setResolvingCandidateId(null)}
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          ) : null}
           {(candidates ?? []).length === 0 && !loading ? (
-            <p className="muted">No {dataMode} candidates persisted yet.</p>
+            <p className="muted">No candidates persisted yet.</p>
           ) : null}
         </section>
       </div>
@@ -2088,7 +1608,38 @@ function Jobs({
   const activeSources = data.sources.filter(
     (source) => source.status === "active",
   );
-  const [liveJob, setLiveJob] = useState<JobRecord | null>(null);
+  // Job detail expansion (v4, A4): the docked live window was replaced
+  // by an in-row timeline fed by GET /api/v1/scrape-jobs/:id/events —
+  // fetched on demand and refreshed by the operator, no polling module.
+  const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  const [jobEvents, setJobEvents] = useState<Record<string, JobEvent[]>>({});
+  const [jobEventsError, setJobEventsError] = useState<string | null>(null);
+  const [jobEventsLoading, setJobEventsLoading] = useState(false);
+  async function loadJobEvents(jobId: string) {
+    setJobEventsLoading(true);
+    setJobEventsError(null);
+    try {
+      const text = await fetchJobEventsText(session, workspaceId, jobId);
+      setJobEvents((current) => ({
+        ...current,
+        [jobId]: parseJobEvents(text),
+      }));
+    } catch (error) {
+      setJobEventsError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setJobEventsLoading(false);
+    }
+  }
+  function toggleJobEvents(job: JobRecord) {
+    if (expandedJobId === job.id) {
+      setExpandedJobId(null);
+      return;
+    }
+    setExpandedJobId(job.id);
+    if (!jobEvents[job.id]) void loadJobEvents(job.id);
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -2107,7 +1658,10 @@ function Jobs({
       },
       "Persistent scrape job queued.",
     );
-    if (created?.data?.id) setLiveJob(created.data);
+    if (created?.data?.id) {
+      setExpandedJobId(created.data.id);
+      void loadJobEvents(created.data.id);
+    }
   }
   return (
     <div className="content">
@@ -2155,61 +1709,91 @@ function Jobs({
             <span>Scheduled / action</span>
           </div>
           {data.jobs.map((job) => (
-            <div className="table-row" key={job.id}>
-              <div className="op-name">
-                <span className="avatar">J</span>
-                <div>
-                  <b>{hostnameOf(job.target_url)}</b>
-                  <small>
-                    {job.id.slice(0, 8)} · {job.target_url}
-                  </small>
+            <Fragment key={job.id}>
+              <div className="table-row">
+                <div className="op-name">
+                  <span className="avatar">J</span>
+                  <div>
+                    <b>{hostnameOf(job.target_url)}</b>
+                    <small>
+                      {job.id.slice(0, 8)} · {job.target_url}
+                    </small>
+                  </div>
                 </div>
-              </div>
-              <Status value={job.status} />
-              <span>
-                {job.attempt_count}/{job.max_attempts}
-                {job.last_error ? (
-                  <small className="error-text">{job.last_error}</small>
-                ) : null}
-              </span>
-              <span className="stage-action">
-                <time>{new Date(job.scheduled_for).toLocaleString()}</time>
-                <button
-                  className="row-action"
-                  onClick={() => setLiveJob(job)}
-                  title="Watch live scrape progress"
-                >
-                  Live
-                </button>
-                {["failed", "dead_letter", "cancelled"].includes(job.status) ? (
+                <Status value={job.status} />
+                <span>
+                  {job.attempt_count}/{job.max_attempts}
+                  {job.last_error ? (
+                    <small className="error-text">{job.last_error}</small>
+                  ) : null}
+                </span>
+                <span className="stage-action">
+                  <time>{new Date(job.scheduled_for).toLocaleString()}</time>
                   <button
                     className="row-action"
-                    onClick={() => void jobAction(job, "retry", mutate)}
+                    onClick={() => toggleJobEvents(job)}
+                    aria-expanded={expandedJobId === job.id}
+                    title="Show this job's event timeline"
                   >
-                    Retry
+                    {expandedJobId === job.id ? "Hide" : "Details"}
                   </button>
-                ) : null}
-                {["queued", "retrying", "leased"].includes(job.status) ? (
-                  <button
-                    className="row-action danger"
-                    onClick={() => void jobAction(job, "cancel", mutate)}
-                  >
-                    Cancel
-                  </button>
-                ) : null}
-              </span>
-            </div>
+                  {["failed", "dead_letter", "cancelled"].includes(job.status) ? (
+                    <button
+                      className="row-action"
+                      onClick={() => void jobAction(job, "retry", mutate)}
+                    >
+                      Retry
+                    </button>
+                  ) : null}
+                  {["queued", "retrying", "leased"].includes(job.status) ? (
+                    <button
+                      className="row-action danger"
+                      onClick={() => void jobAction(job, "cancel", mutate)}
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
+                </span>
+              </div>
+              {expandedJobId === job.id ? (
+                <div className="job-events">
+                  <div className="job-events-head">
+                    <b>Event timeline</b>
+                    <button
+                      className="row-action"
+                      disabled={jobEventsLoading}
+                      onClick={() => void loadJobEvents(job.id)}
+                    >
+                      {jobEventsLoading ? "Loading…" : "Refresh"}
+                    </button>
+                  </div>
+                  {jobEventsError ? (
+                    <p className="error-text">{jobEventsError}</p>
+                  ) : null}
+                  {(jobEvents[job.id] ?? []).length === 0 &&
+                  !jobEventsError ? (
+                    <p className="muted">
+                      {jobEventsLoading
+                        ? "Loading events…"
+                        : "No events recorded yet."}
+                    </p>
+                  ) : null}
+                  {(jobEvents[job.id] ?? []).map((event, index) => (
+                    <div
+                      className="job-event-row"
+                      key={`${event.at}-${event.type}-${index}`}
+                    >
+                      <time>{eventTimeLabel(event)}</time>
+                      <span className="live-type">{event.type}</span>
+                      <span>{summarizeEvent(event)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </Fragment>
           ))}
         </div>
       </section>
-      {liveJob ? (
-        <JobLiveWindow
-          job={liveJob}
-          session={session}
-          workspaceId={workspaceId}
-          onClose={() => setLiveJob(null)}
-        />
-      ) : null}
     </div>
   );
 }
@@ -2289,7 +1873,7 @@ export function Leads({
   session: Session;
   workspaceId: string;
 }) {
-  const [exporting, setExporting] = useState<"csv" | "json" | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   // Reviewer-validated use cases (the DF baseline flow).
   const [useCaseLead, setUseCaseLead] = useState<LeadRecord | null>(null);
@@ -2665,15 +2249,16 @@ export function Leads({
       </span>
     );
   }
-  async function exportLeads(format: "csv" | "json") {
-    setExporting(format);
+  // CSV is the only export format since v4 (B6).
+  async function exportLeads() {
+    setExporting(true);
     setExportError(null);
     try {
       const headers = new Headers();
       headers.set("authorization", `Bearer ${session.access_token}`);
       headers.set("x-workspace-id", workspaceId);
       headers.set("x-correlation-id", crypto.randomUUID());
-      const response = await fetch(`/api/v1/leads/export?format=${format}`, {
+      const response = await fetch("/api/v1/leads/export?format=csv", {
         headers,
       });
       if (!response.ok) {
@@ -2687,7 +2272,7 @@ export function Leads({
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `leads-export.${format}`;
+      anchor.download = "leads-export.csv";
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -2695,7 +2280,7 @@ export function Leads({
     } catch (error) {
       setExportError(error instanceof Error ? error.message : "Export failed.");
     } finally {
-      setExporting(null);
+      setExporting(false);
     }
   }
   return (
@@ -2723,17 +2308,10 @@ export function Leads({
             </button>
             <button
               className="row-action"
-              disabled={exporting !== null || data.leads.length === 0}
-              onClick={() => void exportLeads("csv")}
+              disabled={exporting || data.leads.length === 0}
+              onClick={() => void exportLeads()}
             >
-              {exporting === "csv" ? "Exporting…" : "Export CSV"}
-            </button>
-            <button
-              className="row-action"
-              disabled={exporting !== null || data.leads.length === 0}
-              onClick={() => void exportLeads("json")}
-            >
-              {exporting === "json" ? "Exporting…" : "Export JSON"}
+              {exporting ? "Exporting…" : "Export CSV"}
             </button>
           </div>
         </div>
@@ -3405,23 +2983,22 @@ function PipelineBoard({
   );
 }
 
-function Operations({ data }: { data: BootstrapData }) {
+/** Operations merged into Overview in v4 (A7): worker heartbeats,
+ * incidents, and the spend note live here as a section; the data still
+ * comes from the bootstrap's operations snapshot. */
+function OperationsSection({ data }: { data: BootstrapData }) {
   const { operations } = data;
   const alerts = operations.alerts ?? [];
   const openAlerts = alerts.filter((alert) => alert.status === "open");
   return (
-    <div className="content">
+    <>
+      <div className="panel-head">
+        <div>
+          <h3>Operations</h3>
+          <p>Worker health, incidents, and the spend gate</p>
+        </div>
+      </div>
       <section className="metrics">
-        <Metric
-          label="72h completion"
-          value={`${Math.round(operations.canary.completionRate * 100)}%`}
-          detail={`${operations.canary.completed}/${operations.canary.total} canaries`}
-        />
-        <Metric
-          label="Coverage"
-          value={`${operations.canary.hoursCovered.toFixed(0)}h`}
-          detail="72 hours required"
-        />
         <Metric
           label="Run start p95"
           value={
@@ -3550,7 +3127,7 @@ function Operations({ data }: { data: BootstrapData }) {
           ))}
         </div>
       </section>
-    </div>
+    </>
   );
 }
 
@@ -4156,16 +3733,15 @@ function Status({ value }: { value: string }) {
   );
 }
 function HealthBadge({ data }: { data: BootstrapData }) {
-  // "Release gate" health is the canary verdict plus worker presence.
-  // (It previously keyed off the scheduled-start latency target, which
-  // flips false whenever a large queue is draining normally.)
-  const healthy =
-    data.operations.workers.length > 0 && data.operations.canary.passed;
+  // Health is worker presence on top of a loaded bootstrap (the
+  // bootstrap itself proves the database path). The canary release-gate
+  // semantics were retired with the canary subsystem in v4.
+  const healthy = data.operations.workers.length > 0;
   return (
     <div className="signal-box">
       <span className={`pulse ${healthy ? "" : "pulse-warn"}`} />
       <span>
-        <b>{healthy ? "Operational" : "Release gate pending"}</b>
+        <b>{healthy ? "Operational" : "Worker heartbeat missing"}</b>
         <small>
           {data.sources.filter((source) => source.status === "active").length}{" "}
           approved sources · {data.operations.workers.length} workers
@@ -4174,259 +3750,6 @@ function HealthBadge({ data }: { data: BootstrapData }) {
     </div>
   );
 }
-function HelpGuide() {
-  return (
-    <div className="content">
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h3>Lead Engine User Guide</h3>
-            <p>
-              How to use the Raphah Lead Engine — from first source to qualified
-              lead.
-            </p>
-          </div>
-        </div>
-        <div className="help-content">
-          <h4>1. Getting started</h4>
-          <p>
-            The Lead Engine discovers businesses with low automation maturity,
-            scores them as opportunities, and keeps a continuously-refreshed
-            list of qualified leads. Work flows through <b>workspaces</b> — your
-            personal workspace was created automatically on first sign-in.
-          </p>
-
-          <h4>2. Sources &amp; policies — the approval gate</h4>
-          <p>
-            A <b>source</b> is a website or API you want to collect public
-            evidence from. Nothing is collected until a source's policy is
-            explicitly approved:
-          </p>
-          <ol>
-            <li>
-              Go to <b>Sources &amp; policies</b> → fill in <b>Add source</b>{" "}
-              (name, base URL, collection method, purpose, contact email,
-              refresh interval).
-            </li>
-            <li>
-              The source is created with status <b>pending approval</b> — it
-              appears in the list with a badge and an <b>Approve</b> button.
-            </li>
-            <li>
-              Review the policy (allowed domains, rate limits, budgets), then
-              click <b>Approve</b>. Only owners and administrators can approve.
-            </li>
-            <li>
-              Once approved, the status becomes <b>active</b> and the source
-              appears in the <b>Approved source</b> dropdown on the Scrape jobs
-              page.
-            </li>
-          </ol>
-          <p>
-            <b>Why the gate?</b> The Lead Engine only collects public evidence
-            for a stated business purpose. The approval step is your record that
-            a human reviewed and permitted the collection.
-          </p>
-          <p>
-            <b>Bulk import:</b> the <b>Import sources</b> panel below the source
-            list accepts a CSV with <b>name</b> and <b>website</b>
-            columns (a template is downloadable from the panel). Each row
-            becomes one source with its own policy, duplicates are skipped, and
-            nothing is collected until you approve each source — or tick
-            <b>Approve all on import</b> (owners and administrators only) to
-            activate them immediately.
-          </p>
-
-          <p>
-            <b>Discovery sources</b> (the <b>Discovery</b> view) find candidate
-            businesses via the OpenStreetMap/Overpass engine. Use is subject to
-            the Overpass API usage policy and OpenStreetMap attribution (ODbL)
-            terms — see Compliance References in the product documentation.
-          </p>
-
-          <h4>3. Criteria &amp; schedule — what counts as a lead</h4>
-          <p>Each discovery campaign has scoring thresholds:</p>
-          <ul>
-            <li>
-              <b>Maximum maturity</b> — only businesses scoring at or below this
-              automation-maturity level qualify (lower = less automated = better
-              prospect).
-            </li>
-            <li>
-              <b>Minimum opportunity</b> — the opportunity score a business must
-              reach.
-            </li>
-            <li>
-              <b>Confidence %</b> — minimum evidence confidence.
-            </li>
-            <li>
-              <b>Evidence categories</b> — how many distinct evidence types must
-              be observed.
-            </li>
-            <li>
-              <b>Geography</b> — limit discovery to cities, regions, or a radius
-              around a point.
-            </li>
-          </ul>
-          <p>
-            The engine watches your qualified-lead output and suggests threshold
-            adjustments (e.g. "loosen" when output is below target). Click{" "}
-            <b>Apply suggestion</b> to accept, or edit the values manually and
-            save. Enable <b>auto-apply</b> to let future suggestions apply
-            themselves.
-          </p>
-
-          <h4>4. Scrape jobs — collecting evidence</h4>
-          <p>
-            Go to <b>Scrape jobs</b>, pick an <b>approved source</b>, enter a
-            public target URL, and click <b>Queue scrape</b>. Jobs move through
-            a durable lifecycle: <b>queued → leased → completed</b> (or retried,
-            then dead-lettered after max attempts). Every job stays queryable in
-            the job table.
-          </p>
-
-          <h4>5. Qualified leads — the output</h4>
-          <p>
-            <b>Qualified leads</b> lists businesses that met your criteria,
-            ranked by opportunity potential. Each lead links to its evidence.
-            Export the list for outreach — note: the system drafts messages, a
-            human approves and sends them (no automated outreach).
-          </p>
-
-          <h4>6. Operations &amp; audit</h4>
-          <p>
-            <b>Operations</b> shows worker health, job throughput, and the
-            canary status (the hourly pipeline smoke test). <b>Audit log</b>
-            records every significant action — source approvals, criteria
-            changes, and handoffs — for compliance review.
-          </p>
-
-          <h4>7. Job Bank market, rescore &amp; History</h4>
-          <p>
-            <b>Job Bank market.</b> The engine reads Canada Job Bank open
-            data for clinic front-desk roles (dental/medical receptionist
-            and related postings). When a clinic&apos;s city shows active
-            demand — at least 10 postings in the last 60 days — that
-            market hiring is added to the clinic&apos;s intent/trigger
-            evidence at scoring time. It is market-level and inferential:
-            Job Bank does not disclose which employer is hiring. The{" "}
-            <b>Job Bank market</b> view shows the current snapshot —
-            postings by city, the top roles, and month-over-month change.
-            The bridge applies market evidence only while an approved
-            Job Bank discovery source exists and the Canada Job Bank
-            terms are accepted: retire that source (or remove the
-            acceptance) and the daily refresh stops <i>and</i> scoring
-            and rescoring stop applying the stored snapshot. The last
-            snapshot remains visible in the market view for reference,
-            with its sync date.
-          </p>
-          <p>
-            <b>Job Bank market signal strength</b> (Criteria &amp;
-            schedule) is the saved weight of that market evidence, from
-            0 to 40; 0 turns the bridge off for the campaign. On-site
-            hiring signals weigh 14–22 by comparison, so 20 is a
-            meaningful but not decisive contribution.
-          </p>
-          <p>
-            <b>Rescore assessments.</b> Scoring normally happens once,
-            when evidence is collected. A rescore recomputes a
-            campaign&apos;s stored assessments from their stored
-            evidence and signals — no site is re-scraped — under the
-            criteria you choose. Use <b>Dry-run</b> first: it projects
-            how many leads would qualify and shows the top 20 with
-            before/after scores, and writes nothing. The{" "}
-            <b>Threshold (this run)</b> and <b>Job Bank strength (this
-            run)</b> fields override the saved criteria for that run
-            only. A real rescore writes a <b>new</b> assessment for each
-            lead — originals are preserved for audit — and is
-            idempotent: re-running with unchanged criteria and market
-            data reports the rows as already current instead of writing
-            duplicates. Opportunities are never deleted by a rescore;
-            one that stops qualifying is marked unqualified and leaves
-            the review queue, and its history is kept.
-          </p>
-          <p>
-            <b>Use cases &amp; sending a lead to the Delivery Factory.</b>{" "}
-            For every qualified lead, the engine identifies at least
-            three automation use cases from the lead&apos;s stored
-            evidence (for example, phone-only booking → online booking;
-            paper intake → digital intake). Open <b>Use cases</b> on
-            the lead&apos;s row, select the ones that fit, and{" "}
-            <b>Approve</b> — approved use cases become the handoff
-            package&apos;s requirement baseline as human-validated Must
-            requirements, with you recorded as the validator. The
-            Delivery Factory refuses packages without a validated
-            baseline, so <b>Send to DF</b> stays blocked until at least
-            one use case is approved. Delivery is confirmed, not
-            assumed: after sending, the lead shows a live delivery
-            chip — <i>Sending to DF…</i> while the factory has not yet
-            accepted, <i>At DF ✓</i> once it has, and{" "}
-            <i>DF delivery failed</i> (with the reason) if the push
-            fails terminally — plus a confirmation banner when the
-            outcome lands. Action messages (toasts) stay on screen for
-            at least 5 seconds.
-          </p>
-          <p>
-            <b>Proposals &amp; outreach.</b> Outreach lives in the
-            Lead Engine — the Delivery Factory only ever receives
-            leads this workspace has endorsed. On a qualified lead,
-            open <b>Proposal</b>: the draft is written from the
-            lead&apos;s full evidence and its approved use cases, and
-            every factual claim is backed by a verified evidence
-            quote. Each approved use case carries a success measure
-            (an OKR you can edit before approving); those measures
-            are promised to the lead in the proposal and ship in the
-            handoff package as the success measures the Delivery
-            Factory verifies after delivery. Approving the proposal
-            requires a recorded CASL consent basis for the lead (the
-            panel includes the form). You send the approved text
-            yourself — nothing auto-sends — and <b>Mark as sent</b>{" "}
-            records the “contacted” outcome on the lead.
-          </p>
-          <p>
-            <b>Re-queue scrape</b> (on each campaign card) queues a fresh
-            scrape of the campaign source&apos;s base URL under the
-            currently saved criteria — save first if you changed
-            anything.
-          </p>
-          <p>
-            <b>History — retiring sources and campaigns.</b> Retiring is
-            the auditable alternative to deleting. A retired source
-            stops collecting everywhere; a retired campaign stops its
-            schedule, criteria automation, and discovery collection.
-            Records, jobs, assessments, and audit history are
-            preserved, and retired entries appear under <b>History</b>{" "}
-            on the Sources and Criteria pages, where <b>Restore</b>{" "}
-            returns each one to the exact status it held before
-            retiring — restoring never approves anything that was not
-            already approved. A source cannot retire while its jobs are
-            still in flight (queued, leased, running, or retrying); let
-            them finish or dead-letter first. Only owners and
-            administrators can retire or restore.
-          </p>
-
-          <h4>Troubleshooting</h4>
-          <ul>
-            <li>
-              <b>Source dropdown is empty</b> — no active sources in this
-              workspace yet. Create one under Sources &amp; policies and approve
-              it.
-            </li>
-            <li>
-              <b>Stuck on "Workspace initializing"</b> — refresh the page; the
-              bootstrap retries automatically.
-            </li>
-            <li>
-              <b>"Request failed (404)"</b> — the data plane had a hiccup; click
-              Refresh or reload the page.
-            </li>
-          </ul>
-        </div>
-      </section>
-    </div>
-  );
-}
-
 function Centered({
   title,
   detail,

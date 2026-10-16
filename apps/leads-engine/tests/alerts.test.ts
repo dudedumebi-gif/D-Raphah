@@ -4,7 +4,6 @@ import {
   alertsEnabled,
   checkOperationalAlerts,
   formatSlackAlert,
-  productionGatePassed,
   reconcileAlert,
   recordQstashFailure,
   type AlertInput,
@@ -104,150 +103,34 @@ describe("stateful Slack alerts", () => {
 });
 
 describe("operational evaluator", () => {
-  it("requires every production promotion check before approval alerting", () => {
-    const allGreen = {
-      soakCompletion: true,
-      scheduledStartP95: true,
-      incidentHealth: true,
-      retryRecovery: true,
-      auditAndRlsIntegrity: true,
-    };
-    expect(productionGatePassed(allGreen)).toBe(true);
-    expect(productionGatePassed({ ...allGreen, retryRecovery: false })).toBe(false);
-  });
-
-  it("opens all seven database-observable conditions", async () => {
+  it("opens the three database-observable conditions", async () => {
     process.env = {
       ...OLD_ENV,
       SLACK_ALERTS_ENABLED: "false",
-      LEAD_ENGINE_CANARY_URL: "https://expected.example/canary-source.html",
     };
     const now = new Date("2026-10-08T12:00:00Z");
     const old = "2026-10-08T11:30:00Z";
-    const sampleStart = now.getTime() - 72 * 3_600_000;
-    const soak = Array.from({ length: 72 }, (_, index) => ({
-      workspace_id: WS,
-      scheduled_at: new Date(sampleStart + index * 3_600_000).toISOString(),
-      completed_at: new Date(sampleStart + index * 3_600_000 + 60_000).toISOString(),
-      status: "completed",
-    }));
     const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const sql = strings.join("?").toLowerCase();
       if (sql.includes("select id from public.workspaces")) return [{ id: WS }];
       if (sql.includes("from public.worker_nodes")) return [{ id: "worker-a", last_heartbeat_at: old }];
-      if (sql.includes("distinct on (cr.workspace_id)")) return [{
-        id: "run-terminal", workspace_id: WS, status: "failed",
-        scheduled_at: old, completed_at: old, failure_reason: "no persistent lead",
-        target_url: "https://wrong.example",
-      }];
-      if (sql.includes("cr.status in ('queued','running')")) return [{
-        id: "run-stuck", workspace_id: WS, status: "running",
-        scheduled_at: old, completed_at: null, failure_reason: null,
-      }];
       if (sql.includes("from public.scrape_jobs sj")) return [{
         id: "job-dead", workspace_id: WS, status: "dead_letter", last_error: "robots denied",
       }];
       if (sql.includes("percentile_cont")) return [{ workspace_id: WS, p95_ms: 301_000 }];
-      if (sql.includes("select workspace_id, scheduled_at")) return soak;
-      if (sql.includes("critical_open")) return [{ workspace_id: WS, critical_open: 1 }];
-      if (sql.includes("recovered_count")) return [{ workspace_id: WS, recovered_count: 1, dead_letter_count: 1 }];
-      if (sql.includes("retry_recovery_verified")) return [{ workspace_id: WS, retry_recovery_verified: true, rls_behavior_verified: true }];
-      if (sql.includes("with required_rls")) return [{ rls_ok: true, audit_ok: true }];
       if (sql.includes("insert into public.alert_log"))
         return [{ alert_id: "alert", transition: "opened" }];
       if (sql.includes("update public.alert_log")) return [];
       if (sql.includes("insert into public.audit_events")) return [];
       throw new Error(`unexpected query: ${sql.slice(0, 100)}`);
     }) as AlertSqlClient;
-    // A failed terminal canary cannot simultaneously be a completed target
-    // mismatch; the six active conditions here plus the separate target test
-    // cover all seven database-observable rules.
-    expect(await checkOperationalAlerts(client, now)).toBe(6);
+    // worker_stale (30-minute-old heartbeat) + dead_letter +
+    // scheduled_start_p95_breach (301s >= 300s limit). The canary and
+    // release-gate conditions were retired with the canary subsystem.
+    expect(await checkOperationalAlerts(client, now)).toBe(3);
   });
 
-  it("detects a completed canary that used the wrong target", async () => {
-    process.env = {
-      ...OLD_ENV,
-      SLACK_ALERTS_ENABLED: "false",
-      LEAD_ENGINE_CANARY_URL: "https://expected.example/canary-source.html",
-    };
-    const now = new Date("2026-10-08T12:00:00Z");
-    const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const sql = strings.join("?").toLowerCase();
-      if (sql.includes("select id from public.workspaces")) return [{ id: WS }];
-      if (sql.includes("from public.worker_nodes")) return [{ id: "worker-a", last_heartbeat_at: now.toISOString() }];
-      if (sql.includes("distinct on (cr.workspace_id)")) return [{
-        id: "run-complete", workspace_id: WS, status: "completed",
-        scheduled_at: now.toISOString(), completed_at: now.toISOString(),
-        failure_reason: null, target_url: "https://wrong.example",
-      }];
-      if (sql.includes("cr.status in ('queued','running')")) return [];
-      if (sql.includes("from public.scrape_jobs sj")) return [];
-      if (sql.includes("percentile_cont")) return [];
-      if (sql.includes("select workspace_id, scheduled_at")) return [];
-      if (sql.includes("critical_open")) return [];
-      if (sql.includes("recovered_count")) return [{ workspace_id: WS, recovered_count: 0, dead_letter_count: 0 }];
-      if (sql.includes("retry_recovery_verified")) return [{ workspace_id: WS, retry_recovery_verified: false, rls_behavior_verified: true }];
-      if (sql.includes("with required_rls")) return [{ rls_ok: true, audit_ok: true }];
-      if (sql.includes("insert into public.alert_log")) {
-        const isMismatch = values[1] === "canary_target_mismatch";
-        return isMismatch ? [{ alert_id: "alert", transition: "opened" }] : [];
-      }
-      if (sql.includes("update public.alert_log")) return [];
-      if (sql.includes("insert into public.audit_events")) return [];
-      throw new Error(`unexpected query: ${sql.slice(0, 100)}`);
-    }) as AlertSqlClient;
-    expect(await checkOperationalAlerts(client, now)).toBe(1);
-  });
-
-  it("opens the approval alert only when all five production gates pass", async () => {
-    process.env = {
-      ...OLD_ENV,
-      SLACK_ALERTS_ENABLED: "false",
-      LEAD_ENGINE_CANARY_URL: "https://expected.example/canary-source.html",
-    };
-    const now = new Date("2026-10-08T12:00:00Z");
-    const sampleStart = now.getTime() - 72 * 3_600_000;
-    const soak = Array.from({ length: 72 }, (_, index) => ({
-      workspace_id: WS,
-      scheduled_at: new Date(sampleStart + index * 3_600_000).toISOString(),
-      completed_at: new Date(sampleStart + index * 3_600_000 + 60_000).toISOString(),
-      status: "completed",
-    }));
-    const opened: string[] = [];
-    const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const sql = strings.join("?").toLowerCase();
-      if (sql.includes("select id from public.workspaces")) return [{ id: WS }];
-      if (sql.includes("from public.worker_nodes")) return [{ id: "worker-a", last_heartbeat_at: now.toISOString() }];
-      if (sql.includes("distinct on (cr.workspace_id)")) return [{
-        id: "run-complete", workspace_id: WS, status: "completed",
-        scheduled_at: now.toISOString(), completed_at: now.toISOString(),
-        failure_reason: null, target_url: "https://expected.example/canary-source.html",
-      }];
-      if (sql.includes("cr.status in ('queued','running')")) return [];
-      if (sql.includes("from public.scrape_jobs sj")) return [];
-      if (sql.includes("percentile_cont")) return [{ workspace_id: WS, p95_ms: 240_000 }];
-      if (sql.includes("select workspace_id, scheduled_at")) return soak;
-      if (sql.includes("critical_open")) return [];
-      if (sql.includes("recovered_count")) return [{ workspace_id: WS, recovered_count: 0, dead_letter_count: 0 }];
-      if (sql.includes("retry_recovery_verified")) return [{ workspace_id: WS, retry_recovery_verified: true, rls_behavior_verified: true }];
-      if (sql.includes("with required_rls")) return [{ rls_ok: true, audit_ok: true }];
-      if (sql.includes("insert into public.alert_log")) {
-        const type = String(values[1]);
-        if (type === "soak_passed" || type === "production_gate_passed") {
-          opened.push(type);
-          return [{ alert_id: `alert-${type}`, transition: "opened" }];
-        }
-        return [];
-      }
-      if (sql.includes("update public.alert_log") || sql.includes("insert into public.audit_events")) return [];
-      throw new Error(`unexpected query: ${sql.slice(0, 100)}`);
-    }) as AlertSqlClient;
-    expect(await checkOperationalAlerts(client, now)).toBe(2);
-    expect(opened).toEqual(["soak_passed", "production_gate_passed"]);
-  });
-
-  it("records a signed QStash final-delivery failure as the eighth condition", async () => {
+  it("records a signed QStash final-delivery failure", async () => {
     process.env = { ...OLD_ENV, SLACK_ALERTS_ENABLED: "false" };
     const { client, queries } = clientForTransition("opened");
     const sourceBody = Buffer.from(JSON.stringify({ schedule: "raphah-lead-worker-v1" })).toString("base64");
