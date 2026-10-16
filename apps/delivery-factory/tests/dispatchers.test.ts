@@ -35,44 +35,14 @@ vi.mock("../api/_workflows/runs/[runId].js", () => ({
   },
 }));
 
-vi.mock("../api/_projects/[id].js", () => ({
+vi.mock("../api/_projects/[id]/charter.js", () => ({
   default: async (req: ApiRequest) => {
-    seen.push({ handler: "project", query: req.query });
+    seen.push({ handler: "charter", query: req.query });
   },
 }));
-vi.mock("../api/_projects/[id]/clarifications.js", () => ({
+vi.mock("../api/_projects/[id]/kpis/[kpiId]/verify.js", () => ({
   default: async (req: ApiRequest) => {
-    seen.push({ handler: "clarifications", query: req.query });
-  },
-}));
-vi.mock("../api/_projects/[id]/clarifications/[cid]/resolve.js", () => ({
-  default: async (req: ApiRequest) => {
-    seen.push({ handler: "resolveClarification", query: req.query });
-  },
-}));
-vi.mock("../api/_projects/[id]/events.js", () => ({
-  default: async (req: ApiRequest) => {
-    seen.push({ handler: "events", query: req.query });
-  },
-}));
-vi.mock("../api/_projects/[id]/milestones.js", () => ({
-  default: async (req: ApiRequest) => {
-    seen.push({ handler: "milestones", query: req.query });
-  },
-}));
-vi.mock("../api/_projects/[id]/milestones/[mid]/complete.js", () => ({
-  default: async (req: ApiRequest) => {
-    seen.push({ handler: "completeMilestone", query: req.query });
-  },
-}));
-vi.mock("../api/_projects/[id]/stage.js", () => ({
-  default: async (req: ApiRequest) => {
-    seen.push({ handler: "stage", query: req.query });
-  },
-}));
-vi.mock("../api/_projects/[id]/begin.js", () => ({
-  default: async (req: ApiRequest) => {
-    seen.push({ handler: "begin", query: req.query });
+    seen.push({ handler: "kpiVerify", query: req.query });
   },
 }));
 vi.mock("../api/_projects/[id]/workflow-skeletons.js", () => ({
@@ -131,6 +101,17 @@ describe("wf-dispatch", () => {
     expect(seen[0].query).not.toHaveProperty("path");
   });
 
+  it.each(["environments/demo/reset", "drafts/revise"])(
+    "returns 404 for the removed ?path=%s",
+    async (path) => {
+      seen.length = 0;
+      const t = makeReq(path);
+      await wfDispatch(t.req, t.res);
+      expect(seen).toHaveLength(0);
+      expect(t.status()).toBe(404);
+    },
+  );
+
   it("returns 404 for unknown workflow sub-paths", async () => {
     seen.length = 0;
     const t = makeReq("wf-1/nope/deep");
@@ -143,14 +124,8 @@ describe("wf-dispatch", () => {
 
 describe("pj-dispatch", () => {
   it.each([
-    ["p-1", "project", { id: "p-1" }],
-    ["p-1/clarifications", "clarifications", { id: "p-1" }],
-    ["p-1/clarifications/c-2/resolve", "resolveClarification", { id: "p-1", cid: "c-2" }],
-    ["p-1/events", "events", { id: "p-1" }],
-    ["p-1/milestones", "milestones", { id: "p-1" }],
-    ["p-1/milestones/m-3/complete", "completeMilestone", { id: "p-1", mid: "m-3" }],
-    ["p-1/stage", "stage", { id: "p-1" }],
-    ["p-1/begin", "begin", { id: "p-1" }],
+    ["p-1/charter", "charter", { id: "p-1" }],
+    ["p-1/kpis/k-9/verify", "kpiVerify", { id: "p-1", kpiId: "k-9" }],
     ["p-1/workflow-skeletons", "workflowSkeletons", { id: "p-1" }],
   ])("routes ?path=%s to %s", async (path, expected, params) => {
     seen.length = 0;
@@ -160,6 +135,25 @@ describe("pj-dispatch", () => {
     expect(seen[0].handler).toBe(expected);
     expect(seen[0].query).toMatchObject(params);
     expect(seen[0].query).not.toHaveProperty("path");
+  });
+
+  // The v2 cut: the caller-less project pipeline API and the manual
+  // begin are gone — every one of these paths now 404s.
+  it.each([
+    "p-1",
+    "p-1/clarifications",
+    "p-1/clarifications/c-2/resolve",
+    "p-1/events",
+    "p-1/milestones",
+    "p-1/milestones/m-3/complete",
+    "p-1/stage",
+    "p-1/begin",
+  ])("returns 404 for the removed ?path=%s", async (path) => {
+    seen.length = 0;
+    const t = makeReq(path);
+    await pjDispatch(t.req, t.res);
+    expect(seen).toHaveLength(0);
+    expect(t.status()).toBe(404);
   });
 
   it("returns 404 for unknown project sub-paths", async () => {

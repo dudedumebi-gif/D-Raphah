@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getAuthToken, notifyUnauthorized } from "./auth";
 import type { DeliveryEnvironment } from "./environment";
-import { WalkthroughView } from "./walkthrough";
-import { ExportPanel } from "./export-panel";
+import {
+  createCharterCache,
+  groupWorkflowsByFamily,
+  skeletonRef,
+  summarizeCharter,
+  type CharterCache,
+  type CharterLike,
+  type SkeletonRef,
+} from "./workflow-families";
 
 /* ── Types (mirror api/_lib/workflows.ts) ─────────────────────────────── */
 
@@ -51,6 +58,13 @@ interface WorkflowSummary {
   status: "draft" | "published" | "archived";
   environment: DeliveryEnvironment;
   trigger_type: string;
+  /** Carried by both the list and detail payloads; use-case skeletons
+   * hold { projectId, packageId, requirementId, requirementCode }. */
+  trigger_config: Record<string, unknown>;
+  /** Node kinds in the stored graph that v2 retired (persisted v1-era
+   * workflows only). Non-empty = explicitly retired: viewable,
+   * archivable, deletable — never executable. Server-computed. */
+  retired_kinds?: string[];
   updated_at: string;
 }
 
@@ -112,6 +126,118 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+/* ── Charter toggle ────────────────────────────────────────────────────
+ * The project's charter as a compact read-only summary, collapsed by
+ * default. The charter is fetched lazily on first expand (through the
+ * shared per-project cache — the list and the editor never refetch a
+ * charter the other already loaded) from the same endpoint the full
+ * Charter page uses. Requirements the family's skeletons implement
+ * are marked. */
+
+function CharterToggle(props: {
+  projectId: string;
+  skeletons: SkeletonRef[];
+  cache: CharterCache;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState<{
+    projectId: string;
+    charter: CharterLike;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // The summary is DERIVED at render from the cached charter and the
+  // family's CURRENT membership — never stored in state. A summary
+  // captured in an initializer kept marking requirements whose
+  // skeleton had since been deleted, until the view remounted
+  // (Codex P2 on PR #63).
+  const charter =
+    loaded && loaded.projectId === props.projectId
+      ? loaded.charter
+      : (props.cache.peek(props.projectId) ?? null);
+  const summary = charter
+    ? summarizeCharter(charter, props.skeletons)
+    : null;
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (!next || charter || loading) return;
+    setLoading(true);
+    setError(null);
+    props.cache
+      .load(props.projectId)
+      .then((c) => setLoaded({ projectId: props.projectId, charter: c }))
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : "Failed to load charter"),
+      )
+      .finally(() => setLoading(false));
+  };
+
+  return (
+    <div className="wf-charter-box">
+      <button
+        className="btn-ghost wf-charter-toggle"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        {open ? "▾" : "▸"} Charter
+      </button>
+      {open && (
+        <div className="wf-charter">
+          {loading && <p className="muted">Loading charter…</p>}
+          {error && <p className="wf-error">{error}</p>}
+          {summary && (
+            <>
+              <p className="wf-charter-org">{summary.organizationName}</p>
+              {summary.problemStatement && (
+                <p className="wf-charter-problem">{summary.problemStatement}</p>
+              )}
+              {summary.requirements.length > 0 && (
+                <>
+                  <h5>Requirement baseline</h5>
+                  <ul className="wf-charter-list">
+                    {summary.requirements.map((r) => (
+                      <li key={r.id}>
+                        <span className="wf-charter-code">{r.code}</span>{" "}
+                        {r.statement}{" "}
+                        <span className="muted">({r.priority})</span>
+                        {r.implemented && (
+                          <span className="wf-charter-impl">
+                            ✓ skeleton in this family
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {summary.kpis.length > 0 && (
+                <>
+                  <h5>KPIs</h5>
+                  <ul className="wf-charter-list">
+                    {summary.kpis.map((k) => (
+                      <li key={k.id}>
+                        <strong>{k.metric}</strong> — target {k.target}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {!summary.problemStatement &&
+                summary.requirements.length === 0 &&
+                summary.kpis.length === 0 && (
+                  <p className="muted">The charter has no content yet.</p>
+                )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Workflow list ───────────────────────────────────────────────────── */
 
 function WorkflowList(props: {
@@ -119,13 +245,20 @@ function WorkflowList(props: {
   onNew: () => void;
   refreshToken: number;
   environment: DeliveryEnvironment;
-  onWalkthrough?: () => void;
+  charterCache: CharterCache;
 }) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+
+  // Use-case skeletons group under their project family; everything
+  // else renders standalone, exactly as before.
+  const grouped = useMemo(
+    () => groupWorkflowsByFamily(workflows),
+    [workflows],
+  );
 
   useEffect(() => {
     setLoading(true);
@@ -196,11 +329,6 @@ function WorkflowList(props: {
           </p>
         </div>
         <div className="wf-list-actions">
-          {props.onWalkthrough ? (
-            <button className="btn-ghost" onClick={props.onWalkthrough}>
-              ▶ Demo walkthrough
-            </button>
-          ) : null}
           <button className="btn-primary" onClick={props.onNew}>
             + New workflow
           </button>
@@ -214,47 +342,77 @@ function WorkflowList(props: {
           to automate lead follow-up, status updates, notifications and more.
         </p>
       )}
-      <div className="wf-cards">
-        {workflows.map((w) => (
-          <div key={w.id} className="wf-card">
-            <button
-              className="wf-card-open"
-              onClick={() => props.onOpen(w.id)}
-            >
-              <span className={`wf-badge wf-badge-${w.status}`}>
-                {w.status}
-              </span>
-              <span className="wf-card-name">{w.name}</span>
-              <span className="wf-card-meta">
-                {w.trigger_type} · {w.environment} · updated{" "}
-                {new Date(w.updated_at).toLocaleString()}
-              </span>
-            </button>
-            <div className="wf-card-actions">
-              {w.status !== "archived" && (
-                <button
-                  className="btn-ghost"
-                  disabled={busyId === w.id}
-                  onClick={() => void archiveFromList(w)}
-                >
-                  Archive
-                </button>
-              )}
-              {(w.status === "draft" || w.status === "archived") && (
-                <button
-                  className="btn-ghost wf-action-danger"
-                  disabled={busyId === w.id}
-                  onClick={() => void deleteFromList(w)}
-                >
-                  Delete
-                </button>
-              )}
-            </div>
+      {grouped.families.map((family) => (
+        <section key={family.projectId} className="wf-family">
+          <div className="wf-family-head">
+            <h3>{family.title}</h3>
+            <span className="muted">
+              {family.workflows.length} use-case skeleton
+              {family.workflows.length === 1 ? "" : "s"} · from the accepted
+              handoff package
+            </span>
           </div>
+          <CharterToggle
+            projectId={family.projectId}
+            skeletons={family.skeletons}
+            cache={props.charterCache}
+          />
+          <div className="wf-cards">{family.workflows.map(renderCard)}</div>
+        </section>
+      ))}
+      {grouped.standalone.length > 0 &&
+        (grouped.families.length > 0 ? (
+          <section className="wf-family">
+            <div className="wf-family-head">
+              <h3>Other workflows</h3>
+            </div>
+            <div className="wf-cards">{grouped.standalone.map(renderCard)}</div>
+          </section>
+        ) : (
+          <div className="wf-cards">{grouped.standalone.map(renderCard)}</div>
         ))}
-      </div>
     </div>
   );
+
+  function renderCard(w: WorkflowSummary) {
+    return (
+      <div key={w.id} className="wf-card">
+        <button className="wf-card-open" onClick={() => props.onOpen(w.id)}>
+          <span className={`wf-badge wf-badge-${w.status}`}>{w.status}</span>
+          {(w.retired_kinds?.length ?? 0) > 0 && (
+            <span className="wf-badge wf-badge-retired">
+              retired kinds: {w.retired_kinds!.join(", ")}
+            </span>
+          )}
+          <span className="wf-card-name">{w.name}</span>
+          <span className="wf-card-meta">
+            {w.trigger_type} · {w.environment} · updated{" "}
+            {new Date(w.updated_at).toLocaleString()}
+          </span>
+        </button>
+        <div className="wf-card-actions">
+          {w.status !== "archived" && (
+            <button
+              className="btn-ghost"
+              disabled={busyId === w.id}
+              onClick={() => void archiveFromList(w)}
+            >
+              Archive
+            </button>
+          )}
+          {(w.status === "draft" || w.status === "archived") && (
+            <button
+              className="btn-ghost wf-action-danger"
+              disabled={busyId === w.id}
+              onClick={() => void deleteFromList(w)}
+            >
+              Delete
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 }
 
 /* ── Canvas editor ───────────────────────────────────────────────────── */
@@ -892,14 +1050,24 @@ export function WorkflowsSection(props: {
 }) {
   const [catalog, setCatalog] = useState<NodeSpec[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [walkthroughOpen, setWalkthroughOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
   const [workflow, setWorkflow] = useState<WorkflowDetail | null>(null);
   const [tab, setTab] = useState<"builder" | "runs">("builder");
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
+
+  // One charter cache for the whole Automations view: a charter the
+  // list already loaded is not refetched when a skeleton opens in
+  // the editor, and vice versa.
+  const charterCacheRef = useRef<CharterCache | null>(null);
+  if (!charterCacheRef.current) {
+    charterCacheRef.current = createCharterCache((projectId) =>
+      api<{ charter: CharterLike }>(
+        `/api/projects/${projectId}/charter`,
+      ).then((d) => d.charter),
+    );
+  }
 
   useEffect(() => {
     api<{ nodes: NodeSpec[] }>("/api/workflows/catalog")
@@ -1066,14 +1234,6 @@ export function WorkflowsSection(props: {
     }
   }
 
-  if (walkthroughOpen && props.environment === "demo" && !openId) {
-    return (
-      <div className="wf-section">
-        <WalkthroughView onClose={() => setWalkthroughOpen(false)} />
-      </div>
-    );
-  }
-
   if (!openId || !workflow) {
     return (
       <div className="wf-section">
@@ -1083,17 +1243,18 @@ export function WorkflowsSection(props: {
           onNew={createNew}
           refreshToken={refreshToken}
           environment={props.environment}
-          onWalkthrough={
-            props.environment === "demo"
-              ? () => setWalkthroughOpen(true)
-              : undefined
-          }
+          charterCache={charterCacheRef.current}
         />
       </div>
     );
   }
 
   const isDraft = workflow.status === "draft";
+  const openSkeleton = skeletonRef(workflow);
+  // Persisted v1-era graphs can carry node kinds v2 retired. They
+  // are explicitly retired: marked here, Execute disabled with the
+  // reason shown, and the execute route rejects them 422 regardless.
+  const retiredKinds = workflow.retired_kinds ?? [];
 
   return (
     <div className="wf-section">
@@ -1112,6 +1273,11 @@ export function WorkflowsSection(props: {
           {workflow.status}
         </span>
         <span className="wf-badge wf-badge-env">{workflow.environment}</span>
+        {retiredKinds.length > 0 && (
+          <span className="wf-badge wf-badge-retired">
+            retired kinds: {retiredKinds.join(", ")}
+          </span>
+        )}
         <div className="wf-tabs">
           <button
             className={tab === "builder" ? "active" : ""}
@@ -1127,9 +1293,6 @@ export function WorkflowsSection(props: {
           </button>
         </div>
         <div className="wf-actions">
-          <button className="btn-ghost" onClick={() => setExportOpen(true)}>
-            Export
-          </button>
           <button
             className="btn-ghost"
             onClick={save}
@@ -1168,7 +1331,12 @@ export function WorkflowsSection(props: {
             <button
               className="btn-primary"
               onClick={execute}
-              disabled={saving}
+              disabled={saving || retiredKinds.length > 0}
+              title={
+                retiredKinds.length > 0
+                  ? `Cannot execute — this workflow contains retired node kinds: ${retiredKinds.join(", ")}`
+                  : undefined
+              }
             >
               ▶ Execute
             </button>
@@ -1176,6 +1344,22 @@ export function WorkflowsSection(props: {
         </div>
       </div>
       {notice && <p className="wf-notice">{notice}</p>}
+      {retiredKinds.length > 0 && (
+        <p className="wf-hint" style={{ padding: "8px 16px" }}>
+          This workflow contains node kinds retired in v2:{" "}
+          {retiredKinds.join(", ")}. It can be viewed, archived, or deleted,
+          but not executed or edited.
+        </p>
+      )}
+      {openSkeleton && (
+        <div className="wf-editor-charter">
+          <CharterToggle
+            projectId={openSkeleton.projectId}
+            skeletons={[openSkeleton]}
+            cache={charterCacheRef.current}
+          />
+        </div>
+      )}
       {!isDraft && tab === "builder" && (
         <p className="wf-hint" style={{ padding: "8px 16px" }}>
           Published workflows are immutable — duplicate via API to iterate, or
@@ -1191,12 +1375,6 @@ export function WorkflowsSection(props: {
       ) : (
         <RunHistory workflowId={workflow.id} />
       )}
-      {exportOpen ? (
-        <ExportPanel
-          workflow={workflow}
-          onClose={() => setExportOpen(false)}
-        />
-      ) : null}
     </div>
   );
 }

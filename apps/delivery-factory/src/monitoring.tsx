@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getAuthToken, notifyUnauthorized } from "./auth";
 import { CharterPanel } from "./charter";
+import {
+  readinessFromProbe,
+  type HealthState,
+  type ProductReadiness,
+} from "./monitoring-readiness";
 
 /* ── Monitoring view ────────────────────────────────────────────────────
- * Service liveness, readiness, handoff intake activity, feedback outbox
- * depth, and QStash schedule status. Polls every 30s.
+ * One status strip (Lead Engine alive · Delivery Factory ready ·
+ * feedback outbox depth) over the handoff intake table. Polls every 30s.
  */
 
 const LEAD_ENGINE_BASE_URL =
@@ -13,8 +18,6 @@ const LEAD_ENGINE_BASE_URL =
 
 const POLL_MS = 30_000;
 
-type HealthState = "up" | "down" | "degraded" | "loading" | "unknown";
-
 interface ServiceStatus {
   name: string;
   url: string;
@@ -22,12 +25,6 @@ interface ServiceStatus {
   detail: string;
   latencyMs: number | null;
   checkedAt: string | null;
-}
-
-interface ReadyCheck {
-  name: string;
-  ok: boolean;
-  detail?: string;
 }
 
 interface HandoffRow {
@@ -53,15 +50,6 @@ interface MonitoringSnapshot {
     sent: number;
   };
   activeNonces: number;
-  qstash: {
-    configured: boolean;
-    schedules: Array<{
-      name: string;
-      cadence: string;
-      route: string;
-      status: string;
-    }>;
-  };
   checkedAt: string;
 }
 
@@ -145,9 +133,16 @@ export function MonitoringSection() {
       checkedAt: null,
     },
   ]);
-  const [readyChecks, setReadyChecks] = useState<ReadyCheck[] | null>(null);
-  const [readyState, setReadyState] = useState<HealthState>("loading");
-  const [readyDetail, setReadyDetail] = useState("Checking…");
+  // Readiness is tracked per product: each strip indicator derives
+  // ONLY from its own product's probe (Codex P2 on PR #63).
+  const [leadReady, setLeadReady] = useState<ProductReadiness>({
+    state: "loading",
+    detail: "Checking…",
+  });
+  const [factoryReady, setFactoryReady] = useState<ProductReadiness>({
+    state: "loading",
+    detail: "Checking…",
+  });
   const [snapshot, setSnapshot] = useState<MonitoringSnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [charterProjectId, setCharterProjectId] = useState<string | null>(null);
@@ -191,57 +186,18 @@ export function MonitoringSection() {
     ];
     setServices(nextServices);
 
-    // 2. Independent readiness probes for both products.
-    try {
-      const [leadReady, deliveryReady] = await Promise.all([
-        fetchJson(`${LEAD_ENGINE_BASE_URL}/api/health/ready`),
-        fetchJson("/api/ready"),
-      ]);
-      const normalize = (prefix: string, payload: unknown): ReadyCheck[] => {
-        const data = (payload ?? {}) as Record<string, unknown>;
-        const rows = Array.isArray(data.checks) ? data.checks : [];
-        return rows.map((c) => {
-          const r = c as Record<string, unknown>;
-          return {
-            name: `${prefix}: ${String(r.name ?? r.check ?? "check")}`,
-            ok: r.ok === true || r.status === "ok" || r.status === "pass",
-            detail:
-              typeof r.detail === "string"
-                ? r.detail
-                : typeof r.error === "string"
-                  ? r.error
-                  : undefined,
-          };
-        });
-      };
-      const checks = [
-        ...normalize("Lead Engine", leadReady.data),
-        ...normalize("Delivery Factory", deliveryReady.data),
-      ];
-      setReadyChecks(checks.length > 0 ? checks : null);
-      if (
-        leadReady.ok &&
-        deliveryReady.ok &&
-        checks.every((check) => check.ok)
-      ) {
-        setReadyState("up");
-        setReadyDetail("Both products ready — all configuration checks pass");
-      } else {
-        setReadyState("degraded");
-        const missing = checks.filter((c) => !c.ok).map((c) => c.name);
-        setReadyDetail(
-          missing.length > 0
-            ? `Not ready: ${missing.join(", ")}`
-            : `Readiness HTTP ${leadReady.status}/${deliveryReady.status}`,
-        );
-      }
-    } catch {
-      setReadyState("down");
-      setReadyDetail("Unreachable");
-      setReadyChecks(null);
-    }
+    // 2. Readiness probes — one per product, kept separate: each
+    // product's indicator derives ONLY from its own probe, so a Lead
+    // Engine failure can never mark Delivery Factory degraded
+    // (Codex P2 on PR #63).
+    const [leadRes, deliveryRes] = await Promise.all([
+      fetchJson(`${LEAD_ENGINE_BASE_URL}/api/health/ready`).catch(() => null),
+      fetchJson("/api/ready").catch(() => null),
+    ]);
+    setLeadReady(readinessFromProbe(leadRes));
+    setFactoryReady(readinessFromProbe(deliveryRes));
 
-    // 3. Delivery Factory monitoring snapshot (handoffs, outbox, qstash).
+    // 3. Delivery Factory monitoring snapshot (handoffs, outbox).
     try {
       const snap = await fetchJson("/api/monitoring");
       if (snap.ok) {
@@ -276,7 +232,7 @@ export function MonitoringSection() {
         <div>
           <h2>Service monitoring</h2>
           <p>
-            Liveness, readiness, and handoff pipeline health across the Lead
+            Service status and handoff pipeline health across the Lead
             Engine and Delivery Factory. Polls every 30s.
           </p>
         </div>
@@ -290,134 +246,53 @@ export function MonitoringSection() {
         </div>
       </div>
 
-      {/* Service liveness */}
-      <div className="mon-grid">
-        {services.map((s) => (
-          <div className="mon-card" key={s.name}>
-            <div className="mon-card-top">
-              <span className={stateDot(s.state)} />
-              <strong>{s.name}</strong>
-              <span className="mon-state">{s.state.toUpperCase()}</span>
-            </div>
-            <div className="mon-detail">{s.detail}</div>
-            <div className="mon-meta">
-              <span>{s.latencyMs !== null ? `${s.latencyMs} ms` : "—"}</span>
-              <span>checked {formatTime(s.checkedAt)}</span>
-            </div>
-            <div className="mon-url">{s.url}</div>
-          </div>
-        ))}
-
-        {/* Independent product readiness */}
-        <div className="mon-card">
-          <div className="mon-card-top">
-            <span className={stateDot(readyState)} />
-            <strong>Product readiness</strong>
-            <span className="mon-state">{readyState.toUpperCase()}</span>
-          </div>
-          <div className="mon-detail">{readyDetail}</div>
-          {readyChecks && readyChecks.length > 0 ? (
-            <ul className="mon-checks">
-              {readyChecks.map((c) => (
-                <li key={c.name} className={c.ok ? "ok" : "bad"}>
-                  <span>{c.ok ? "✓" : "✗"}</span> {c.name}
-                  {c.detail ? <small> — {c.detail}</small> : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <div className="mon-url">
-            {LEAD_ENGINE_BASE_URL}/api/health/ready · /api/ready
-          </div>
+      {/* Status strip: LE alive · DF ready · feedback outbox depth */}
+      <div className="mon-strip">
+        <div className="mon-strip-item">
+          <span className={stateDot(services[0]?.state ?? "loading")} />
+          <strong>Lead Engine</strong>
+          <span className="mon-state">
+            {services[0]?.state === "up"
+              ? "ALIVE"
+              : (services[0]?.state ?? "loading").toUpperCase()}
+          </span>
+          <span className="mon-strip-detail">
+            {services[0]?.latencyMs != null
+              ? `${services[0].latencyMs} ms`
+              : leadReady.state === "degraded" || leadReady.state === "down"
+                ? leadReady.detail
+                : (services[0]?.detail ?? "Checking…")}
+          </span>
         </div>
-
-        {/* Feedback outbox */}
-        <div className="mon-card">
-          <div className="mon-card-top">
-            <span
-              className={stateDot(
-                snapshot
-                  ? outboxTotal > 0 || (outbox?.failed ?? 0) > 0
-                    ? "degraded"
-                    : "up"
-                  : "unknown",
-              )}
-            />
-            <strong>Feedback outbox</strong>
-            <span className="mon-state">
-              {snapshot ? `${outboxTotal} QUEUED` : "UNKNOWN"}
-            </span>
-          </div>
-          {snapshot && outbox ? (
-            <div className="mon-queue">
-              <div>
-                <b>{outbox.pending}</b>
-                <span>pending</span>
-              </div>
-              <div>
-                <b>{outbox.dispatching}</b>
-                <span>dispatching</span>
-              </div>
-              <div className={outbox.failed > 0 ? "bad" : ""}>
-                <b>{outbox.failed}</b>
-                <span>failed</span>
-              </div>
-              <div>
-                <b>{outbox.sent}</b>
-                <span>sent</span>
-              </div>
-            </div>
-          ) : (
-            <div className="mon-detail">{snapshotError ?? "Loading…"}</div>
-          )}
-          <div className="mon-meta">
-            <span>active nonces: {snapshot ? snapshot.activeNonces : "—"}</span>
-          </div>
+        <div className="mon-strip-item">
+          <span className={stateDot(factoryReady.state)} />
+          <strong>Delivery Factory</strong>
+          <span className="mon-state">
+            {factoryReady.state === "up"
+              ? "READY"
+              : factoryReady.state.toUpperCase()}
+          </span>
+          <span className="mon-strip-detail">{factoryReady.detail}</span>
         </div>
-
-        {/* QStash schedules */}
-        <div className="mon-card">
-          <div className="mon-card-top">
-            <span
-              className={stateDot(
-                snapshot
-                  ? snapshot.qstash.configured
-                    ? "up"
-                    : "degraded"
-                  : "unknown",
-              )}
-            />
-            <strong>QStash schedules</strong>
-            <span className="mon-state">
-              {snapshot
-                ? snapshot.qstash.configured
-                  ? "CONFIGURED"
-                  : "NOT CONFIGURED"
-                : "UNKNOWN"}
-            </span>
-          </div>
-          {snapshot ? (
-            <ul className="mon-checks">
-              {snapshot.qstash.schedules.map((s) => (
-                <li
-                  key={s.name}
-                  className={s.status === "configured" ? "ok" : "bad"}
-                >
-                  <span>{s.status === "configured" ? "✓" : "✗"}</span> {s.name}
-                  <small>
-                    {" "}
-                    — {s.cadence} · {s.route}
-                  </small>
-                </li>
-              ))}
-              <li className="note">
-                Lead Engine schedules (worker tick, canary) are managed on the
-                Lead Engine side.
-              </li>
-            </ul>
-          ) : (
-            <div className="mon-detail">{snapshotError ?? "Loading…"}</div>
-          )}
+        <div className="mon-strip-item">
+          <span
+            className={stateDot(
+              snapshot
+                ? outboxTotal > 0 || (outbox?.failed ?? 0) > 0
+                  ? "degraded"
+                  : "up"
+                : "unknown",
+            )}
+          />
+          <strong>Feedback outbox</strong>
+          <span className="mon-state">
+            {snapshot ? `${outboxTotal} QUEUED` : "UNKNOWN"}
+          </span>
+          <span className="mon-strip-detail">
+            {snapshot && outbox
+              ? `${outbox.pending} pending · ${outbox.dispatching} dispatching · ${outbox.failed} failed · ${outbox.sent} sent · ${snapshot.activeNonces} active nonces`
+              : (snapshotError ?? "Loading…")}
+          </span>
         </div>
       </div>
 
@@ -433,8 +308,8 @@ export function MonitoringSection() {
         </div>
         <p className="mon-explainer">
           Packages the Lead Engine sent and this Delivery Factory accepted.
-          Open a project's <b>Charter</b> to review its baseline and begin
-          its delivery workflow.
+          Open a project's <b>Charter</b> to review its baseline and verify
+          its KPIs after build.
         </p>
         {snapshotError && !snapshot ? (
           <div className="mon-empty">

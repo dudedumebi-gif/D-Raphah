@@ -5,12 +5,13 @@ import { FakeDeliveryDb } from "./fake-db.js";
 import { intakeRequest, signTestPackage, testEnv } from "./helpers.js";
 
 /**
- * Intake -> workflow trigger wiring (handoff gap 2): a freshly-accepted
- * handoff invokes the onHandoffAccepted hook exactly once; idempotent
- * replays never re-execute; a hook failure is fed back as
+ * Intake -> onHandoffAccepted hook wiring: a freshly-accepted handoff
+ * invokes the hook exactly once (the hook generates the project's
+ * use-case workflow skeletons, fail-open); idempotent replays never
+ * re-invoke it; a hook failure is fed back as
  * delivery.handoff.trigger_failed and the intake still returns 201.
  */
-describe("POST /api/intake lead_handoff triggers", () => {
+describe("POST /api/intake accepted-hook wiring", () => {
   it("invokes onHandoffAccepted once on a fresh 201 accept", async () => {
     const db = new FakeDeliveryDb();
     const signed = signTestPackage();

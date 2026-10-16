@@ -22,8 +22,8 @@ export type NeonClient = ReturnType<typeof neon>;
  * handoff inbox entry — belongs to exactly one environment. 'demo' holds
  * the pilot/demo fixtures and anything accepted by a non-production intake
  * deployment; 'production' holds real client work. The scopes never mix:
- * list endpoints filter by environment, and lead_handoff automation only
- * fires inside the scope a package was accepted into.
+ * list endpoints filter by environment, and intake automation only runs
+ * inside the scope a package was accepted into.
  */
 export type DeliveryEnvironment = "demo" | "production";
 
@@ -146,15 +146,6 @@ export interface FeedbackEventRow {
   created_at: string;
 }
 
-/** Counts returned by a demo-environment reset. */
-export interface DemoResetSummary {
-  workflowRuns: number;
-  projects: number;
-  inbox: number;
-  /** Generated use-case skeletons removed (fixtures are kept). */
-  workflows: number;
-}
-
 /**
  * Port interface for every database operation the API needs. The Vercel
  * handlers receive a DeliveryDb; unit tests substitute an in-memory fake so
@@ -170,14 +161,6 @@ export interface DeliveryDb {
     signature: string;
     environment: DeliveryEnvironment;
   }): Promise<{ inboxId: string; project: ProjectRow }>;
-  /**
-   * Clear the demo environment's operational data — demo workflow runs,
-   * demo delivery projects, demo handoff inbox entries (child rows follow
-   * via ON DELETE CASCADE). Demo workflow *definitions* are fixtures and
-   * are kept, so the demo is immediately usable again. Production rows are
-   * never touched.
-   */
-  resetDemoEnvironment(): Promise<DemoResetSummary>;
   getProject(id: string): Promise<ProjectRow | null>;
   /**
    * The handoff package a project was accepted from (its charter source),
@@ -389,47 +372,6 @@ export function createDeliveryDb(client: NeonClient = getDb()): DeliveryDb {
         values (${project.id}::uuid, 'intake', 'intake', 'system:intake')
       `;
       return { inboxId, project };
-    },
-
-    async resetDemoEnvironment(): Promise<DemoResetSummary> {
-      // Child rows (run steps, milestones, stage history, clarifications,
-      // feedback events, linked projects) follow via ON DELETE CASCADE.
-      // Demo workflow definitions are fixtures and intentionally kept —
-      // EXCEPT generated use-case skeletons: those are per-package
-      // artifacts carrying one demo organization's requirements, so
-      // they are deleted with the package data they came from (they
-      // are recognizable by their trigger_config linkage keys).
-      // Runs are deleted (and counted) FIRST: a generated
-      // skeleton's runs would otherwise cascade away with its
-      // workflow row and be missing from the reported count.
-      const runs = (await client`
-        delete from public.workflow_runs
-        where environment = 'demo'
-        returning id
-      `) as unknown as Array<{ id: string }>;
-      const workflows = (await client`
-        delete from public.workflows
-        where environment = 'demo'
-          and trigger_config ? 'projectId'
-          and trigger_config ? 'requirementId'
-        returning id
-      `) as unknown as Array<{ id: string }>;
-      const projects = (await client`
-        delete from public.delivery_projects
-        where environment = 'demo'
-        returning id
-      `) as unknown as Array<{ id: string }>;
-      const inbox = (await client`
-        delete from public.handoff_inbox
-        where environment = 'demo'
-        returning id
-      `) as unknown as Array<{ id: string }>;
-      return {
-        workflowRuns: runs.length,
-        projects: projects.length,
-        inbox: inbox.length,
-        workflows: workflows.length,
-      };
     },
 
     async getProject(id: string): Promise<ProjectRow | null> {

@@ -3,9 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   NODE_CATALOG,
   executeWorkflow,
+  getWorkflow,
   renderTemplate,
+  retiredKindsFromList,
+  retiredNodeKinds,
   specFor,
+  updateWorkflow,
   type Workflow,
+  type WorkflowNode,
 } from "../api/_lib/workflows.js";
 
 /**
@@ -15,7 +20,6 @@ import {
 function makeFakeDb(workflow: Workflow) {
   const runs = new Map<string, Record<string, unknown>>();
   const steps: Array<Record<string, unknown>> = [];
-  const auditLog: Array<Record<string, unknown>> = [];
 
   const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const head = strings[0];
@@ -71,10 +75,6 @@ function makeFakeDb(workflow: Workflow) {
       }
       return [];
     }
-    if (head.includes("insert into public.workflow_audit_log")) {
-      auditLog.push({ run_id: values[0], workflow_id: values[1], level: values[2], message: values[3] });
-      return [];
-    }
     if (head.includes("update public.workflow_runs")) {
       // values: status, error, output(json), id
       const id = String(values[3]);
@@ -92,10 +92,12 @@ function makeFakeDb(workflow: Workflow) {
     if (head.includes("from public.workflow_run_steps where run_id =")) {
       return steps.filter((s) => s.run_id === values[0]);
     }
+    // NOTE: no workflow_audit_log handler — since the v2 log_database
+    // merge, an insert there is a regression and must throw here.
     throw new Error(`Unhandled query in fake db: ${head.slice(0, 80)}`);
   }) as unknown as Parameters<typeof executeWorkflow>[0];
 
-  return { db, runs, steps, auditLog };
+  return { db, runs, steps };
 }
 
 const demoWorkflow: Workflow = {
@@ -113,15 +115,13 @@ const demoWorkflow: Workflow = {
   nodes: [
     { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
     { node_key: "a1", type: "action", kind: "log_database", label: "Log", position_x: 0, position_y: 0, config: { message: "Lead {{trigger.lead.name}} scored {{trigger.lead.score}}", level: "info" }, enabled: true },
-    { node_key: "l1", type: "logic", kind: "if_else", label: "Hot?", position_x: 0, position_y: 0, config: { field: "trigger.lead.score", operator: "gte", value: "70" }, enabled: true },
-    { node_key: "a2", type: "action", kind: "update_status", label: "Hot path", position_x: 0, position_y: 0, config: { service: "delivery-factory", status: "ok", note: "hot lead {{trigger.lead.name}}" }, enabled: true },
-    { node_key: "a3", type: "action", kind: "update_status", label: "Cold path", position_x: 0, position_y: 0, config: { service: "delivery-factory", status: "ok", note: "cold lead" }, enabled: true },
+    { node_key: "a2", type: "action", kind: "ai_assist", label: "Draft follow-up", position_x: 0, position_y: 0, config: { model: "gpt-4o-mini", systemPrompt: "Be brief.", userPrompt: "Draft a follow-up for {{trigger.lead.name}}", maxTokens: 200 }, enabled: true },
+    { node_key: "a3", type: "action", kind: "send_email", label: "Email", position_x: 0, position_y: 0, config: { to: "owner@example.com", subject: "Follow-up", body: "{{node_a2.output}}" }, enabled: true },
   ],
   edges: [
     { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
-    { edge_key: "e2", from_node_key: "a1", to_node_key: "l1", from_port: null, label: null },
-    { edge_key: "e3", from_node_key: "l1", to_node_key: "a2", from_port: "true", label: null },
-    { edge_key: "e4", from_node_key: "l1", to_node_key: "a3", from_port: "false", label: null },
+    { edge_key: "e2", from_node_key: "a1", to_node_key: "a2", from_port: null, label: null },
+    { edge_key: "e3", from_node_key: "a2", to_node_key: "a3", from_port: null, label: null },
   ],
 };
 
@@ -148,8 +148,8 @@ describe("workflow engine", () => {
     ).toBe("draft text");
   });
 
-  it("executes the true branch and audits every step", async () => {
-    const { db, steps, auditLog } = makeFakeDb(demoWorkflow);
+  it("executes the chain and records every step", async () => {
+    const { db, steps } = makeFakeDb(demoWorkflow);
     const run = await executeWorkflow(
       db, demoWorkflow.id,
       { lead: { name: "Acme Corp", score: 85 } },
@@ -160,32 +160,28 @@ describe("workflow engine", () => {
     expect(labels).toEqual([
       "Manual:success",
       "Log:success",
-      "Hot?:success",
-      "Hot path:success",
+      "Draft follow-up:success",
+      "Email:success",
     ]);
-    // Template rendered into the audit message
-    expect(auditLog[0].message).toBe("Lead Acme Corp scored 85");
-    // Branch output recorded
-    const branch = steps.find((s) => s.node_key === "l1");
-    expect(branch?.output).toMatchObject({ result: true, port: "true" });
-    const hot = steps.find((s) => s.node_key === "a2");
-    expect(hot?.output).toMatchObject({ note: "hot lead Acme Corp" });
-  });
-
-  it("executes the false branch for cold leads", async () => {
-    const { db, steps } = makeFakeDb(demoWorkflow);
-    const run = await executeWorkflow(
-      db, demoWorkflow.id,
-      { lead: { name: "Cold Co", score: 20 } },
+    // log_database completes with its output in the run step itself
+    // (v2 merge — no separate workflow_audit_log write; the fake db
+    // would throw on one). The template rendered into the message.
+    const log = steps.find((s) => s.node_key === "a1");
+    expect(log?.output).toMatchObject({
+      logged: true,
+      level: "info",
+      message: "Lead Acme Corp scored 85",
+    });
+    // The ai_assist draft feeds the email body through the run context
+    const email = steps.find((s) => s.node_key === "a3");
+    expect(email?.output).toMatchObject({
+      delivered: false,
+      queued: true,
+      to: "owner@example.com",
+    });
+    expect(String((email?.output as Record<string, unknown>).body)).toContain(
+      "Acme Corp",
     );
-    expect(run.status).toBe("completed");
-    const labels = steps.map((s) => `${s.node_label}:${s.status}`);
-    expect(labels).toEqual([
-      "Manual:success",
-      "Log:success",
-      "Hot?:success",
-      "Cold path:success",
-    ]);
   });
 
   it("refuses to execute draft workflows", async () => {
@@ -209,63 +205,6 @@ describe("workflow engine", () => {
     expect(run.status).toBe("failed");
     expect(run.error).toContain("'to' is required");
     expect(steps.find((s) => s.node_key === "a1")?.status).toBe("failed");
-  });
-
-  it("send_sms records a draft when no provider is configured", async () => {
-    const wf: Workflow = {
-      ...demoWorkflow,
-      nodes: [
-        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
-        { node_key: "a1", type: "action", kind: "send_sms", label: "SMS", position_x: 0, position_y: 0, config: { to: "+14165550123", message: "Hi {{trigger.lead.name}}, we got your request." }, enabled: true },
-      ],
-      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
-    };
-    const { db, steps } = makeFakeDb(wf);
-    const run = await executeWorkflow(db, wf.id, { lead: { name: "Acme Corp" } });
-    expect(run.status).toBe("completed");
-    const sms = steps.find((s) => s.node_key === "a1");
-    expect(sms?.status).toBe("success");
-    // Template rendered, but nothing sent without a provider (MVP outreach rule)
-    expect(sms?.output).toMatchObject({
-      delivered: false, queued: true, draft: true,
-      to: "+14165550123",
-      message: "Hi Acme Corp, we got your request.",
-    });
-  });
-
-  it("send_sms uses the provider hook when configured", async () => {
-    const wf: Workflow = {
-      ...demoWorkflow,
-      nodes: [
-        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
-        { node_key: "a1", type: "action", kind: "send_sms", label: "SMS", position_x: 0, position_y: 0, config: { to: "+14165550123", message: "Hello" }, enabled: true },
-      ],
-      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
-    };
-    const { db, steps } = makeFakeDb(wf);
-    const seen: Array<Record<string, unknown>> = [];
-    const run = await executeWorkflow(
-      db, wf.id, {},
-      { sendSms: async (args) => { seen.push(args); return { delivered: true, sid: "SM123" }; } },
-    );
-    expect(run.status).toBe("completed");
-    expect(seen).toEqual([{ to: "+14165550123", message: "Hello" }]);
-    expect(steps.find((s) => s.node_key === "a1")?.output).toMatchObject({ delivered: true, sid: "SM123" });
-  });
-
-  it("send_sms requires to and message", async () => {
-    const wf: Workflow = {
-      ...demoWorkflow,
-      nodes: [
-        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
-        { node_key: "a1", type: "action", kind: "send_sms", label: "SMS", position_x: 0, position_y: 0, config: { message: "no recipient" }, enabled: true },
-      ],
-      edges: [{ edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null }],
-    };
-    const { db } = makeFakeDb(wf);
-    const run = await executeWorkflow(db, wf.id, {});
-    expect(run.status).toBe("failed");
-    expect(run.error).toContain("'to' is required");
   });
 
   it("ai_assist records a draft stub when no AI provider is configured", async () => {
@@ -323,45 +262,133 @@ describe("workflow engine", () => {
 });
 
 /**
- * The seeded "Lead follow-up (SMS, draft-first)" demo template
- * (neon/migrations/202609262336_lead_followup_sms_demo.sql), mirrored here
- * so its definition validity and draft-first execution are pinned by tests.
+ * Explicit retirement of persisted v1-era graphs (Codex P1 on
+ * PR #63): workflows stored with node kinds v2 removed from the
+ * catalog are rejected by the execute path BEFORE a run exists —
+ * not failed mid-flight, not partially run — while the graph
+ * itself stays intact for viewing, archiving, and deleting.
+ */
+describe("retired node kinds", () => {
+  const legacyNode = (key: string, kind: string): WorkflowNode => ({
+    node_key: key,
+    type: "action",
+    kind: kind as WorkflowNode["kind"],
+    label: kind,
+    position_x: 0,
+    position_y: 0,
+    config: {},
+    enabled: true,
+  });
+
+  it("reports kinds outside the v2 catalog, deduped in first-appearance order", () => {
+    expect(retiredNodeKinds(demoWorkflow.nodes)).toEqual([]);
+    expect(
+      retiredNodeKinds([
+        { kind: "manual" },
+        { kind: "send_sms" },
+        { kind: "if_else" },
+        { kind: "send_sms" },
+        { kind: "send_email" },
+      ] as WorkflowNode[]),
+    ).toEqual(["send_sms", "if_else"]);
+    expect(retiredKindsFromList(["send_sms", "manual", "send_sms"])).toEqual([
+      "send_sms",
+    ]);
+  });
+
+  it("rejects a published legacy workflow before any run row is created", async () => {
+    const legacy: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        legacyNode("a1", "send_sms"),
+        legacyNode("a2", "if_else"),
+      ],
+      edges: [
+        { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+        { edge_key: "e2", from_node_key: "a1", to_node_key: "a2", from_port: null, label: null },
+      ],
+    };
+    const { db, runs, steps } = makeFakeDb(legacy);
+    const err = await executeWorkflow(db, legacy.id, {}).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain(
+      "Workflow contains retired node kinds: send_sms, if_else",
+    );
+    expect((err as Error).message).toContain(
+      "viewed, archived, or deleted, but not executed or edited in v2",
+    );
+    expect((err as { statusCode?: number }).statusCode).toBe(422);
+    // No partial run: the rejection happens before the run insert.
+    expect(runs.size).toBe(0);
+    expect(steps).toHaveLength(0);
+  });
+
+  it("getWorkflow surfaces the retired kinds and leaves the graph intact", async () => {
+    const legacy: Workflow = {
+      ...demoWorkflow,
+      nodes: [
+        { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+        legacyNode("a1", "http_request"),
+      ],
+      edges: [
+        { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+      ],
+    };
+    const { db } = makeFakeDb(legacy);
+    const stored = await getWorkflow(db, legacy.id);
+    expect(stored?.retired_kinds).toEqual(["http_request"]);
+    expect(stored?.nodes.map((n) => n.kind)).toEqual([
+      "manual",
+      "http_request",
+    ]);
+  });
+});
+
+/**
+ * The draft-first follow-up pattern on the surviving v2 node kinds:
+ * a manual trigger, an AI-drafted follow-up, the email queued as a
+ * draft record for human approval (nothing sends automatically),
+ * and a log step. Mirrors the shape the use-case skeleton generator
+ * produces for follow-up requirements.
  */
 const leadFollowupDemo: Workflow = {
   id: randomUUID(),
-  name: "Lead follow-up (SMS, draft-first)",
-  description: "Demo template: on a qualified lead handoff, draft a personalized follow-up SMS with AI, then queue the SMS as a draft for human approval. Nothing sends automatically.",
+  name: "Lead follow-up (email, draft-first)",
+  description: "On a qualified lead, draft a personalized follow-up email with AI, then queue the email as a draft for human approval. Nothing sends automatically.",
   status: "published",
   environment: "demo",
-  trigger_type: "lead_handoff",
-  trigger_config: { minScore: 0 },
+  trigger_type: "manual",
+  trigger_config: {},
   created_by: "seed",
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
   published_at: new Date().toISOString(),
   nodes: [
-    { node_key: "trigger-1", type: "trigger", kind: "lead_handoff", label: "Lead Handoff", position_x: 360, position_y: 40, config: { minScore: 0 }, enabled: true },
+    { node_key: "trigger-1", type: "trigger", kind: "manual", label: "Manual", position_x: 360, position_y: 40, config: {}, enabled: true },
     {
-      node_key: "action-1", type: "action", kind: "ai_assist", label: "Draft follow-up SMS",
+      node_key: "action-1", type: "action", kind: "ai_assist", label: "Draft follow-up email",
       position_x: 360, position_y: 220,
       config: {
         model: "gpt-4o-mini",
-        systemPrompt: "You write short follow-up SMS messages for local service businesses. Warm and specific, never hype or false claims. Never invent facts you were not given. Output only the message text.",
-        userPrompt: "Write one SMS under 160 characters following up with {{trigger.lead.name}} at {{trigger.organization_name}} (lead score {{trigger.lead.score}}/100). Invite a reply with a specific question.",
+        systemPrompt: "You write short follow-up emails for local service businesses. Warm and specific, never hype or false claims. Never invent facts you were not given. Output only the message text.",
+        userPrompt: "Write one email following up with {{trigger.lead.name}} at {{trigger.organization_name}} (lead score {{trigger.lead.score}}/100). Invite a reply with a specific question.",
         maxTokens: 200,
       },
       enabled: true,
     },
     {
-      node_key: "action-2", type: "action", kind: "send_sms", label: "Queue SMS draft",
+      node_key: "action-2", type: "action", kind: "send_email", label: "Queue email draft",
       position_x: 360, position_y: 400,
-      config: { to: "{{trigger.lead.phone}}", message: "{{node_action-1.output}}" },
+      config: { to: "owner@example.com", subject: "Following up", body: "{{node_action-1.output}}" },
       enabled: true,
     },
     {
       node_key: "action-3", type: "action", kind: "log_database", label: "Log follow-up drafted",
       position_x: 360, position_y: 580,
-      config: { message: "SMS follow-up draft queued for {{trigger.lead.name}} ({{trigger.lead.phone}}); AI draft recorded, awaiting human approval", level: "info" },
+      config: { message: "Email follow-up draft queued for {{trigger.lead.name}}; AI draft recorded, awaiting human approval", level: "info" },
       enabled: true,
     },
   ],
@@ -377,28 +404,28 @@ const sampleLeadPayload = {
   organization_name: "INS Market",
 };
 
-describe("lead follow-up (SMS, draft-first) demo", () => {
+describe("lead follow-up (email, draft-first)", () => {
   it("definition is valid: catalogued kinds, one trigger, wired edges", () => {
     expect(leadFollowupDemo.status).toBe("published");
-    expect(leadFollowupDemo.trigger_type).toBe("lead_handoff");
+    expect(leadFollowupDemo.trigger_type).toBe("manual");
     for (const node of leadFollowupDemo.nodes) {
       expect(specFor(node.kind)).toBeDefined();
     }
     const triggers = leadFollowupDemo.nodes.filter((n) => n.type === "trigger");
     expect(triggers).toHaveLength(1);
-    expect(triggers[0].kind).toBe("lead_handoff");
+    expect(triggers[0].kind).toBe("manual");
     const keys = new Set(leadFollowupDemo.nodes.map((n) => n.node_key));
     for (const edge of leadFollowupDemo.edges) {
       expect(keys.has(edge.from_node_key)).toBe(true);
       expect(keys.has(edge.to_node_key)).toBe(true);
     }
-    // send_sms consumes the ai_assist draft output from the run context
-    const sms = leadFollowupDemo.nodes.find((n) => n.node_key === "action-2")!;
-    expect(sms.config.message).toBe("{{node_action-1.output}}");
+    // send_email consumes the ai_assist draft output from the run context
+    const email = leadFollowupDemo.nodes.find((n) => n.node_key === "action-2")!;
+    expect(email.config.body).toBe("{{node_action-1.output}}");
   });
 
-  it("executes draft-first: AI draft stub feeds the queued SMS draft", async () => {
-    const { db, runs, steps, auditLog } = makeFakeDb(leadFollowupDemo);
+  it("executes draft-first: AI draft stub feeds the queued email draft", async () => {
+    const { db, runs, steps } = makeFakeDb(leadFollowupDemo);
     const run = await executeWorkflow(db, leadFollowupDemo.id, sampleLeadPayload);
 
     expect(run.status).toBe("completed");
@@ -407,9 +434,9 @@ describe("lead follow-up (SMS, draft-first) demo", () => {
     expect(runs.has(run.id)).toBe(true);
     const labels = steps.map((s) => `${s.node_label}:${s.status}`);
     expect(labels).toEqual([
-      "Lead Handoff:success",
-      "Draft follow-up SMS:success",
-      "Queue SMS draft:success",
+      "Manual:success",
+      "Draft follow-up email:success",
+      "Queue email draft:success",
       "Log follow-up drafted:success",
     ]);
 
@@ -420,25 +447,26 @@ describe("lead follow-up (SMS, draft-first) demo", () => {
     );
 
     // No provider configured: nothing sent, draft queued for human approval
-    const sms = steps.find((s) => s.node_key === "action-2")!;
-    expect(sms.output).toMatchObject({
+    const email = steps.find((s) => s.node_key === "action-2")!;
+    expect(email.output).toMatchObject({
       delivered: false,
-      draft: true,
       queued: true,
-      to: "+14165550123",
+      to: "owner@example.com",
     });
-    // The queued message is the AI draft, not a template placeholder
-    expect(String((sms.output as Record<string, unknown>).message)).toContain(
+    // The queued body is the AI draft, not a template placeholder
+    expect(String((email.output as Record<string, unknown>).body)).toContain(
       "INS Market",
     );
-    expect(String((sms.output as Record<string, unknown>).message)).not.toContain(
+    expect(String((email.output as Record<string, unknown>).body)).not.toContain(
       "{{",
     );
 
+    // log_database records the entry in its own step output (v2 merge)
     const log = steps.find((s) => s.node_key === "action-3")!;
-    expect(log.output).toMatchObject({ logged: true });
-    expect(auditLog).toHaveLength(1);
-    expect(auditLog[0].message).toContain("INS Market");
+    expect(log.output).toMatchObject({ logged: true, level: "info" });
+    expect(String((log.output as Record<string, unknown>).message)).toContain(
+      "INS Market",
+    );
   });
 
   it("still draft-first when an AI provider hook is configured", async () => {
@@ -450,12 +478,126 @@ describe("lead follow-up (SMS, draft-first) demo", () => {
       }),
     });
     expect(run.status).toBe("completed");
-    // AI produced a real draft, but SMS still queued as a draft: no auto-send
-    const sms = steps.find((s) => s.node_key === "action-2")!;
-    expect(sms.output).toMatchObject({
+    // AI produced a real draft, but the email is still only queued as a
+    // draft record: no auto-send
+    const email = steps.find((s) => s.node_key === "action-2")!;
+    expect(email.output).toMatchObject({
       delivered: false,
-      draft: true,
-      message: "Hi INS Market — quick question about your follow-up plan?",
+      queued: true,
+      body: "Hi INS Market — quick question about your follow-up plan?",
     });
+  });
+});
+
+/**
+ * Fake for the save path (getWorkflow / updateWorkflow / replaceGraph).
+ * Keeps the stored graph in plain arrays so a test can assert exactly
+ * what a failed save left behind.
+ */
+function makeGraphDb() {
+  const originalNodes: WorkflowNode[] = [
+    { node_key: "t1", type: "trigger", kind: "manual", label: "Manual", position_x: 0, position_y: 0, config: {}, enabled: true },
+    { node_key: "a1", type: "action", kind: "log_database", label: "Log", position_x: 10, position_y: 20, config: { message: "hi", level: "info" }, enabled: true },
+  ];
+  const storedNodes: Array<Record<string, unknown>> = originalNodes.map(
+    (n) => ({ ...n }),
+  );
+  const storedEdges: Array<Record<string, unknown>> = [
+    { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+  ];
+  const workflowRow = {
+    id: "wf-graph", name: "Draft", description: null, status: "draft",
+    environment: "production", trigger_type: "manual", trigger_config: {},
+    created_by: null, created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(), published_at: null,
+  };
+  let deleteCount = 0;
+
+  const db = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const head = strings[0];
+    if (head.includes("delete from public.workflow_edges")) {
+      deleteCount += 1;
+      storedEdges.length = 0;
+      return [];
+    }
+    if (head.includes("delete from public.workflow_nodes")) {
+      deleteCount += 1;
+      storedNodes.length = 0;
+      return [];
+    }
+    if (head.includes("insert into public.workflow_nodes")) {
+      storedNodes.push({
+        node_key: values[1], type: values[2], kind: values[3],
+        label: values[4], position_x: values[5], position_y: values[6],
+        config: JSON.parse(String(values[7])), enabled: values[8],
+      });
+      return [];
+    }
+    if (head.includes("insert into public.workflow_edges")) {
+      storedEdges.push({
+        edge_key: values[1], from_node_key: values[2],
+        to_node_key: values[3], from_port: values[4], label: values[5],
+      });
+      return [];
+    }
+    if (head.includes("update public.workflows set")) return [];
+    if (head.includes("from public.workflows where id =")) return [workflowRow];
+    if (head.includes("from public.workflow_nodes")) {
+      return storedNodes.map((n) => ({ ...n }));
+    }
+    if (head.includes("from public.workflow_edges")) {
+      return storedEdges.map((e) => ({ ...e }));
+    }
+    throw new Error(`Unhandled query in fake db: ${head.slice(0, 80)}`);
+  }) as unknown as Parameters<typeof updateWorkflow>[0];
+
+  return { db, originalNodes, deleteCount: () => deleteCount };
+}
+
+describe("updateWorkflow graph replacement", () => {
+  it("rejects a graph carrying a removed kind and leaves the stored graph intact", async () => {
+    const { db, originalNodes, deleteCount } = makeGraphDb();
+    // A v1-era draft can still carry kinds the v2 catalog removed
+    // (send_sms). Even a harmless rename resubmits the whole graph —
+    // the save must fail BEFORE the stored graph is touched
+    // (Codex P1 on PR #63: validation ran inside the insert loop,
+    // after the deletes, erasing the draft).
+    const removedKindNode = {
+      node_key: "a9", type: "action", kind: "send_sms",
+      label: "Text the lead", position_x: 0, position_y: 0,
+      config: { to: "+1 555 0100", message: "hi" }, enabled: true,
+    } as unknown as WorkflowNode;
+
+    await expect(
+      updateWorkflow(db, "wf-graph", {
+        name: "Renamed draft",
+        nodes: [originalNodes[0], removedKindNode],
+        edges: [],
+      }),
+    ).rejects.toThrow("Unknown node kind: send_sms");
+
+    expect(deleteCount()).toBe(0);
+    const after = await getWorkflow(db, "wf-graph");
+    expect(after?.nodes).toEqual(originalNodes);
+    expect(after?.edges).toEqual([
+      { edge_key: "e1", from_node_key: "t1", to_node_key: "a1", from_port: null, label: null },
+    ]);
+  });
+
+  it("replaces the graph when every kind is in the catalog", async () => {
+    const { db, originalNodes, deleteCount } = makeGraphDb();
+    const updated = await updateWorkflow(db, "wf-graph", {
+      name: "Renamed draft",
+      nodes: [
+        originalNodes[0],
+        { node_key: "a2", type: "action", kind: "send_email", label: "Email", position_x: 30, position_y: 40, config: { to: "", subject: "", body: "" }, enabled: true },
+      ],
+      edges: [
+        { edge_key: "e2", from_node_key: "t1", to_node_key: "a2", from_port: null, label: null },
+      ],
+    });
+    expect(deleteCount()).toBe(2);
+    expect(updated?.nodes.map((n) => n.node_key)).toEqual(["t1", "a2"]);
+    expect(updated?.edges.map((e) => e.edge_key)).toEqual(["e2"]);
   });
 });

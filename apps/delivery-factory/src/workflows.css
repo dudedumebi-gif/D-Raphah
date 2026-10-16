@@ -70,6 +70,7 @@
 .wf-badge-draft { background: #2a2f45; color: #aab2cc; }
 .wf-badge-published { background: #123f2b; color: #4ade80; }
 .wf-badge-archived { background: #3a2b2b; color: #b08d8d; }
+.wf-badge-retired { background: #4a2f12; color: #f5b453; text-transform: none; letter-spacing: 0; }
 
 .wf-notice {
   background: #1a2340;
@@ -498,3 +499,49 @@
   min-height: 0;
   overflow-y: auto;
 }
+
+/* ── Workflow families + charter toggle ─────────────────────────────────
+ * Skeleton workflows group under their project family; the charter
+ * summary is a collapsible, read-only box inside the family header
+ * area (list) and above the editor. */
+
+.wf-family { margin-bottom: 28px; }
+.wf-family-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.wf-family-head h3 { margin: 0; font-size: 17px; }
+
+.wf-charter-box { margin-bottom: 12px; }
+.wf-charter-toggle { font-size: 13px; }
+.wf-charter {
+  margin-top: 8px;
+  padding: 14px 16px;
+  border: 1px solid #262c3f;
+  border-radius: 12px;
+  background: #10141f;
+  max-width: 760px;
+}
+.wf-charter h5 {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b93ad;
+}
+.wf-charter h5:first-of-type { margin-top: 8px; }
+.wf-charter-org { margin: 0 0 4px; font-weight: 600; font-size: 15px; }
+.wf-charter-problem { margin: 0; color: #c6cbdd; font-size: 13px; }
+.wf-charter-list { margin: 0; padding-left: 18px; font-size: 13px; }
+.wf-charter-list li { margin-bottom: 4px; }
+.wf-charter-code { font-weight: 700; color: #aab2cc; }
+.wf-charter-impl {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #7ee2a8;
+}
+
+.wf-editor-charter { padding: 8px 16px 0; }
