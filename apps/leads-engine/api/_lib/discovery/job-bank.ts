@@ -1,12 +1,19 @@
 import { z } from "zod";
-import type {
-  Candidate,
-  DiscoveryAdapter,
-  FetchCandidatesOptions,
-  GeoQuery,
+import {
+  DiscoveryUpstreamError,
+  type Candidate,
+  type DiscoveryAdapter,
+  type FetchCandidatesOptions,
+  type GeoQuery,
 } from "./adapter.js";
-import { fetchCkanPackage, fetchCkanRows, newestCsvResource } from "./ckan.js";
-import { field, normalizedIdentity, numberField } from "./csv.js";
+import { fetchCkanPackage, fetchCkanResourceText } from "./ckan.js";
+import {
+  field,
+  normalizedIdentity,
+  numberField,
+  parseCsvRecords,
+} from "./csv.js";
+import { selectJobBankCsvUrls } from "../job-bank-market.js";
 
 export const JOB_BANK_PACKAGE_URL =
   "https://open.canada.ca/data/api/action/package_show?id=ea639e28-c0fc-48bf-b5dd-b8899bd43072";
@@ -94,18 +101,33 @@ export class JobBankAdapter implements DiscoveryAdapter {
       options.maxCandidates ?? config.maxRecords,
     );
     const pkg = await fetchCkanPackage(fetcher, JOB_BANK_PACKAGE_URL);
-    const resource = newestCsvResource(
-      pkg.resources,
-      /job postings advertised/i,
-    );
-    const rows = await fetchCkanRows({
+    // The package holds monthly EN/FR file pairs, and the newest file
+    // overall is as often the French one — whose rows this adapter's
+    // English column mapping cannot read. Mirror the market sync's
+    // selection: the newest resource whose URL carries "-en-".
+    const [csvUrl] = selectJobBankCsvUrls(pkg);
+    if (!csvUrl)
+      throw new DiscoveryUpstreamError(
+        "No English Job Bank CSV resource is available",
+      );
+    const resource = pkg.resources.find((entry) => entry.url === csvUrl);
+    // The monthly files are full national snapshots (~100k rows),
+    // published as UTF-16 and larger than the generic CKAN safety cap.
+    // Fetch the whole file the way the market sync does — UTF-16, no
+    // byte cap, a 180s budget — then filter below; reading a prefix
+    // first would slice away nearly every in-market row before the
+    // filter ever saw it.
+    const text = await fetchCkanResourceText({
       fetcher,
-      resource,
-      limit: Math.max(limit * 10, limit),
+      resource: resource ?? { id: "job-bank-en", url: csvUrl },
+      encoding: "utf-16",
+      maxBytes: null,
+      timeoutMs: 180_000,
     });
+    const rows = parseCsvRecords(text);
     const observedAt =
       pkg.metadata_modified ??
-      resource.last_modified ??
+      resource?.last_modified ??
       new Date().toISOString();
     const keywords = config.keywords.map((value) => value.toLowerCase());
     const cutoff = Date.now() - config.postedWithinDays * 86_400_000;
@@ -135,6 +157,6 @@ export class JobBankAdapter implements DiscoveryAdapter {
         return keywords.some((keyword) => haystack.includes(keyword));
       })
       .slice(0, limit)
-      .map((row) => jobBankRowToCandidate(row, resource.url, observedAt));
+      .map((row) => jobBankRowToCandidate(row, csvUrl, observedAt));
   }
 }

@@ -19,27 +19,48 @@ export interface CkanPackage {
 const TIMEOUT_MS = 45_000;
 const MAX_BYTES = 40 * 1024 * 1024;
 
-async function boundedText(response: Response): Promise<string> {
+export interface CkanRequestOptions {
+  /** TextDecoder label for the payload; defaults to UTF-8. */
+  encoding?: string;
+  /**
+   * Byte safety cap; `null` disables it for known-huge open-data files
+   * (the Job Bank monthly snapshots exceed the generic cap by design).
+   * Defaults to MAX_BYTES.
+   */
+  maxBytes?: number | null;
+  /** Abort timeout in ms; defaults to TIMEOUT_MS. */
+  timeoutMs?: number;
+}
+
+function resolveMaxBytes(options?: CkanRequestOptions): number | null {
+  return options?.maxBytes === undefined ? MAX_BYTES : options.maxBytes;
+}
+
+async function boundedText(
+  response: Response,
+  options?: CkanRequestOptions,
+): Promise<string> {
+  const maxBytes = resolveMaxBytes(options);
   if (!response.body) {
     const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > MAX_BYTES)
+    if (maxBytes !== null && buffer.byteLength > maxBytes)
       throw new DiscoveryUpstreamError(
-        `Dataset exceeds the ${MAX_BYTES} byte safety limit`,
+        `Dataset exceeds the ${maxBytes} byte safety limit`,
       );
-    return new TextDecoder().decode(buffer);
+    return new TextDecoder(options?.encoding).decode(buffer);
   }
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder(options?.encoding);
   let total = 0;
   let text = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > MAX_BYTES) {
+    if (maxBytes !== null && total > maxBytes) {
       await reader.cancel();
       throw new DiscoveryUpstreamError(
-        `Dataset exceeds the ${MAX_BYTES} byte safety limit`,
+        `Dataset exceeds the ${maxBytes} byte safety limit`,
       );
     }
     text += decoder.decode(value, { stream: true });
@@ -58,7 +79,11 @@ async function boundedJson<T>(response: Response): Promise<T> {
   }
 }
 
-async function request(fetcher: typeof fetch, url: string): Promise<Response> {
+async function request(
+  fetcher: typeof fetch,
+  url: string,
+  options?: CkanRequestOptions,
+): Promise<Response> {
   let response: Response;
   try {
     response = await fetcher(url, {
@@ -66,7 +91,7 @@ async function request(fetcher: typeof fetch, url: string): Promise<Response> {
         accept: "application/json,text/csv;q=0.9,*/*;q=0.1",
         "user-agent": "RaphahLeadEngine-Discovery/1.0 (+https://raphah.io)",
       },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(options?.timeoutMs ?? TIMEOUT_MS),
     });
   } catch (error) {
     throw new DiscoveryUpstreamError(
@@ -78,10 +103,11 @@ async function request(fetcher: typeof fetch, url: string): Promise<Response> {
     throw new DiscoveryUpstreamError(
       `Dataset responded with HTTP ${response.status}`,
     );
+  const maxBytes = resolveMaxBytes(options);
   const length = Number(response.headers.get("content-length") ?? 0);
-  if (length > MAX_BYTES)
+  if (maxBytes !== null && length > maxBytes)
     throw new DiscoveryUpstreamError(
-      `Dataset exceeds the ${MAX_BYTES} byte safety limit`,
+      `Dataset exceeds the ${maxBytes} byte safety limit`,
     );
   return response;
 }
@@ -135,6 +161,30 @@ export async function fetchCkanRows(args: {
     return rows.slice(0, limit) as Array<Record<string, unknown>>;
   }
   return parseCsvRecords(await boundedText(response)).slice(0, limit);
+}
+
+/**
+ * Fetch a whole CKAN file resource as decoded text, without slicing.
+ * For very large national files (the Job Bank monthly snapshots) the
+ * caller opts out of the byte cap and picks the encoding and timeout
+ * the dataset needs — the same shape the Job Bank market sync fetches
+ * with. Callers parse and filter the full text themselves, so rows
+ * deep in the file are not sliced away before filtering sees them.
+ */
+export async function fetchCkanResourceText(args: {
+  fetcher: typeof fetch;
+  resource: CkanResource;
+  encoding?: string;
+  maxBytes?: number | null;
+  timeoutMs?: number;
+}): Promise<string> {
+  const options: CkanRequestOptions = {
+    encoding: args.encoding,
+    maxBytes: args.maxBytes,
+    timeoutMs: args.timeoutMs,
+  };
+  const response = await request(args.fetcher, args.resource.url, options);
+  return boundedText(response, options);
 }
 
 export function newestCsvResource(
