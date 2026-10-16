@@ -1,16 +1,12 @@
 import { useState, type FormEvent } from "react";
-import type { BootstrapData, CampaignRecord } from "./api";
+import type { BootstrapData, CampaignRecord, Session } from "./api";
+import { JobBankMarket } from "./JobBankMarket";
 
 type Mutate = <T>(
   path: string,
   init: RequestInit,
   success: string,
 ) => Promise<T | null>;
-// auto_apply_criteria arrives via bootstrap select("*") once migration
-// 202609240003 is applied; kept local so api.ts stays untouched.
-type CampaignWithAutoApply = CampaignRecord & {
-  auto_apply_criteria?: boolean | null;
-};
 type EditableCriteria = {
   automationMaturityMax?: number;
   qualificationScoreMin?: number;
@@ -47,11 +43,7 @@ function CampaignSettings({
     criteria.jobBankMarketStrength ?? 20,
   );
   const [busy, setBusy] = useState(false);
-  const [applying, setApplying] = useState(false);
   const [requeuing, setRequeuing] = useState(false);
-  const [autoApply, setAutoApply] = useState(
-    (campaign as CampaignWithAutoApply).auto_apply_criteria === true,
-  );
   const [rescoring, setRescoring] = useState(false);
   const [dryRunning, setDryRunning] = useState(false);
   const [rescoreSummary, setRescoreSummary] = useState<string | null>(null);
@@ -80,30 +72,11 @@ function CampaignSettings({
     criteria.jobBankMarketStrength ?? 20,
   );
   const [retiring, setRetiring] = useState(false);
-  const suggestion = campaign.criteria_suggestion;
   const usesRadius = mode === "radius" || mode === "hybrid";
-  const hasSuggestedChanges =
-    suggestion != null && Object.keys(suggestion.changes).length > 0;
-  const lastSuggestionAt = (
-    campaign as { last_suggestion_at?: string | null }
-  ).last_suggestion_at;
-  const summaryLine = suggestion
-    ? `Output recommendation: ${suggestion.direction} — ${suggestion.observedQualifiedLeads}/${suggestion.targetQualifiedLeads} distinct qualified organizations this week`
-    : lastSuggestionAt
-      ? "Criteria reviewed — no new recommendation until fresh scrape output arrives."
-      : "No recommendation yet — run a scrape job to generate one.";
-  async function applySuggestion() {
-    setApplying(true);
-    try {
-      await mutate(
-        `/api/v1/criteria/${campaign.id}/apply-suggestion`,
-        { method: "POST" },
-        `Suggestion applied to ${campaign.name}.`,
-      );
-    } finally {
-      setApplying(false);
-    }
-  }
+  const summaryLine =
+    `Qualification ≥ ${criteria.qualificationScoreMin ?? 60} · ` +
+    `confidence ≥ ${Math.round((criteria.confidenceMin ?? 0.6) * 100)}% · ` +
+    `maturity ≤ ${criteria.automationMaturityMax ?? 40}`;
   async function retire() {
     setRetiring(true);
     try {
@@ -203,17 +176,6 @@ function CampaignSettings({
       setRequeuing(false);
     }
   }
-  async function toggleAutoApply(next: boolean) {
-    setAutoApply(next);
-    const result = await mutate(
-      `/api/v1/criteria/${campaign.id}/auto-apply`,
-      { method: "PATCH", body: JSON.stringify({ autoApply: next }) },
-      `Auto-apply ${next ? "enabled" : "disabled"} for ${campaign.name}.`,
-    );
-    // mutate() reports failures via the notice and returns null — revert the
-    // optimistic toggle so the checkbox reflects server state.
-    if (result === null) setAutoApply(!next);
-  }
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -249,11 +211,9 @@ function CampaignSettings({
                   : null,
               },
             },
-            scheduleEnabled: form.get("enabled") === "on",
-            intervalMinutes: Number(form.get("interval")),
           }),
         },
-        `${campaign.name} criteria and schedule updated.`,
+        `${campaign.name} criteria updated.`,
       );
     } finally {
       setBusy(false);
@@ -284,51 +244,6 @@ function CampaignSettings({
       </div>
       {open ? (
         <>
-      {suggestion ? (
-        <div
-          className={`criteria-suggestion suggestion-${suggestion.direction}`}
-        >          <b>Output recommendation: {suggestion.direction}</b>
-          <span>
-            {suggestion.observedQualifiedLeads}/
-            {suggestion.targetQualifiedLeads} distinct qualified organizations
-            this week
-          </span>
-          <small>{suggestion.rationale.join(" ")}</small>
-          {Object.keys(suggestion.changes).length ? (
-            <small>
-              Suggested values: qualification score ≥{" "}
-              {suggestion.changes.qualificationScoreMin ?? "—"}, confidence ≥{" "}
-              {suggestion.changes.confidenceMin != null
-                ? `${Math.round(suggestion.changes.confidenceMin * 100)}%`
-                : "—"}
-              {suggestion.changes.geography?.centreLatitude != null &&
-              suggestion.changes.geography?.centreLongitude != null
-                ? `, centre (${suggestion.changes.geography.centreLatitude}, ${suggestion.changes.geography.centreLongitude})`
-                : ""}
-              . Review and enter below to apply.
-            </small>
-          ) : null}
-          {hasSuggestedChanges ? (
-            <div>
-              <button
-                type="button"
-                className="primary"
-                disabled={busy || applying}
-                onClick={() => void applySuggestion()}
-              >
-                {applying ? "Applying…" : "Apply suggestion"}
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : lastSuggestionAt ? (
-        <div className="criteria-suggestion suggestion-hold">
-          <small>
-            Criteria reviewed — no new recommendation until fresh scrape output
-            arrives. Run a scrape job to get an updated recommendation.
-          </small>
-        </div>
-      ) : null}
       <form className="inline-form" onSubmit={(event) => void save(event)}>
         <fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0 }}>
           <div className="form-grid">
@@ -378,18 +293,31 @@ function CampaignSettings({
             </label>
           </div>
           <label>
-            Job Bank market signal strength — {jobBankStrength}
-            <input
-              name="jobbank"
-              type="range"
-              min="0"
-              max="40"
-              step="1"
-              value={jobBankStrength}
-              onChange={(event) =>
-                setJobBankStrength(Number(event.target.value))
-              }
-            />
+            Job Bank market signal strength
+            <span className="strength-control">
+              <input
+                name="jobbank"
+                type="range"
+                min="0"
+                max="40"
+                step="1"
+                value={jobBankStrength}
+                onChange={(event) =>
+                  setJobBankStrength(Number(event.target.value))
+                }
+              />
+              <input
+                type="number"
+                min="0"
+                max="40"
+                step="1"
+                value={jobBankStrength}
+                aria-label="Job Bank market signal strength value"
+                onChange={(event) =>
+                  setJobBankStrength(Number(event.target.value))
+                }
+              />
+            </span>
             <small>
               Adds market-level hiring evidence (Canada Job Bank postings
               for clinic front-desk roles in the clinic's city, last 60
@@ -469,47 +397,6 @@ function CampaignSettings({
             structured data. Missing location evidence does not qualify. Named
             locations are text signals, not verified business addresses.
           </p>
-          <label>
-            Interval minutes
-            <input
-              name="interval"
-              type="number"
-              min="5"
-              max="43200"
-              required
-              defaultValue={campaign.interval_minutes}
-            />
-          </label>
-          <label className="check-label">
-            <input
-              name="enabled"
-              type="checkbox"
-              defaultChecked={campaign.schedule_enabled}
-            />{" "}
-            Enable persistent schedule
-          </label>
-          <label className="check-label">
-            <input
-              type="checkbox"
-              checked={autoApply}
-              disabled={busy || applying}
-              onChange={(event) => void toggleAutoApply(event.currentTarget.checked)}
-            />{" "}
-            Auto-apply future suggestions (one bounded step per evaluation)
-          </label>
-          <p className="muted">
-            Automatic (low-risk): bounded nudges to maximum maturity (±5),
-            minimum opportunity (±5), confidence (±5 pts), and evidence
-            categories (±1). Always manual: geography changes, factor weights,
-            and qualifying signals.
-          </p>
-          {autoApply ? (
-            <p className="muted">
-              Auto-apply is on: scheduled evaluations move at most one bounded
-              step toward the suggestion and record each change in the audit
-              log. Default is off.
-            </p>
-          ) : null}
           <button className="primary">
             {busy ? "Saving…" : "Save reviewed criteria"}
           </button>
@@ -519,13 +406,13 @@ function CampaignSettings({
         <div className="requeue-row">
           <p className="muted">
             Re-run this source&apos;s scrape with the current criteria — for
-            example right after applying a suggestion or saving reviewed
-            criteria. The job runs with whatever criteria are saved, so save
-            first if you changed anything.
+            example right after saving reviewed criteria. The job runs with
+            whatever criteria are saved, so save first if you changed
+            anything.
           </p>
           <button
             type="button"
-            disabled={busy || applying || requeuing}
+            disabled={busy || requeuing}
             onClick={() => void requeue()}
           >
             {requeuing ? "Queueing…" : "Re-queue scrape"}
@@ -572,14 +459,14 @@ function CampaignSettings({
         </label>
         <button
           type="button"
-          disabled={busy || applying || dryRunning || rescoring}
+          disabled={busy || dryRunning || rescoring}
           onClick={() => void runDryRun()}
         >
           {dryRunning ? "Projecting…" : "Dry-run"}
         </button>
         <button
           type="button"
-          disabled={busy || applying || dryRunning || rescoring}
+          disabled={busy || dryRunning || rescoring}
           onClick={() => void rescore()}
         >
           {rescoring ? "Rescoring…" : "Rescore assessments"}
@@ -630,12 +517,12 @@ function CampaignSettings({
       <div className="requeue-row">
         <p className="muted">
           Retire this campaign to History when it is no longer in use.
-          Its criteria, jobs, and assessments are preserved, criteria
-          automation stops, and it can be restored at any time.
+          Its criteria, jobs, and assessments are preserved, and it can
+          be restored at any time.
         </p>
         <button
           type="button"
-          disabled={busy || applying || retiring}
+          disabled={busy || retiring}
           onClick={() => void retire()}
         >
           {retiring ? "Retiring…" : "Retire campaign"}
@@ -650,9 +537,13 @@ function CampaignSettings({
 export function Settings({
   data,
   mutate,
+  session,
+  workspaceId,
 }: {
   data: BootstrapData;
   mutate: Mutate;
+  session: Session;
+  workspaceId: string;
 }) {
   // Accordion state: null follows the default (first campaign expanded,
   // the rest collapsed); a campaign id pins it open, "" pins all closed.
@@ -687,6 +578,7 @@ export function Settings({
         <p>Create a source to configure its campaign.</p>
       )}
     </div>
+    <JobBankMarket session={session} workspaceId={workspaceId} />
     {history.length ? (
       <section className="panel history-panel">
         <div className="panel-head">
@@ -694,7 +586,7 @@ export function Settings({
             <h3>History — retired campaigns</h3>
             <p>
               Retired criteria are preserved for audit and can be
-              restored; they no longer drive collection or automation.
+              restored; they no longer drive collection.
             </p>
           </div>
         </div>

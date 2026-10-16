@@ -25,15 +25,23 @@ const runtimeVariables = [
   "DELIVERY_INTAKE_URL",
   "DELIVERY_FACTORY_PUBLIC_KEY_PEM",
   "SENTRY_DSN",
-  "LEAD_ENGINE_CANARY_WORKSPACE_ID",
-  "LEAD_ENGINE_CANARY_SOURCE_ID",
-  "LEAD_ENGINE_CANARY_URL",
 ] as const;
 
 export function configurationStatus() {
   const missing: string[] = runtimeVariables.filter((key) => !process.env[key]);
   if (!process.env.LEAD_ENGINE_DATABASE_URL && !process.env.DATABASE_URL) {
     missing.unshift("DATABASE_URL");
+  }
+  // The scheduler routes act on one workspace. v4 renamed the variable
+  // to LEAD_ENGINE_SCHEDULER_WORKSPACE_ID; the legacy canary-era name is
+  // still accepted so existing deployments stay configured (the canary
+  // source/url variables were retired with the canary subsystem and are
+  // no longer required — Codex P1 on PR #64).
+  if (
+    !process.env.LEAD_ENGINE_SCHEDULER_WORKSPACE_ID &&
+    !process.env.LEAD_ENGINE_CANARY_WORKSPACE_ID
+  ) {
+    missing.push("LEAD_ENGINE_SCHEDULER_WORKSPACE_ID");
   }
   return { configured: missing.length === 0, missing };
 }

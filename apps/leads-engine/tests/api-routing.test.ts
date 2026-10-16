@@ -10,10 +10,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
  * A catch-all (api/[...path].ts) does not route multi-segment paths
  * reliably on Vercel for vanilla Node projects, and the Hobby plan caps
  * deployments at 12 serverless functions, so routes are grouped:
- * - api/health/[check].ts      -> /api/health/live, /ready, /canary
+ * - api/health/[check].ts      -> /api/health/live, /ready
  * - api/v1/[resource].ts       -> single-segment /api/v1/* resources
  * - api/v1/worker/tick.ts, api/v1/canary/run.ts, api/v1/feedback/events.ts
  * All files delegate to the central router in server/router.ts.
+ * (/api/v1/canary/run and /api/v1/operations/evaluate survive as
+ * one-release {retired: true} stubs in the router — see LE v4.)
  */
 const FUNCTION_FILES = [
   "api/health/[check].ts",
@@ -26,14 +28,12 @@ const FUNCTION_FILES = [
 const ROUTER_PATHS = [
   "/api/health/live",
   "/api/health/ready",
-  "/api/health/canary",
   "/api/v1/bootstrap",
   "/api/v1/sources",
   "/api/v1/criteria",
   "/api/v1/scrape-jobs",
   "/api/v1/leads",
   "/api/v1/handoffs",
-  "/api/v1/audit-events",
   "/api/v1/operations",
   "/api/v1/worker/tick",
   "/api/v1/canary/run",

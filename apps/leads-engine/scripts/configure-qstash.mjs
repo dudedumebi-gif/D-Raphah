@@ -18,27 +18,28 @@ const schedules = [
     cron: "*/4 * * * *",
     label: "lead-engine-worker",
   },
-  {
-    scheduleId: "raphah-lead-canary-v1",
-    destination: `${baseUrl}/api/v1/canary/run`,
-    cron: "0 * * * *",
-    label: "lead-engine-canary",
-  },
-  {
-    scheduleId: "raphah-lead-monitor-v1",
-    destination: `${baseUrl}/api/v1/operations/evaluate`,
-    cron: "*/5 * * * *",
-    label: "lead-engine-operations-monitor",
-  },
-  {
-    scheduleId: "raphah-lead-discovery-v1",
-    destination: `${baseUrl}/api/v1/discovery/scheduled-run`,
-    // Daily at 06:10 UTC, after the canary window — each active discovery
-    // source runs at most once per 24h, guarded inside the scheduler.
-    cron: "10 6 * * *",
-    label: "lead-engine-discovery",
-  },
+  // LE v4 retired the canary, operations-monitor, and scheduled-discovery
+  // schedules (raphah-lead-canary-v1, raphah-lead-monitor-v1,
+  // raphah-lead-discovery-v1). The worker tick now also runs the
+  // alert/incident reconcile. The canary/monitor destinations answer 200
+  // {retired: true} for one release so a still-configured schedule does
+  // not record false delivery failures; those two schedules are paused
+  // in the Upstash console by the operator (not deleted here). The
+  // discovery destination was removed WITHOUT a stub, so this script
+  // retires that schedule outright below - a live delivery to it would
+  // 401 and open false qstash_delivery_failed incidents. The DF
+  // dispatch-feedback schedule is managed with the Delivery Factory,
+  // not by this script.
 ];
+
+// Retire the scheduled-discovery schedule on existing deployments: its
+// route is gone, so it must not survive a re-run of this script.
+try {
+  await client.schedules.delete("raphah-lead-discovery-v1");
+  process.stdout.write("raphah-lead-discovery-v1: retired (deleted)\n");
+} catch {
+  // Absent schedule: nothing to retire.
+}
 
 for (const schedule of schedules) {
   // Idempotent: delete-then-create so re-runs converge on the current

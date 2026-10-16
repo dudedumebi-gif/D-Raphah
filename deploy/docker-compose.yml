@@ -1,21 +1,21 @@
 # D-Raphah self-hosted handover stack.
 #
-# One `docker compose up --build -d` brings up the full platform:
-#   - leads-engine      :8001  (Lead Engine API)
+# One `docker compose up --build -d` brings up the platform:
 #   - delivery-factory  :8002  (Delivery Factory API + operator SPA)
-#   - leads-db          :5433  (Lead Engine Postgres — separate database)
 #   - delivery-db       :5434  (Delivery Factory Postgres — separate database)
 #
+# The Lead Engine's container runtime was retired in LE v4 (it runs on
+# Vercel + Neon only), so its service and dedicated database are gone
+# from this stack.
+#
 # The two products keep separate databases, credentials, and storage, exactly
-# as in production. Integration between them is HTTPS-only: set
-# DELIVERY_INTAKE_URL=http://delivery-factory:8080/api/intake on the
-# Lead Engine (in-compose DNS), or the public URL when split across hosts.
+# as in production. Integration between them is HTTPS-only: the Lead Engine
+# (hosted on Vercel) posts handoffs to the Delivery Factory's public
+# /api/intake URL.
 #
 # 1. Copy .env.example to .env and fill in secrets (key material, passwords).
 # 2. docker compose up --build -d
 # 3. Apply migrations:
-#      docker compose exec leads-db psql -U raphah -d leads \
-#        -f /migrations/<lead-engine migration>.sql
 #      (mount ./apps/*/neon/migrations into the db containers, or run the
 #       repo's migration runner from your workstation with DATABASE_URL set)
 # 4. Open http://localhost:8002 (Delivery Factory UI).
@@ -23,24 +23,6 @@
 name: d-raphah
 
 services:
-  leads-db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: raphah
-      POSTGRES_PASSWORD: ${LEADS_DB_PASSWORD:?set LEADS_DB_PASSWORD}
-      POSTGRES_DB: leads
-    ports:
-      - "5433:5432"
-    volumes:
-      - leads-data:/var/lib/postgresql/data
-      - ../apps/leads-engine/neon/migrations:/migrations:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U raphah -d leads"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   delivery-db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -58,27 +40,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  leads-engine:
-    build:
-      context: ..
-      dockerfile: apps/leads-engine/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      leads-db:
-        condition: service_healthy
-    ports:
-      - "8001:8080"
-    environment:
-      DATABASE_URL: postgres://raphah:${LEADS_DB_PASSWORD}@leads-db:5432/leads
-      APP_ENV: production
-      HANDOFF_PRIVATE_KEY_PEM: ${HANDOFF_PRIVATE_KEY_PEM:?set HANDOFF_PRIVATE_KEY_PEM}
-      LEAD_ENGINE_PUBLIC_KEY_PEM: ${LEAD_ENGINE_PUBLIC_KEY_PEM:?set LEAD_ENGINE_PUBLIC_KEY_PEM}
-      DELIVERY_FACTORY_PUBLIC_KEY_PEM: ${DELIVERY_FACTORY_PUBLIC_KEY_PEM:?set DELIVERY_FACTORY_PUBLIC_KEY_PEM}
-      FEEDBACK_PRIVATE_KEY_PEM: ${FEEDBACK_PRIVATE_KEY_PEM:?set FEEDBACK_PRIVATE_KEY_PEM}
-      DELIVERY_INTAKE_URL: http://delivery-factory:8080/api/intake
-      WORKER_SECRET: ${WORKER_SECRET:?set WORKER_SECRET}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
 
   delivery-factory:
     build:
@@ -101,5 +62,4 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
 
 volumes:
-  leads-data:
   delivery-data:

@@ -1,10 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseCsvRecords } from "../api/_lib/discovery/csv";
 import {
-  TorontoOpenDataAdapter,
-  torontoRowToCandidate,
-} from "../api/_lib/discovery/toronto-open-data";
-import {
   JobBankAdapter,
   jobBankRowToCandidate,
 } from "../api/_lib/discovery/job-bank";
@@ -38,86 +34,6 @@ describe("structured discovery adapters", () => {
         'Employer,Description\r\n"Acme, Inc.","Uses ""paper"" forms"\r\n',
       ),
     ).toEqual([{ Employer: "Acme, Inc.", Description: 'Uses "paper" forms' }]);
-  });
-
-  it("maps Toronto licence records into provenance-rich candidates", () => {
-    const candidate = torontoRowToCandidate(
-      {
-        "Operating Name": "Harbour Bakery",
-        "Licence Number": "B123",
-        "Licence Category": "Eating Establishment",
-        "Business Address": "1 Front St, Toronto",
-        Latitude: "43.64",
-        Longitude: "-79.38",
-      },
-      "https://open.toronto.ca/resource.csv",
-      "2026-09-29T00:00:00Z",
-    );
-    expect(candidate).toMatchObject({
-      externalId: "B123",
-      name: "Harbour Bakery",
-      category: "Eating Establishment",
-      source: "toronto_open_data",
-      lat: 43.64,
-      lng: -79.38,
-    });
-    expect(candidate.evidenceText).toContain("Municipal licence category");
-  });
-
-  it("discovers and filters Toronto CKAN records through the datastore", async () => {
-    const fetcher = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse({
-          success: true,
-          result: {
-            metadata_modified: "2026-09-28T00:00:00Z",
-            resources: [
-              {
-                id: "licences",
-                name: "Business licences data",
-                format: "CSV",
-                url: "https://example.test/licences.csv",
-                datastore_active: true,
-              },
-            ],
-          },
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          success: true,
-          result: {
-            records: [
-              {
-                OPERATING_NAME: "A",
-                LICENCE_NO: "1",
-                CATEGORY: "Restaurant",
-                STATUS: "Active",
-                WEBSITE: "https://a.example",
-              },
-              {
-                OPERATING_NAME: "B",
-                LICENCE_NO: "2",
-                CATEGORY: "Restaurant",
-                STATUS: "Expired",
-              },
-              {
-                OPERATING_NAME: "C",
-                LICENCE_NO: "3",
-                CATEGORY: "Plumber",
-                STATUS: "Active",
-              },
-            ],
-          },
-        }),
-      );
-    const result = await new TorontoOpenDataAdapter().fetchCandidates(geo, {
-      fetcher: fetcher as typeof fetch,
-      config: { categories: ["restaurant"], activeOnly: true, maxRecords: 10 },
-    });
-    expect(result.map((candidate) => candidate.name)).toEqual(["A"]);
-    expect(String(fetcher.mock.calls[1][0])).toContain("resource_id=licences");
   });
 
   it("maps and filters current Job Bank postings for the configured market", async () => {
@@ -172,13 +88,14 @@ describe("structured discovery adapters", () => {
   });
 
   it("registers all adapters and their separate human terms gates", () => {
+    // The Toronto Open Data adapter was retired in LE v4 (its licence
+    // records never carry websites, so candidates could not be scraped).
     expect(Object.keys(createDiscoveryAdapters()).sort()).toEqual([
       "job_bank",
       "overpass",
-      "toronto_open_data",
     ]);
-    expect(termsForAdapter("toronto_open_data").id).toBe("toronto-open-data");
     expect(termsForAdapter("job_bank").id).toBe("canada-job-bank-open-data");
+    expect(termsForAdapter("overpass").id).toBe("overpass-osm");
   });
 
   it("preserves Job Bank record provenance in direct mapping", () => {

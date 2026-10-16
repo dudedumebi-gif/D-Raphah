@@ -1,4 +1,3 @@
-import { evaluateCanarySoak } from "./domain.js";
 import { log, reportError } from "./telemetry.js";
 
 export const SLACK_WEBHOOK_URL_ENV = "SLACK_OPS_ALERT_WEBHOOK_URL";
@@ -17,14 +16,9 @@ export type AlertSqlClient = (
 
 export type AlertType =
   | "worker_stale"
-  | "canary_stuck"
-  | "canary_failed"
   | "dead_letter"
-  | "canary_target_mismatch"
   | "scheduled_start_p95_breach"
-  | "qstash_delivery_failed"
-  | "soak_passed"
-  | "production_gate_passed";
+  | "qstash_delivery_failed";
 export type AlertSeverity = "critical" | "warning" | "info";
 export type AlertTransition = "opened" | "reminder" | "resolved" | "unchanged";
 
@@ -78,14 +72,9 @@ function alertTitle(alert: AlertInput, transition: AlertTransition): string {
   const state = transition === "resolved" ? "RECOVERED" : alert.severity.toUpperCase();
   const names: Record<AlertType, string> = {
     worker_stale: "Worker heartbeat stale",
-    canary_stuck: "Canary execution stuck",
-    canary_failed: "Canary execution failed",
     dead_letter: "Scrape job dead-lettered",
-    canary_target_mismatch: "Canary target mismatch",
     scheduled_start_p95_breach: "Scheduled-start p95 breached",
     qstash_delivery_failed: "QStash delivery exhausted retries",
-    soak_passed: "72-hour canary soak passed",
-    production_gate_passed: "All production promotion gates passed",
   };
   return `${state}: ${names[alert.type]}`;
 }
@@ -107,7 +96,7 @@ export function formatSlackAlert(
     `*Resource:* ${alert.resourceType} \`${alert.resourceId}\``,
     `*Workspace:* \`${alert.workspaceId}\``,
     `*Observed:* ${at}`,
-    `*Operations:* ${productUrl()}/#operations`,
+    `*Lead Engine:* ${productUrl()}/`,
   ].join("\n");
 }
 
@@ -245,61 +234,16 @@ export async function reconcileAlert(
 
 interface WorkspaceRow { id: string }
 interface WorkerRow { id: string; last_heartbeat_at: string }
-interface CanaryRow {
-  id: string;
-  workspace_id: string;
-  status: "queued" | "running" | "completed" | "failed";
-  scheduled_at: string;
-  completed_at: string | null;
-  failure_reason: string | null;
-  target_url?: string | null;
-}
-
-export interface ProductionGateChecks {
-  soakCompletion: boolean;
-  scheduledStartP95: boolean;
-  incidentHealth: boolean;
-  retryRecovery: boolean;
-  auditAndRlsIntegrity: boolean;
-}
-
-export function productionGatePassed(checks: ProductionGateChecks): boolean {
-  return Object.values(checks).every(Boolean);
-}
 
 export async function checkOperationalAlerts(
   client: AlertSqlClient,
   now = new Date(),
 ): Promise<number> {
   const cutoff72h = new Date(now.getTime() - 72 * 3_600_000).toISOString();
-  const cutoff73h = new Date(now.getTime() - 73 * 3_600_000).toISOString();
-  const [
-    workspaces, workers, activeCanaries, terminalCanaries, deadLetters,
-    p95Rows, soakRows, criticalRows, recoveryRows, evidenceRows, integrityRows,
-  ] =
+  const [workspaces, workers, deadLetters, p95Rows] =
     (await Promise.all([
       client`select id from public.workspaces order by id`,
       client`select id, last_heartbeat_at from public.worker_nodes order by last_heartbeat_at desc limit 1`,
-      client`
-        select cr.id, cr.workspace_id, cr.status, cr.scheduled_at,
-          cr.completed_at, cr.failure_reason
-        from public.canary_runs cr
-        where cr.status in ('queued','running')
-           or exists (
-             select 1 from public.alert_log al
-             where al.alert_type='canary_stuck'
-               and al.resource_id=cr.id::text and al.status='open'
-           )
-      `,
-      client`
-        select distinct on (cr.workspace_id)
-          cr.id, cr.workspace_id, cr.status, cr.scheduled_at,
-          cr.completed_at, cr.failure_reason, sj.target_url
-        from public.canary_runs cr
-        left join public.scrape_jobs sj on sj.id=cr.scrape_job_id
-        where cr.status in ('completed','failed')
-        order by cr.workspace_id, coalesce(cr.completed_at,cr.scheduled_at) desc
-      `,
       client`
         select sj.id, sj.workspace_id, sj.status, sj.last_error
         from public.scrape_jobs sj
@@ -322,86 +266,10 @@ export async function checkOperationalAlerts(
           and started_at is not null
         group by workspace_id
       `,
-      client`
-        select workspace_id, scheduled_at, completed_at, status
-        from public.canary_runs
-        where scheduled_at >= ${cutoff73h}::timestamptz
-        order by workspace_id, scheduled_at
-      `,
-      client`
-        select workspace_id, count(*)::int as critical_open
-        from public.alert_log
-        where status='open' and severity='critical'
-        group by workspace_id
-      `,
-      client`
-        select w.id as workspace_id,
-          count(j.id) filter (
-            where j.attempt_count > 1 and j.status in ('completed','partial')
-          )::int as recovered_count,
-          count(j.id) filter (
-            where j.status='dead_letter'
-              and coalesce(j.completed_at,j.updated_at,j.created_at)
-                  >= ${cutoff72h}::timestamptz
-          )::int as dead_letter_count
-        from public.workspaces w
-        left join public.scrape_jobs j
-          on j.workspace_id=w.id
-         and j.created_at >= ${cutoff72h}::timestamptz
-        group by w.id
-      `,
-      client`
-        select w.id as workspace_id,
-          exists (
-            select 1 from public.audit_events ae
-            where ae.workspace_id=w.id
-              and ae.action='release.retry_dead_letter_recovery.verified'
-          ) as retry_recovery_verified,
-          exists (
-            select 1 from public.audit_events ae
-            where ae.workspace_id=w.id
-              and ae.action='release.rls_behavior.verified'
-          ) as rls_behavior_verified
-        from public.workspaces w
-      `,
-      client`
-        with required_rls(table_name) as (values
-          ('audit_events'), ('discovery_candidates'), ('discovery_checkpoints'),
-          ('discovery_runs'), ('discovery_sources'), ('evidence_artifacts'),
-          ('maturity_assessments'), ('opportunities'),
-          ('organization_source_links'), ('scrape_job_attempts'),
-          ('scrape_jobs'), ('signal_observations'),
-          ('source_collection_reservations'), ('terms_acceptances')
-        ), required_audit(table_name) as (values
-          ('discovery_candidates'), ('discovery_checkpoints'),
-          ('discovery_runs'), ('discovery_sources'), ('evidence_artifacts'),
-          ('maturity_assessments'), ('opportunities'),
-          ('organization_source_links'), ('scrape_job_attempts'),
-          ('scrape_jobs'), ('signal_observations'),
-          ('source_collection_reservations'), ('terms_acceptances')
-        )
-        select
-          (select count(*)=14
-             from required_rls r
-             join pg_class c on c.relname=r.table_name
-             join pg_namespace n on n.oid=c.relnamespace
-            where n.nspname='public' and c.relrowsecurity) as rls_ok,
-          (select count(distinct r.table_name)=13
-             from required_audit r
-             join pg_class c on c.relname=r.table_name
-             join pg_namespace n on n.oid=c.relnamespace
-             join pg_trigger t on t.tgrelid=c.oid
-            where n.nspname='public' and not t.tgisinternal
-              and t.tgname like 'audit_%') as audit_ok
-      `,
     ])) as unknown as [
-      WorkspaceRow[], WorkerRow[], CanaryRow[], CanaryRow[],
+      WorkspaceRow[], WorkerRow[],
       Array<{id:string;workspace_id:string;status:string;last_error:string|null}>,
-      Array<{workspace_id:string;p95_ms:number}>, CanaryRow[],
-      Array<{workspace_id:string;critical_open:number}>,
-      Array<{workspace_id:string;recovered_count:number;dead_letter_count:number}>,
-      Array<{workspace_id:string;retry_recovery_verified:boolean;rls_behavior_verified:boolean}>,
-      Array<{rls_ok:boolean;audit_ok:boolean}>
+      Array<{workspace_id:string;p95_ms:number}>,
     ];
 
   let notified = 0;
@@ -419,60 +287,18 @@ export async function checkOperationalAlerts(
       severity: "critical",
       resourceType: "worker_nodes",
       resourceId: `${workspace.id}:worker-heartbeat`,
-      active: ageMs > STALE_AFTER_MS,
+      // No heartbeat EVER recorded is a bootstrap state, not an outage:
+      // the tick evaluating this is about to register the first one, and
+      // opening a critical incident for it would be a false alert
+      // (Codex P2 on PR #64). A recorded heartbeat that goes stale is
+      // the real incident.
+      active: latestWorker !== undefined && ageMs > STALE_AFTER_MS,
       reason: latestWorker
         ? `Latest worker heartbeat is ${Math.round(ageMs/60_000)} minutes old`
         : "No worker heartbeat is registered",
       likelyCause: "The QStash worker schedule is delayed, disabled, or returning a non-success response.",
       nextAction: "Inspect the QStash worker schedule and Vercel function logs, then restore signed deliveries.",
       payload: { workerId: latestWorker?.id ?? null, ageMs: Number.isFinite(ageMs) ? ageMs : null },
-    }, now));
-
-  }
-
-  for (const run of activeCanaries) {
-    const ageMs = now.getTime() - new Date(run.scheduled_at).getTime();
-    count(await reconcileAlert(client, {
-      workspaceId: run.workspace_id,
-      type: "canary_stuck",
-      severity: "critical",
-      resourceType: "canary_runs",
-      resourceId: run.id,
-      active: ["queued","running"].includes(run.status) && ageMs > STALE_AFTER_MS,
-      reason: `Canary ${run.status} for ${Math.round(ageMs/60_000)} minutes`,
-      likelyCause: "The worker did not lease or complete the canary within the ten-minute operational window.",
-      nextAction: "Inspect the linked scrape job, lease owner, QStash delivery, and Vercel runtime logs.",
-      payload: { status: run.status, scheduledAt: run.scheduled_at, ageMs },
-    }, now));
-  }
-
-  const expectedTarget = process.env.LEAD_ENGINE_CANARY_URL?.trim();
-  for (const run of terminalCanaries) {
-    count(await reconcileAlert(client, {
-      workspaceId: run.workspace_id,
-      type: "canary_failed",
-      severity: "critical",
-      resourceType: "canary_runs",
-      resourceId: `${run.workspace_id}:canary_failed`,
-      active: run.status === "failed",
-      reason: run.status === "failed" ? run.failure_reason ?? "Canary run failed" : "The latest terminal canary completed successfully",
-      likelyCause: "The controlled discovery pipeline failed collection, evidence, scoring, or persistence.",
-      nextAction: "Inspect the canary run and linked job attempt, correct the failing stage, and allow the next hourly run to prove recovery.",
-      payload: { runId: run.id, status: run.status, completedAt: run.completed_at },
-    }, now));
-    count(await reconcileAlert(client, {
-      workspaceId: run.workspace_id,
-      type: "canary_target_mismatch",
-      severity: "critical",
-      resourceType: "canary_runs",
-      resourceId: `${run.workspace_id}:canary_target_mismatch`,
-      active: Boolean(expectedTarget && run.status === "completed" && run.target_url !== expectedTarget),
-      reason: expectedTarget && run.target_url !== expectedTarget
-        ? "Latest completed canary used a target other than LEAD_ENGINE_CANARY_URL"
-        : "Latest completed canary used the configured target",
-      likelyCause: "An old hourly idempotency key, stale environment value, or schedule deployment selected the wrong canary target.",
-      nextAction: "Confirm the production canary URL and wait for a newly keyed hourly canary to complete against it.",
-      payload: { runId: run.id, expectedTarget: expectedTarget ?? null, observedTarget: run.target_url ?? null },
     }, now));
   }
 
@@ -507,74 +333,6 @@ export async function checkOperationalAlerts(
     }, now));
   }
 
-  for (const workspace of workspaces) {
-    const samples = soakRows.filter((row) => row.workspace_id === workspace.id);
-    const soak = evaluateCanarySoak(samples.map((row) => ({
-      scheduledAt: row.scheduled_at,
-      completedAt: row.completed_at,
-      status: row.status,
-    })), now);
-    count(await reconcileAlert(client, {
-      workspaceId: workspace.id,
-      type: "soak_passed",
-      severity: "info",
-      resourceType: "canary_runs",
-      resourceId: `${workspace.id}:72-hour-soak`,
-      active: soak.passed,
-      reason: soak.passed
-        ? `72-hour canary passed at ${(soak.completionRate*100).toFixed(2)}% completion`
-        : "72-hour canary has not yet met its promotion gate",
-      likelyCause: "All required hourly observations completed at or above the production threshold.",
-      nextAction: "Record the release evidence and complete the remaining production promotion gates.",
-      payload: soak as unknown as Record<string, unknown>,
-      allowReminder: false,
-    }, now));
-
-    const p95 = Number(p95Rows.find((row) => row.workspace_id === workspace.id)?.p95_ms);
-    const recovery = recoveryRows.find((row) => row.workspace_id === workspace.id);
-    const evidence = evidenceRows.find((row) => row.workspace_id === workspace.id);
-    const integrity = integrityRows[0];
-    const workerAgeMs = latestWorker
-      ? now.getTime() - new Date(latestWorker.last_heartbeat_at).getTime()
-      : Number.POSITIVE_INFINITY;
-    const currentCritical = workerAgeMs > STALE_AFTER_MS ||
-      activeCanaries.some((run) => run.workspace_id === workspace.id &&
-        ["queued","running"].includes(run.status) &&
-        now.getTime() - new Date(run.scheduled_at).getTime() > STALE_AFTER_MS) ||
-      terminalCanaries.some((run) => run.workspace_id === workspace.id &&
-        (run.status === "failed" || Boolean(expectedTarget && run.target_url !== expectedTarget))) ||
-      deadLetters.some((job) => job.workspace_id === workspace.id && job.status === "dead_letter");
-    const checks: ProductionGateChecks = {
-      soakCompletion: soak.passed,
-      scheduledStartP95: Number.isFinite(p95) && p95 < START_P95_LIMIT_MS,
-      incidentHealth: Number(
-        criticalRows.find((row) => row.workspace_id === workspace.id)?.critical_open ?? 0,
-      ) === 0 && !currentCritical,
-      retryRecovery: (
-        Number(recovery?.recovered_count ?? 0) > 0 ||
-        Boolean(evidence?.retry_recovery_verified)
-      ) &&
-        Number(recovery?.dead_letter_count ?? 0) === 0,
-      auditAndRlsIntegrity: Boolean(
-        integrity?.rls_ok && integrity?.audit_ok && evidence?.rls_behavior_verified,
-      ),
-    };
-    if (productionGatePassed(checks)) {
-      count(await reconcileAlert(client, {
-        workspaceId: workspace.id,
-        type: "production_gate_passed",
-        severity: "info",
-        resourceType: "release_gate",
-        resourceId: `${workspace.id}:production-promotion`,
-        active: true,
-        reason: "All five production promotion checks passed",
-        likelyCause: "The 72-hour soak, latency, incident, recovery, and tenant-control evidence are all green.",
-        nextAction: "Request the product owner's explicit approval before promoting the Lead Engine to production-ready.",
-        payload: { checks, soak, p95Ms: p95, recovery, evidence, integrity },
-        allowReminder: false,
-      }, now));
-    }
-  }
   return notified;
 }
 

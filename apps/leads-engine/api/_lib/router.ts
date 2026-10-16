@@ -1,13 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import {
-  CriteriaSchema,
-  evaluateCanarySoak,
-  isSuggestionSuppressed,
-  mergeSuggestionChanges,
-  percentile95,
-  suggestCriteriaAdjustment,
-} from "./domain.js";
+import { CriteriaSchema, percentile95 } from "./domain.js";
 import {
   assertDatabaseReady,
   configurationStatus,
@@ -37,12 +30,7 @@ import {
   type ApprovedUseCaseForProposal,
 } from "./proposals.js";
 import { ingestDeliveryFeedback } from "./feedback.js";
-import {
-  dedupeRows,
-  mapRowToSourceInput,
-  normalizeSourceUrl,
-} from "./source-import.js";
-import { enqueueCanary, runWorkerTick } from "./worker.js";
+import { runWorkerTick } from "./worker.js";
 import { dryRunRescore, rescoreCampaignBatch } from "./rescore.js";
 import {
   isRetired,
@@ -70,9 +58,7 @@ import {
   requireTermsAcceptance,
   termsForAdapter,
 } from "./discovery/terms.js";
-import { runScheduledDiscovery } from "./discovery/schedule.js";
 import {
-  checkOperationalAlerts,
   recordQstashFailure,
   recordQstashSuccess,
   type AlertSqlClient,
@@ -114,7 +100,6 @@ const SourceInputSchema = z.object({
   intervalMinutes: z.number().int().min(5).max(43_200).default(1_440),
   userAgent: z.string().min(3).default("RaphahLeadEngineBot/2.0"),
   contactEmail: z.string().email(),
-  dataMode: z.enum(["demo", "pilot", "production"]).default("pilot"),
 });
 
 const ManualJobSchema = z.object({
@@ -126,32 +111,11 @@ const ManualJobSchema = z.object({
   maxAttempts: z.number().int().min(1).max(10).default(3),
 });
 
-const SourceImportBodySchema = z.object({
-  rows: z
-    .array(
-      z.object({
-        name: z.string(),
-        website: z.string(),
-        collectionMethod: z
-          .enum(["api", "rss", "sitemap", "static_html"])
-          .optional(),
-        businessPurpose: z.string().optional(),
-        allowDiscoveredDomains: z.boolean().optional(),
-      }),
-    )
-    .min(1)
-    .max(200),
-  contactEmail: z.string().email(),
-  approveAll: z.boolean().optional().default(false),
-  dataMode: z.enum(["demo", "pilot", "production"]).default("pilot"),
-});
-
 const DiscoverySourceInputSchema = z.object({
   name: z.string().min(2).max(160),
   adapterId: DiscoveryAdapterIdSchema,
   geo: DiscoveryGeoInputSchema,
   adapterConfig: z.record(z.unknown()).default({}),
-  dataMode: z.enum(["demo", "pilot", "production"]).default("pilot"),
   sourceId: z.string().uuid(),
   campaignId: z.string().uuid().optional(),
 });
@@ -219,21 +183,24 @@ async function schedulerName(request: Request): Promise<string | undefined> {
 }
 
 function schedulerWorkspaceId(): string {
-  const workspaceId = process.env.LEAD_ENGINE_CANARY_WORKSPACE_ID;
-  if (!workspaceId) throw new Error("LEAD_ENGINE_CANARY_WORKSPACE_ID is required");
+  const workspaceId =
+    process.env.LEAD_ENGINE_SCHEDULER_WORKSPACE_ID ??
+    process.env.LEAD_ENGINE_CANARY_WORKSPACE_ID;
+  if (!workspaceId)
+    throw new Error("LEAD_ENGINE_SCHEDULER_WORKSPACE_ID is required");
   return workspaceId;
 }
 
 // --- Lead export (lead-vision gap 2): pure serialization helpers. ---
 
-const EXPORT_FORMATS = ["csv", "json"] as const;
+const EXPORT_FORMATS = ["csv"] as const;
 export type LeadExportFormat = (typeof EXPORT_FORMATS)[number];
 
 /** Bounded page size: export reuses the leads list query, capped. */
 export const EXPORT_MAX_LEADS = 5_000;
 
 export function parseExportFormat(raw: string | null): LeadExportFormat {
-  if (raw === "csv" || raw === "json") return raw;
+  if (raw === null || raw === "csv") return "csv";
   throw Object.assign(
     new Error(`format must be one of: ${EXPORT_FORMATS.join(", ")}`),
     { statusCode: 400 },
@@ -306,12 +273,8 @@ export function mapExportLeadRow(lead: any): Record<string, unknown> {
   );
 }
 
-export function serializeLeadsExport(
-  leads: any[],
-  format: LeadExportFormat,
-): string {
+export function serializeLeadsExport(leads: any[]): string {
   const rows = leads.map(mapExportLeadRow);
-  if (format === "json") return JSON.stringify(rows, null, 2);
   const lines = [LEAD_EXPORT_COLUMNS.map(csvEscape).join(",")];
   for (const row of rows)
     lines.push(
@@ -360,26 +323,12 @@ async function operationalSnapshot(
     Math.floor(now.getTime() / 3_600_000) * 3_600_000 - 72 * 3_600_000,
   ).toISOString();
   const workspaceFilter = workspaceId ?? null;
-  // The canary is a system-level signal: its runs live in the dedicated
-  // canary workspace (LEAD_ENGINE_CANARY_WORKSPACE_ID), not in the
-  // caller's workspace. Filtering canary runs by the caller's workspace
-  // made the Overview/Operations canary cards read 0% / "0h observed"
-  // for the operator while /api/health reported the soak green.
-  const canaryFilter =
-    process.env.LEAD_ENGINE_CANARY_WORKSPACE_ID ?? workspaceFilter;
-  const [jobsResult, canaryResult, workersResult, alertsResult] = await Promise.all([
+  const [jobsResult, workersResult, alertsResult] = await Promise.all([
     client`
       select status, scheduled_for, started_at, completed_at
       from public.scrape_jobs
       where scheduled_for >= ${start72h}
         and (${workspaceFilter}::uuid is null or workspace_id = ${workspaceFilter}::uuid)
-    `,
-    client`
-      select scheduled_at, completed_at, status, failure_reason
-      from public.canary_runs
-      where scheduled_at >= ${start72h}
-        and (${canaryFilter}::uuid is null or workspace_id = ${canaryFilter}::uuid)
-      order by scheduled_at
     `,
     client`
       select id, status, runtime, capabilities, last_heartbeat_at, deployment_id
@@ -416,20 +365,6 @@ async function operationalSnapshot(
           : [],
     )
     .filter((delay) => delay >= 0);
-  const canary = evaluateCanarySoak(
-    (
-      canaryResult as unknown as Array<{
-        scheduled_at: string;
-        completed_at: string | null;
-        status: "completed" | "failed" | "running" | "queued";
-      }>
-    ).map((item) => ({
-      scheduledAt: item.scheduled_at,
-      completedAt: item.completed_at,
-      status: item.status,
-    })),
-    now,
-  );
   const workers = workersResult as unknown as Array<{
     id: string;
     status: string;
@@ -450,7 +385,6 @@ async function operationalSnapshot(
         startDelays.length > 0 &&
         (percentile95(startDelays) ?? Infinity) < 300_000,
     },
-    canary,
     workers,
     alerts: alertsResult,
   };
@@ -524,25 +458,26 @@ async function authenticatedRoutes(
       createAdminClient(),
       workspaceId,
     );
-    // Full-table job counts by mode + status. The jobs list above is a
+    // Full-table job counts (production-stamped rows, matching the
+    // production-only views). The jobs list above is a
     // 100-row window (newest first): deriving the Overview "Active
     // jobs / completed" card from it hides completions as soon as more
     // than 100 jobs exist — the first sprint batch's completed jobs
     // fell out of the window and the card froze at "100 / 0 completed"
     // while the funnel (a true count) showed scoring progressing.
     const jobCountRows = (await createAdminClient()`
-      select data_mode, status, count(*)::int as count
+      select status, count(*)::int as count
       from public.scrape_jobs
       where workspace_id = ${workspaceId}
-      group by data_mode, status
+        and data_mode = 'production'
+      group by status
     `) as unknown as Array<{
-      data_mode: string;
       status: string;
       count: number;
     }>;
-    const jobCounts: Record<string, Record<string, number>> = {};
+    const jobCounts: Record<string, number> = {};
     for (const row of jobCountRows) {
-      (jobCounts[row.data_mode] ??= {})[row.status] = row.count;
+      jobCounts[row.status] = row.count;
     }
     return json({
       actor: {
@@ -553,19 +488,7 @@ async function authenticatedRoutes(
       workspaceId,
       memberships: memberships.data,
       sources: sources.data,
-      campaigns: (campaigns.data ?? []).map((campaign: any) => {
-        const observed = Number(
-          recentLeads.data?.find(
-            (row: { campaign_id: string }) => row.campaign_id === campaign.id,
-          )?.qualified_count ?? 0,
-        );
-        return {
-          ...campaign,
-          criteria_suggestion: isSuggestionSuppressed(campaign, observed)
-            ? null
-            : suggestCriteriaAdjustment(campaign.criteria, observed),
-        };
-      }),
+      campaigns: campaigns.data ?? [],
       jobs: jobs.data,
       jobCounts,
       leads: leads.data,
@@ -608,75 +531,13 @@ async function authenticatedRoutes(
     if (error) throw new Error(error.message);
     return json({ data });
   }
-  if (pathname === "/api/v1/sources/import" && request.method === "POST") {
-    const body = SourceImportBodySchema.parse(await bodyJson(request));
-    requireRole(
-      context,
-      body.approveAll
-        ? ["owner", "administrator"]
-        : ["owner", "administrator", "analyst"],
-    );
-    const { data: existingRows, error: existingError } = await client
-      .from("source_definitions")
-      .select("base_url")
-      .eq("workspace_id", workspaceId);
-    if (existingError) throw new Error(existingError.message);
-    const existingUrls = new Set<string>();
-    for (const row of (existingRows ?? []) as Array<{ base_url: string }>) {
-      try {
-        existingUrls.add(normalizeSourceUrl(row.base_url));
-      } catch {
-        // Legacy rows that no longer normalize cannot collide; ignore them.
-      }
-    }
-    const indexed = body.rows.map((row, index) => ({ index, row }));
-    const { unique, skipped } = dedupeRows(indexed, existingUrls);
-    const created: Array<{ id: string; name: string }> = [];
-    const errors: Array<{ index: number; name: string; error: string }> = [];
-    let approved = 0;
-    for (const { index, row } of unique) {
-      const label = row.name?.trim() || `row ${index + 1}`;
-      try {
-        const input = SourceInputSchema.parse({
-          ...mapRowToSourceInput(row, body.contactEmail),
-          dataMode: body.dataMode,
-        });
-        const { data, error } = await client.rpc("create_source_with_policy", {
-          p_workspace_id: workspaceId,
-          p_input: input,
-        });
-        if (error) throw new Error(error.message);
-        const sourceId = (data as { sourceId?: string } | null)?.sourceId;
-        if (!sourceId) throw new Error("Source creation returned no id");
-        if (body.approveAll) {
-          const { error: approveError } = await client.rpc(
-            "approve_source_policy",
-            {
-              p_workspace_id: workspaceId,
-              p_source_id: sourceId,
-              p_reason: "Bulk-approved on CSV import.",
-            },
-          );
-          if (approveError) throw new Error(approveError.message);
-          approved += 1;
-        }
-        created.push({ id: sourceId, name: input.name });
-      } catch (error) {
-        errors.push({
-          index,
-          name: label,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    return json({ data: { created, skipped, errors, approved } }, 201);
-  }
   if (pathname === "/api/v1/sources" && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
     const input = SourceInputSchema.parse(await bodyJson(request));
     const { data, error } = await client.rpc("create_source_with_policy", {
       p_workspace_id: workspaceId,
-      p_input: input,
+      // Data modes were collapsed in v4: new rows are stamped production.
+      p_input: { ...input, dataMode: "production" },
     });
     if (error) throw new Error(error.message);
     return json({ data }, 201);
@@ -833,12 +694,8 @@ async function authenticatedRoutes(
     const input = z
       .object({
         criteria: CriteriaSchema,
-        scheduleEnabled: z.boolean().optional(),
-        intervalMinutes: z.number().int().min(5).max(43_200).optional(),
-        nextRunAt: z.string().datetime().nullable().optional(),
       })
       .parse(await bodyJson(request));
-    const scheduleEnabled = input.scheduleEnabled;
     const { data: patchTarget, error: patchTargetError } = await client
       .from("scrape_campaigns")
       .select("id,status")
@@ -849,33 +706,11 @@ async function authenticatedRoutes(
       throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
     if (isRetired(patchTarget.status as string))
       throw Object.assign(new Error("Campaign is retired"), { statusCode: 409 });
-    // Capture the current observed count so the suggestion stays suppressed
-    // until fresh scrape output changes it.
-    const { data: counts } = await client.rpc("campaign_qualified_counts", {
-      p_workspace_id: workspaceId,
-    });
-    const observed = Number(
-      (
-        counts as Array<{ campaign_id: string; qualified_count: number }> | null
-      )?.find((row) => row.campaign_id === campaignCriteria[1])
-        ?.qualified_count ?? 0,
-    );
     const updates: Record<string, unknown> = {
       criteria: input.criteria,
       criteria_version: new Date().toISOString(),
       updated_by: context.user.id,
-      // Manual save also suppresses the current suggestion cycle; a new
-      // suggestion appears only when fresh scrape output arrives.
-      last_suggestion_at: new Date().toISOString(),
-      last_suggestion_observed_count: observed,
-      last_suggestion_direction: "manual",
     };
-    if (scheduleEnabled !== undefined)
-      updates.schedule_enabled = scheduleEnabled;
-    if (input.intervalMinutes !== undefined)
-      updates.interval_minutes = input.intervalMinutes;
-    if (input.nextRunAt !== undefined) updates.next_run_at = input.nextRunAt;
-    else if (scheduleEnabled) updates.next_run_at = new Date().toISOString();
     const { data, error } = await client
       .from("scrape_campaigns")
       .update(updates)
@@ -885,33 +720,6 @@ async function authenticatedRoutes(
       .single();
     if (error) throw new Error(error.message);
     return json({ data });
-  }
-
-  const campaignSuggestion = pathname.match(
-    /^\/api\/v1\/criteria\/([0-9a-f-]+)\/suggestion$/i,
-  );
-  if (campaignSuggestion && request.method === "GET") {
-    const [campaign, recentLeads] = await Promise.all([
-      client
-        .from("scrape_campaigns")
-        .select("criteria")
-        .eq("workspace_id", workspaceId)
-        .eq("id", campaignSuggestion[1])
-        .single(),
-      client.rpc("campaign_qualified_counts", { p_workspace_id: workspaceId }),
-    ]);
-    if (campaign.error)
-      throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
-    if (recentLeads.error) throw new Error(recentLeads.error.message);
-    const count = Number(
-      recentLeads.data?.find(
-        (row: { campaign_id: string }) =>
-          row.campaign_id === campaignSuggestion[1],
-      )?.qualified_count ?? 0,
-    );
-    return json({
-      data: suggestCriteriaAdjustment(campaign.data.criteria, count),
-    });
   }
 
   // Retire/restore a campaign (History). Same contract as sources:
@@ -1047,138 +855,6 @@ async function authenticatedRoutes(
     });
     return json({ data: result });
   }
-  // --- Lead-vision gap 3: one-click suggestion apply + auto-apply opt-in. ---
-  // These routes reuse the existing criteria storage model (criteria jsonb on
-  // scrape_campaigns) and the same CriteriaSchema validation the PATCH route
-  // applies; they are additive and do not change any existing route.
-  const applySuggestion = pathname.match(
-    /^\/api\/v1\/criteria\/([0-9a-f-]+)\/apply-suggestion$/i,
-  );
-  if (applySuggestion && request.method === "POST") {
-    requireRole(context, ["owner", "administrator", "analyst"]);
-    const campaignId = applySuggestion[1];
-    const { data: campaign, error: campaignError } = await client
-      .from("scrape_campaigns")
-      .select("id,criteria,status")
-      .eq("workspace_id", workspaceId)
-      .eq("id", campaignId)
-      .single();
-    if (campaignError || !campaign)
-      throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
-    if (isRetired((campaign as { status?: string }).status))
-      throw Object.assign(new Error("Campaign is retired"), { statusCode: 409 });
-    const { data: counts, error: countsError } = await client.rpc(
-      "campaign_qualified_counts",
-      { p_workspace_id: workspaceId },
-    );
-    if (countsError) throw new Error(countsError.message);
-    const observed = Number(
-      (
-        counts as Array<{ campaign_id: string; qualified_count: number }> | null
-      )?.find((row) => row.campaign_id === campaignId)?.qualified_count ?? 0,
-    );
-    const suggestion = suggestCriteriaAdjustment(campaign.criteria, observed);
-    if (
-      suggestion.direction === "hold" ||
-      Object.keys(suggestion.changes).length === 0
-    ) {
-      return json({
-        applied: false,
-        direction: suggestion.direction,
-        reason: "Suggestion is hold or has no changes; nothing was applied.",
-      });
-    }
-    // Merge through the same validation the PATCH route uses (full
-    // CriteriaSchema), then persist like the PATCH route does.
-    const merged = mergeSuggestionChanges(
-      campaign.criteria,
-      suggestion.changes,
-    );
-    const { data: updated, error: updateError } = await client
-      .from("scrape_campaigns")
-      .update({
-        criteria: merged,
-        criteria_version: new Date().toISOString(),
-        updated_by: context.user.id,
-        // Suppress further suggestions until the observed qualified count
-        // changes (new scrape data), so the Criteria page doesn't immediately
-        // re-suggest against the same output.
-        last_suggestion_at: new Date().toISOString(),
-        last_suggestion_observed_count: observed,
-        last_suggestion_direction: suggestion.direction,
-      })
-      .eq("workspace_id", workspaceId)
-      .eq("id", campaignId)
-      .select()
-      .single();
-    if (updateError) throw new Error(updateError.message);
-    const before: Record<string, unknown> = {};
-    const after: Record<string, unknown> = {};
-    for (const key of Object.keys(suggestion.changes)) {
-      before[key] = (campaign.criteria as Record<string, unknown>)[key];
-      after[key] = (merged as unknown as Record<string, unknown>)[key];
-    }
-    await logWorkspaceEvent(client, workspaceId, {
-      action: "criteria.suggestion_applied",
-      resourceType: "scrape_campaigns",
-      resourceId: campaignId,
-      reason:
-        `Applied ${suggestion.direction} suggestion ` +
-        `(${observed}/${suggestion.targetQualifiedLeads} qualified this week). ` +
-        suggestion.rationale.join(" "),
-      before,
-      after,
-    });
-    return json({
-      data: {
-        applied: true,
-        direction: suggestion.direction,
-        appliedChanges: suggestion.changes,
-        rationale: suggestion.rationale,
-        criteria: updated.criteria,
-      },
-    });
-  }
-  const autoApplyToggle = pathname.match(
-    /^\/api\/v1\/criteria\/([0-9a-f-]+)\/auto-apply$/i,
-  );
-  if (autoApplyToggle && request.method === "PATCH") {
-    requireRole(context, ["owner", "administrator", "analyst"]);
-    const campaignId = autoApplyToggle[1];
-    const input = z
-      .object({ autoApply: z.boolean() })
-      .parse(await bodyJson(request));
-    const { data: existing, error: existingError } = await client
-      .from("scrape_campaigns")
-      .select("id,auto_apply_criteria,status")
-      .eq("workspace_id", workspaceId)
-      .eq("id", campaignId)
-      .single();
-    if (existingError || !existing)
-      throw Object.assign(new Error("Campaign not found"), { statusCode: 404 });
-    if (isRetired((existing as { status?: string }).status))
-      throw Object.assign(new Error("Campaign is retired"), { statusCode: 409 });
-    const { data: updated, error: updateError } = await client
-      .from("scrape_campaigns")
-      .update({ auto_apply_criteria: input.autoApply })
-      .eq("workspace_id", workspaceId)
-      .eq("id", campaignId)
-      .select()
-      .single();
-    if (updateError) throw new Error(updateError.message);
-    await logWorkspaceEvent(client, workspaceId, {
-      action: "criteria.auto_apply_changed",
-      resourceType: "scrape_campaigns",
-      resourceId: campaignId,
-      reason: `Auto-apply ${input.autoApply ? "enabled" : "disabled"} by ${
-        context.user.email ?? context.user.id
-      }.`,
-      before: { auto_apply_criteria: existing.auto_apply_criteria },
-      after: { auto_apply_criteria: input.autoApply },
-    });
-    return json({ data: updated });
-  }
-
   if (pathname === "/api/v1/scrape-jobs" && request.method === "GET") {
     const { data, error } = await client
       .from("scrape_jobs")
@@ -1378,16 +1054,13 @@ async function authenticatedRoutes(
       action: "leads.export",
       resourceType: "opportunities",
       resourceId: null,
-      reason: `Exported ${leads.length} leads as ${format} (limit ${EXPORT_MAX_LEADS}).`,
+      reason: `Exported ${leads.length} leads as CSV (limit ${EXPORT_MAX_LEADS}).`,
     });
-    const body = serializeLeadsExport(leads, format);
+    const body = serializeLeadsExport(leads);
     return new Response(body, {
       status: 200,
       headers: {
-        "content-type":
-          format === "csv"
-            ? "text/csv; charset=utf-8"
-            : "application/json; charset=utf-8",
+        "content-type": "text/csv; charset=utf-8",
         "content-disposition": `attachment; filename="${exportFilename(format)}"`,
         "cache-control": "no-store",
       },
@@ -1951,7 +1624,7 @@ async function authenticatedRoutes(
       values (${workspaceId}::uuid, ${opportunityId}::uuid,
         ${context.user.id}, 'contacted', 'PROPOSAL_SENT',
         'Approved proposal sent by the operator (human-sent from LE).',
-        ${sentOpportunity[0]?.data_mode ?? "pilot"})
+        ${sentOpportunity[0]?.data_mode ?? "production"})
     `;
     return json({ data: proposal });
   }
@@ -2064,22 +1737,6 @@ async function authenticatedRoutes(
   // organization/opportunity, who recorded it, and what evidence supports
   // it. The outreach checklist gates on these rows; the handoff package
   // carries the latest basis to the Delivery Factory.
-  if (pathname === "/api/v1/consent" && request.method === "GET") {
-    const url = new URL(request.url);
-    const organizationId = url.searchParams.get("organizationId");
-    const opportunityId = url.searchParams.get("opportunityId");
-    let query = client
-      .from("consent_records")
-      .select("*")
-      .eq("workspace_id", workspaceId)
-      .order("recorded_at", { ascending: false })
-      .limit(200);
-    if (organizationId) query = query.eq("organization_id", organizationId);
-    if (opportunityId) query = query.eq("opportunity_id", opportunityId);
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
-    return json({ data });
-  }
   if (pathname === "/api/v1/consent" && request.method === "POST") {
     requireRole(context, ["owner", "administrator", "analyst"]);
     const input = ConsentInputSchema.parse(await bodyJson(request));
@@ -2185,9 +1842,6 @@ async function authenticatedRoutes(
   // is visible before the first qualified lead ever appears.
   if (pathname === "/api/v1/funnel" && request.method === "GET") {
     const url = new URL(request.url);
-    const mode = z
-      .enum(["demo", "pilot", "production"])
-      .parse(url.searchParams.get("mode") ?? "pilot");
     const windowDays = Math.min(
       365,
       Math.max(1, Number(url.searchParams.get("windowDays")) || 30),
@@ -2197,28 +1851,28 @@ async function authenticatedRoutes(
       .from("source_definitions")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .eq("data_mode", mode)
+      .eq("data_mode", "production")
       .eq("status", "active");
     if (sourcesError) throw new Error(sourcesError.message);
     const { count: candidatesEvaluated, error: evaluatedError } = await client
       .from("discovery_candidates")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .eq("data_mode", mode)
+      .eq("data_mode", "production")
       .gte("last_seen_at", since);
     if (evaluatedError) throw new Error(evaluatedError.message);
     const { count: scored, error: scoredError } = await client
       .from("maturity_assessments")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .eq("data_mode", mode)
+      .eq("data_mode", "production")
       .gte("evaluated_at", since);
     if (scoredError) throw new Error(scoredError.message);
     const { count: qualified, error: qualifiedError } = await client
       .from("maturity_assessments")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
-      .eq("data_mode", mode)
+      .eq("data_mode", "production")
       .gte("evaluated_at", since)
       .eq("qualified", true);
     if (qualifiedError) throw new Error(qualifiedError.message);
@@ -2233,16 +1887,6 @@ async function authenticatedRoutes(
     });
   }
 
-  if (pathname === "/api/v1/audit-events" && request.method === "GET") {
-    const { data, error } = await client
-      .from("audit_events")
-      .select("*")
-      .eq("workspace_id", workspaceId)
-      .order("created_at", { ascending: false })
-      .limit(500);
-    if (error) throw new Error(error.message);
-    return json({ data });
-  }
   if (pathname === "/api/v1/operations" && request.method === "GET") {
     return json({
       data: await operationalSnapshot(createAdminClient(), workspaceId),
@@ -2274,7 +1918,7 @@ async function authenticatedRoutes(
     // its policy governs the scrape jobs enqueued from discovered websites.
     const { data: linked, error: linkedError } = await client
       .from("source_definitions")
-      .select("id,status,data_mode,active_policy_id")
+      .select("id,status,active_policy_id")
       .eq("workspace_id", workspaceId)
       .eq("id", input.sourceId)
       .maybeSingle();
@@ -2283,13 +1927,6 @@ async function authenticatedRoutes(
       throw Object.assign(new Error("Collection source not found"), {
         statusCode: 404,
       });
-    if (linked.data_mode !== input.dataMode)
-      throw Object.assign(
-        new Error(
-          "Discovery source and collection source must use the same data mode",
-        ),
-        { statusCode: 409 },
-      );
     if (linked.status !== "active" || !linked.active_policy_id)
       throw Object.assign(
         new Error("Collection source must have an approved active policy"),
@@ -2334,7 +1971,8 @@ async function authenticatedRoutes(
         adapter_id: input.adapterId,
         geo_params: resolvedGeo,
         adapter_config: adapterConfig,
-        data_mode: input.dataMode,
+        // Data modes were collapsed in v4: new rows are stamped production.
+        data_mode: "production",
         source_id: input.sourceId,
         campaign_id: input.campaignId ?? null,
         active: true,
@@ -2358,15 +1996,10 @@ async function authenticatedRoutes(
     return json({ data });
   }
   if (pathname === "/api/v1/discovery/candidates" && request.method === "GET") {
-    const url = new URL(request.url);
-    const mode = z
-      .enum(["demo", "pilot", "production"])
-      .parse(url.searchParams.get("mode") ?? "pilot");
     const { data, error } = await client
       .from("discovery_candidates")
       .select("*")
       .eq("workspace_id", workspaceId)
-      .eq("data_mode", mode)
       .order("last_seen_at", { ascending: false })
       .limit(500);
     if (error) throw new Error(error.message);
@@ -2403,13 +2036,9 @@ async function authenticatedRoutes(
       .eq("id", candidate.discovery_source_id)
       .single();
     if (discoveryError) throw new Error(discoveryError.message);
-    if (discoverySource.data_mode !== candidate.data_mode)
-      throw Object.assign(
-        new Error("Candidate data mode does not match its source"),
-        {
-          statusCode: 409,
-        },
-      );
+    // v4 collapsed the data modes: the candidate keeps its own stamp in
+    // the idempotency key (dedupe identity), and no mode-match rule
+    // remains between a candidate and its source.
     const normalizedTarget = normalizeWebsiteUrl(website);
     if (!normalizedTarget)
       throw Object.assign(new Error("Resolved website is invalid"), {
@@ -2456,6 +2085,18 @@ async function authenticatedRoutes(
           statusCode: 409,
         });
     }
+    // An adapter retired in a later release (e.g. toronto_open_data in
+    // v4) leaves persisted sources behind; fail with a clear 409 here
+    // instead of an "Unknown discovery adapter" error deep in the run
+    // (Codex P2 on PR #64). The v4 upgrade migration also deactivates
+    // those rows.
+    if (!DiscoveryAdapterIdSchema.safeParse(discoverySource.adapter_id).success)
+      throw Object.assign(
+        new Error(
+          `Discovery adapter '${discoverySource.adapter_id}' was retired in LE v4`,
+        ),
+        { statusCode: 409 },
+      );
     const requiredTerms = termsForAdapter(discoverySource.adapter_id);
     await requireTermsAcceptance(
       {
@@ -2486,12 +2127,24 @@ async function authenticatedRoutes(
         return (data as DiscoverySourceRow | null) ?? null;
       },
       createRun: async (discoverySourceId: string) => {
+        // Runs inherit their source's data_mode stamp: the column
+        // default is the legacy 'pilot', and the v4 production-only
+        // run history keys on this stamp (Codex P2 on PR #64).
+        const { data: sourceRow } = await client
+          .from("discovery_sources")
+          .select("data_mode")
+          .eq("workspace_id", workspaceId)
+          .eq("id", discoverySourceId)
+          .maybeSingle();
         const { data, error } = await client
           .from("discovery_runs")
           .insert({
             workspace_id: workspaceId,
             discovery_source_id: discoverySourceId,
             status: "running",
+            data_mode:
+              (sourceRow as { data_mode?: string } | null)?.data_mode ??
+              "production",
           })
           .select("id,started_at")
           .single();
@@ -2522,7 +2175,7 @@ async function authenticatedRoutes(
         externalId,
         identityKey,
       }) => {
-        const mode = source.data_mode ?? "pilot";
+        const mode = source.data_mode ?? "production";
         const { data: existing, error: existingError } = await client
           .from("discovery_candidates")
           .select("id,resolved_website,resolution_status")
@@ -2692,21 +2345,11 @@ export async function handleApiRequest(request: Request): Promise<Response> {
             status: workerFresh ? "ready" : "degraded",
             database: "ready",
             worker: workerFresh ? "ready" : "stale_or_missing",
-            canary: operations.canary,
             timestamp: new Date().toISOString(),
           },
           workerFresh ? 200 : 503,
         );
       }
-    } else if (pathname === "/api/health/canary" && request.method === "GET") {
-      const configuration = configurationStatus();
-      if (!configuration.configured)
-        response = json({ status: "not_configured" }, 503);
-      else
-        response = json({
-          status: "ok",
-          ...(await operationalSnapshot(createAdminClient())).canary,
-        });
     } else if (
       pathname === "/api/v1/worker/tick" &&
       (request.method === "GET" || request.method === "POST")
@@ -2723,29 +2366,13 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       pathname === "/api/v1/canary/run" &&
       (request.method === "GET" || request.method === "POST")
     ) {
+      // RETIRED in LE v4 (canary subsystem cut). One-release stub: the
+      // raphah-lead-canary-v1 QStash schedule still exists until the user
+      // pauses it in the Upstash console, and a 404 would record false
+      // delivery failures. Remove this stub next release.
       await requireScheduler(request);
       const admin = createAdminClient();
-      response = json({ data: await enqueueCanary(admin) }, 202);
-      await recordQstashSuccess(
-        admin as unknown as AlertSqlClient,
-        schedulerWorkspaceId(),
-        await schedulerName(request),
-      );
-    } else if (
-      pathname === "/api/v1/discovery/scheduled-run" &&
-      (request.method === "GET" || request.method === "POST")
-    ) {
-      // Daily QStash schedule (audit fix 1): each active discovery source
-      // runs at most once per 24h. Scheduler-signed like the worker tick.
-      await requireScheduler(request);
-      const admin = createAdminClient();
-      response = json({
-        data: await runScheduledDiscovery(
-          admin as unknown as Parameters<
-            typeof runScheduledDiscovery
-          >[0],
-        ),
-      });
+      response = json({ data: { retired: true } });
       await recordQstashSuccess(
         admin as unknown as AlertSqlClient,
         schedulerWorkspaceId(),
@@ -2767,15 +2394,13 @@ export async function handleApiRequest(request: Request): Promise<Response> {
       pathname === "/api/v1/operations/evaluate" &&
       (request.method === "GET" || request.method === "POST")
     ) {
+      // RETIRED in LE v4: the alert/incident reconcile moved into the
+      // worker tick (runWorkerTick calls checkOperationalAlerts). One-
+      // release stub for the raphah-lead-monitor-v1 QStash schedule, same
+      // rule as /api/v1/canary/run above. Remove next release.
       await requireScheduler(request);
       const admin = createAdminClient();
-      response = json({
-        data: {
-          transitions: await checkOperationalAlerts(
-            admin as unknown as AlertSqlClient,
-          ),
-        },
-      });
+      response = json({ data: { retired: true } });
       await recordQstashSuccess(
         admin as unknown as AlertSqlClient,
         schedulerWorkspaceId(),

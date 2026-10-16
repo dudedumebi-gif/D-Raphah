@@ -39,13 +39,13 @@ function sampleLead(overrides: Record<string, unknown> = {}) {
 }
 
 describe("parseExportFormat", () => {
-  it("accepts csv and json", () => {
+  it("accepts csv, defaulting when the parameter is absent", () => {
     expect(parseExportFormat("csv")).toBe("csv");
-    expect(parseExportFormat("json")).toBe("json");
+    expect(parseExportFormat(null)).toBe("csv");
   });
 
-  it("rejects anything else with a 400", () => {
-    for (const raw of [null, "", "xml", "CSV"]) {
+  it("rejects anything else with a 400 (JSON export retired in v4)", () => {
+    for (const raw of ["json", "", "xml", "CSV"]) {
       try {
         parseExportFormat(raw);
         expect.unreachable(`expected 400 for ${String(raw)}`);
@@ -60,9 +60,6 @@ describe("exportFilename", () => {
   it("produces a dated attachment filename", () => {
     expect(exportFilename("csv", new Date("2026-09-24T05:00:00Z"))).toBe(
       "leads-export-2026-09-24.csv",
-    );
-    expect(exportFilename("json", new Date("2026-09-24T05:00:00Z"))).toBe(
-      "leads-export-2026-09-24.json",
     );
   });
 });
@@ -118,10 +115,10 @@ describe("mapExportLeadRow", () => {
 
 describe("serializeLeadsExport", () => {
   it("csv: header row plus one escaped row per lead", () => {
-    const body = serializeLeadsExport(
-      [sampleLead(), sampleLead({ id: "lead-2" })],
-      "csv",
-    );
+    const body = serializeLeadsExport([
+      sampleLead(),
+      sampleLead({ id: "lead-2" }),
+    ]);
     const lines = body.split("\r\n").filter(Boolean);
     expect(lines).toHaveLength(3);
     expect(lines[0]).toBe(LEAD_EXPORT_COLUMNS.join(","));
@@ -131,32 +128,23 @@ describe("serializeLeadsExport", () => {
   });
 
   it("csv: empty lead set still emits the header", () => {
-    const body = serializeLeadsExport([], "csv");
+    const body = serializeLeadsExport([]);
     expect(body.trim()).toBe(LEAD_EXPORT_COLUMNS.join(","));
-  });
-
-  it("json: array of lead objects", () => {
-    const body = serializeLeadsExport([sampleLead()], "json");
-    const parsed = JSON.parse(body);
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0].lead_id).toBe("lead-1");
-    expect(parsed[0].organization_name).toBe('Acme "Best" Plumbing, Inc.');
   });
 });
 
-describe("export/apply route registration", () => {
+describe("export route registration", () => {
   const source = readFileSync(join(root, "api/_lib/router.ts"), "utf8");
 
   it("registers the export endpoint", () => {
     expect(source).toContain('"/api/v1/leads/export"');
   });
 
-  it("registers the apply-suggestion and auto-apply endpoints", () => {
-    expect(source).toContain("/apply-suggestion");
-    expect(source).toContain("/auto-apply");
-    expect(source).toContain("criteria.suggestion_applied");
-    expect(source).toContain("criteria.auto_apply_changed");
+  it("no longer registers the retired suggestion endpoints (v4)", () => {
+    expect(source).not.toContain("/apply-suggestion");
+    expect(source).not.toContain("/auto-apply");
+    expect(source).not.toContain("criteria.suggestion_applied");
+    expect(source).not.toContain("criteria.auto_apply_changed");
   });
 
   it("writes audit entries through the RPC, not direct table writes", () => {

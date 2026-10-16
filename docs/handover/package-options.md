@@ -20,29 +20,38 @@ migrations, QStash schedules already specified. Fastest path to "live tomorrow".
 the exit ramp).
 **Best for:** the current launch — the system is already live on this stack.
 
-## Option B — Google Cloud Run (recommended portable target)
+## Option B — Google Cloud Run (portable target, Delivery Factory only)
 
-**What the client gets:** two container images + their Cloud SQL (Postgres)
-instances, or one project with two databases.
+**What the client gets:** the Delivery Factory container image + its Cloud
+SQL (Postgres) instance. The Lead Engine is **not** part of this option:
+its container runtime (`apps/leads-engine/Dockerfile` + `server/adapter.ts`)
+was retired in LE v4 (2026-10-15) as unused — the Lead Engine runs on
+Vercel + Neon (Option A), and a portable Lead Engine target would first
+need that runtime rebuilt.
 
-- `apps/leads-engine/Dockerfile` and `apps/delivery-factory/Dockerfile`
-  build self-contained images; `server/adapter.ts` runs the exact same `api/`
-  handlers as Vercel, so behavior is identical.
-- Deploy: `gcloud run deploy leads-engine --source apps/leads-engine` (and
-  delivery-factory), Cloud SQL Postgres x2, Secret Manager for key material.
-- Scheduler: Cloud Scheduler → `POST /api/v1/worker/tick` (replaces QStash).
+- `apps/delivery-factory/Dockerfile` builds a self-contained image; its
+  `server/adapter.ts` runs the exact same `api/` handlers as Vercel, so
+  behavior is identical.
+- Deploy: `gcloud run deploy delivery-factory --source apps/delivery-factory`,
+  Cloud SQL Postgres, Secret Manager for key material.
+- The Lead Engine stays on Option A and keeps posting handoffs to the
+  Delivery Factory's public intake URL.
 
-**Pros:** client-owned GCP project, portable, predictable pricing, no
-Vercel/Neon lock-in; the Dockerfiles are already in the repo.
-**Cons:** client needs basic GCP ops (or a managed-services partner).
-**Best for:** clients with a GCP footprint or data-residency requirements.
+**Pros:** client-owned GCP project for the delivery side, portable,
+predictable pricing.
+**Cons:** split operations (DF on GCP, LE managed); client needs basic GCP
+ops (or a managed-services partner).
+**Best for:** clients with a GCP footprint or data-residency requirements
+for the delivery workload.
 
 ## Option C — Self-hosted single VM / on-prem
 
 **What the client gets:** `deploy/docker-compose.yml` + `deploy/.env.example`.
 
-- One `docker compose up --build -d` runs both services and both Postgres
-  databases with separate volumes, credentials, and healthchecks.
+- One `docker compose up --build -d` runs the Delivery Factory and its
+  Postgres database (separate volume, credentials, and healthcheck). The
+  Lead Engine is not in the stack since LE v4 — it runs on Vercel + Neon
+  and posts handoffs to the factory's intake URL.
 - Handover = the compose file, the `.env` template, and the runbook.
 
 **Pros:** simplest possible handover; works air-gapped; fixed cost (one VM).
@@ -60,18 +69,19 @@ choose the target.
 
 1. **Now (go-live): Option A.** It is already deployed and validated; hand over
    the Vercel/Neon projects with the env checklist and runbooks.
-2. **In parallel: keep Option B warm.** The Dockerfiles and adapter exist and
-   are cheap to maintain — every deploy to Vercel also `docker build`s in CI
-   to prove the images stay working. When the client is ready, the move to
-   Cloud Run is a redeploy, not a rewrite.
-3. **Demos/pilots: Option C** for a one-command local stack.
+2. **Portable target: Option B covers the Delivery Factory.** The Lead
+   Engine's container runtime was retired in LE v4; if a client needs the
+   Lead Engine off Vercel/Neon, that runtime must be rebuilt first — it is
+   a project, not a redeploy.
+3. **Demos/pilots: Option C** for a one-command local Delivery Factory stack
+   against the managed Lead Engine.
 
 ## Handover checklist (all options)
 
 - [ ] Fresh Ed25519 handoff + feedback keypairs generated for the client's environment
 - [ ] Database passwords rotated; connection strings in the client's secret store only
-- [ ] QStash token / Cloud Scheduler configured (3 schedules: worker tick, canary, feedback dispatch)
+- [ ] QStash token configured (Lead Engine worker tick + Delivery Factory feedback dispatch schedules)
 - [ ] `docs/handover/env-checklist.md` filled and signed off
-- [ ] 72-hour canary observed green on the client's instance
+- [ ] Worker tick delivering and `/api/health/ready` green on the client's instance
 - [ ] Runbooks walked through with the client's operator (`docs/runbooks/`)
 - [ ] Backup/restore drill completed against the client's database
