@@ -130,6 +130,26 @@ describe("operational evaluator", () => {
     expect(await checkOperationalAlerts(client, now)).toBe(3);
   });
 
+  it("does not open a stale incident when no heartbeat was ever recorded", async () => {
+    process.env = { ...OLD_ENV, SLACK_ALERTS_ENABLED: "false" };
+    const now = new Date("2026-10-08T12:00:00Z");
+    const client = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join("?").toLowerCase();
+      if (sql.includes("select id from public.workspaces")) return [{ id: WS }];
+      if (sql.includes("from public.worker_nodes")) return [];
+      if (sql.includes("from public.scrape_jobs sj")) return [];
+      if (sql.includes("percentile_cont")) return [];
+      if (sql.includes("insert into public.alert_log"))
+        return [{ alert_id: "alert", transition: "opened" }];
+      if (sql.includes("update public.alert_log")) return [];
+      if (sql.includes("insert into public.audit_events")) return [];
+      throw new Error(`unexpected query: ${sql.slice(0, 100)}`);
+    }) as AlertSqlClient;
+    // Bootstrap state: the evaluating tick registers the first heartbeat
+    // itself, so "no worker row" must not raise a critical incident.
+    expect(await checkOperationalAlerts(client, now)).toBe(0);
+  });
+
   it("records a signed QStash final-delivery failure", async () => {
     process.env = { ...OLD_ENV, SLACK_ALERTS_ENABLED: "false" };
     const { client, queries } = clientForTransition("opened");

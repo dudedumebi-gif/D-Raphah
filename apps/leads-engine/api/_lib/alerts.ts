@@ -287,7 +287,12 @@ export async function checkOperationalAlerts(
       severity: "critical",
       resourceType: "worker_nodes",
       resourceId: `${workspace.id}:worker-heartbeat`,
-      active: ageMs > STALE_AFTER_MS,
+      // No heartbeat EVER recorded is a bootstrap state, not an outage:
+      // the tick evaluating this is about to register the first one, and
+      // opening a critical incident for it would be a false alert
+      // (Codex P2 on PR #64). A recorded heartbeat that goes stale is
+      // the real incident.
+      active: latestWorker !== undefined && ageMs > STALE_AFTER_MS,
       reason: latestWorker
         ? `Latest worker heartbeat is ${Math.round(ageMs/60_000)} minutes old`
         : "No worker heartbeat is registered",
